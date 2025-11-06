@@ -5,6 +5,12 @@ import struct
 import os
 import pufferlib
 from pufferlib.ocean.drive import binding
+import torch
+import sys
+import psutil
+import torch
+import sys
+import psutil
 
 
 class Drive(pufferlib.PufferEnv):
@@ -33,9 +39,31 @@ class Drive(pufferlib.PufferEnv):
         deterministic_agent_selection=False,
         use_goal_generation=False,
         control_non_vehicles=False,
+        condition_type="none",
+        collision_weight_lb=-0.5,
+        collision_weight_ub=-0.5,
+        offroad_weight_lb=-0.2,
+        offroad_weight_ub=-0.2,
+        goal_weight_lb=1.0,
+        goal_weight_ub=1.0,
+        entropy_weight_lb=0.001,
+        entropy_weight_ub=0.001,
+        discount_weight_lb=0.98,
+        discount_weight_ub=0.98,
         buf=None,
+        ini_file="pufferlib/config/ocean/drive.ini",
         seed=1,
+        population_play=False,
+        co_player_policy_path=None,
+        co_player_policy_name=None,
+        co_player_policy=None,
+        co_player_rnn_name=None,
+        co_player_rnn=None,
+        co_player_condition_type=None,
+        num_ego_agents=512,
         init_steps=0,
+        k_scenarios=0,
+        adaptive_driving_agent=False,
     ):
         # env
         self.dt = dt
@@ -53,24 +81,55 @@ class Drive(pufferlib.PufferEnv):
         self.control_non_vehicles = control_non_vehicles
         self.use_goal_generation = use_goal_generation
         self.resample_frequency = resample_frequency
+        self.ini_file = ini_file
+
+        # Conditioning setup
+        self.condition_type = condition_type
+        self.reward_conditioned = condition_type in ("reward", "all")
+        self.entropy_conditioned = condition_type in ("entropy", "all")
+        self.discount_conditioned = condition_type in ("discount", "all")
+
+        self.collision_weight_lb = collision_weight_lb if self.reward_conditioned else reward_vehicle_collision
+        self.collision_weight_ub = collision_weight_ub if self.reward_conditioned else reward_vehicle_collision
+        self.offroad_weight_lb = offroad_weight_lb if self.reward_conditioned else reward_offroad_collision
+        self.offroad_weight_ub = offroad_weight_ub if self.reward_conditioned else reward_offroad_collision
+        self.goal_weight_lb = goal_weight_lb if self.reward_conditioned else 1.0
+        self.goal_weight_ub = goal_weight_ub if self.reward_conditioned else 1.0
+        self.entropy_weight_lb = entropy_weight_lb
+        self.entropy_weight_ub = entropy_weight_ub
+        self.discount_weight_lb = discount_weight_lb
+        self.discount_weight_ub = discount_weight_ub
+
+        conditioning_dims = (
+            (3 if self.reward_conditioned else 0)
+            + (1 if self.entropy_conditioned else 0)
+            + (1 if self.discount_conditioned else 0)
+        )
         self.dynamics_model = dynamics_model
 
         # Observation space calculation
-        if dynamics_model == "classic":
-            ego_features = 7
-        elif dynamics_model == "jerk":
-            ego_features = 10
-        else:
-            raise ValueError(f"dynamics_model must be 'classic' or 'jerk'. Got: {dynamics_model}")
+        base_ego_dim = 10 if self.dynamics_model == "jerk" else 7
 
-        self.ego_features = ego_features
         partner_features = 7
         road_features = 7
         max_partner_objects = 63
         max_road_objects = 200
-        self.num_obs = ego_features + max_partner_objects * partner_features + max_road_objects * road_features
+        self.num_obs = (
+            base_ego_dim + conditioning_dims + max_partner_objects * partner_features + max_road_objects * road_features
+        )
+        self.num_ego_agents = num_ego_agents
+        self.ini_file = ini_file
+        
 
         self.single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(self.num_obs,), dtype=np.float32)
+        self.population_play = population_play
+        self.num_agents_const = num_agents
+
+        # Action space setup
+        self.num_ego_agents = num_ego_agents
+
+
+        self.num_agents_const = num_agents
         self.init_steps = init_steps
 
         # Action space depends on both action_type and dynamics_model
@@ -88,7 +147,7 @@ class Drive(pufferlib.PufferEnv):
 
         self._action_type_flag = 0 if action_type == "discrete" else 1
 
-        # Check if resources directory exists
+        # Check resources
         binary_path = "resources/drive/binaries/map_000.bin"
         if not os.path.exists(binary_path):
             raise FileNotFoundError(
@@ -101,22 +160,126 @@ class Drive(pufferlib.PufferEnv):
             raise ValueError(
                 f"num_maps ({num_maps}) exceeds available maps in directory ({available_maps}). Please reduce num_maps or add more maps to resources/drive/binaries."
             )
+        if population_play:
+            if num_ego_agents > num_agents:
+                raise ValueError(
+                    f"num ego agents ({num_ego_agents}) exceeds the number of total agents ({num_agents}))"
+                )
+
+        self.num_ego_agents = num_ego_agents
+        self.condition_type = condition_type
+        self.reward_conditioned = condition_type in ("reward", "all")
+        self.entropy_conditioned = condition_type in ("entropy", "all")
+        self.discount_conditioned = condition_type in ("discount", "all")
+
+        self.co_player_condition_type = co_player_condition_type
+        self.co_player_reward_conditioned = co_player_condition_type in ("reward", "all")
+        self.co_player_entropy_conditioned = co_player_condition_type in ("entropy", "all")
+        self.co_player_discount_conditioned = co_player_condition_type in ("discount", "all")
+
+        self.collision_weight_lb = collision_weight_lb if self.reward_conditioned else reward_vehicle_collision
+        self.collision_weight_ub = collision_weight_ub if self.reward_conditioned else reward_vehicle_collision
+        self.offroad_weight_lb = offroad_weight_lb if self.reward_conditioned else reward_offroad_collision
+        self.offroad_weight_ub = offroad_weight_ub if self.reward_conditioned else reward_offroad_collision
+        self.goal_weight_lb = goal_weight_lb if self.reward_conditioned else 1.0
+        self.goal_weight_ub = goal_weight_ub if self.reward_conditioned else 1.0
+        self.entropy_weight_lb = entropy_weight_lb
+        self.entropy_weight_ub = entropy_weight_ub
+        self.discount_weight_lb = discount_weight_lb
+        self.discount_weight_ub = discount_weight_ub
+
         self.control_all_agents = bool(control_all_agents)
         self.num_policy_controlled_agents = int(num_policy_controlled_agents)
         self.deterministic_agent_selection = bool(deterministic_agent_selection)
+        self.condition_type = condition_type
 
-        agent_offsets, map_ids, num_envs = binding.shared(
+        self.adaptive_driving_agent = int(adaptive_driving_agent)
+        self.k_scenarios = int(k_scenarios)
+
+        my_shared_tuple = binding.shared(
             num_agents=num_agents,
             num_maps=num_maps,
             num_policy_controlled_agents=self.num_policy_controlled_agents,
             control_all_agents=1 if self.control_all_agents else 0,
             deterministic_agent_selection=1 if self.deterministic_agent_selection else 0,
+            population_play=population_play,
+            num_ego_agents=self.num_ego_agents,
         )
-        self.num_agents = num_agents
-        self.agent_offsets = agent_offsets
-        self.map_ids = map_ids
-        self.num_envs = num_envs
+
+        if self.population_play:
+            agent_offsets, map_ids, num_envs, ego_ids, co_player_ids = my_shared_tuple
+
+            self.num_envs = num_envs
+
+            self.ego_ids = [item for sublist in ego_ids for item in sublist]
+            self.co_player_ids = [item for sublist in co_player_ids for item in sublist]
+
+            all_agents = set(range(num_agents))
+            ego_set = set(self.ego_ids)
+            co_player_set = set(self.co_player_ids)
+
+            if ego_set & co_player_set:
+                raise ValueError("Overlap between ego ids and co player ids")
+
+            if ego_set | co_player_set != all_agents:
+                raise ValueError("Missing agent ids")
+
+            self.num_ego_agents = len(self.ego_ids)
+            self.num_co_players = len(self.co_player_ids)
+
+            self.total_agents = self.num_co_players + self.num_ego_agents
+            self.num_agents = self.total_agents
+
+            self.co_player_policy_name = co_player_policy_name
+            self.co_player_rnn_name = co_player_rnn_name
+            self.co_player_policy = co_player_policy
+            self.set_co_player_state()
+
+            if self.co_player_condition_type is not None and self.co_player_condition_type != "none":
+                self._set_co_player_conditioning()
+
+            # Build per-environment ID lists
+            local_ego_ids = []
+            for i in range(num_envs):
+                if len(ego_ids[i]) > 0:
+                    min_id_in_world = min(ego_ids[i] + co_player_ids[i])
+                    local_ego_ids.append([eid - min_id_in_world for eid in ego_ids[i]])
+                else:
+                    min_id_in_world = min(co_player_ids[i])
+                    local_ego_ids.append([])
+
+            local_co_player_ids = []
+            for i in range(num_envs):
+                if len(ego_ids[i]) > 0:
+                    min_id_in_world = min(ego_ids[i] + co_player_ids[i])
+                else:
+                    min_id_in_world = min(co_player_ids[i])
+                local_co_player_ids.append([cid - min_id_in_world for cid in co_player_ids[i]])
+
+            self.local_co_player_ids = local_co_player_ids
+            self.local_ego_ids = local_ego_ids
+
+        else:
+            agent_offsets, map_ids, num_envs = my_shared_tuple
+            self.num_agents = self.num_agents_const
+            self.ego_ids = [i for i in range(agent_offsets[-1])]
+            local_co_player_ids = [[] for i in range(num_envs)]
+            local_ego_ids = [[0] for i in range(num_envs)]
+
+        self.control_all_agents = bool(control_all_agents)
+        self.num_policy_controlled_agents = int(num_policy_controlled_agents)
+        self.deterministic_agent_selection = bool(deterministic_agent_selection)
+
         super().__init__(buf=buf)
+        if self.population_play:
+            self.action_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_ego_agents)
+            co_player_atn_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_co_players)
+            if isinstance(self.single_action_space, pufferlib.spaces.Box):
+                self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=co_player_atn_space.dtype)
+            else:
+                self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=np.int32)
+
+        # Create environments
         env_ids = []
         for i in range(num_envs):
             cur = agent_offsets[i]
@@ -130,6 +293,7 @@ class Drive(pufferlib.PufferEnv):
                 seed,
                 action_type=self._action_type_flag,
                 human_agent_idx=human_agent_idx,
+                dynamics_model=dynamics_model,
                 reward_vehicle_collision=reward_vehicle_collision,
                 reward_offroad_collision=reward_offroad_collision,
                 reward_goal=reward_goal,
@@ -143,47 +307,207 @@ class Drive(pufferlib.PufferEnv):
                 deterministic_agent_selection=1 if self.deterministic_agent_selection else 0,
                 map_id=map_ids[i],
                 max_agents=nxt - cur,
-                ini_file="pufferlib/config/ocean/drive.ini",
+                population_play=self.population_play,
+                num_co_players=len(local_co_player_ids[i]),
+                co_player_ids=local_co_player_ids[i],
+                ego_agent_ids=local_ego_ids[i],
+                num_ego_agents=len(local_ego_ids[i]),
+                ini_file=self.ini_file,
                 control_non_vehicles=int(control_non_vehicles),
                 init_steps=init_steps,
+                use_rc=self.reward_conditioned,
+                use_ec=self.entropy_conditioned,
+                use_dc=self.discount_conditioned,
+                collision_weight_lb=self.collision_weight_lb,
+                collision_weight_ub=self.collision_weight_ub,
+                offroad_weight_lb=self.offroad_weight_lb,
+                offroad_weight_ub=self.offroad_weight_ub,
+                goal_weight_lb=self.goal_weight_lb,
+                goal_weight_ub=self.goal_weight_ub,
+                entropy_weight_lb=self.entropy_weight_lb,
+                entropy_weight_ub=self.entropy_weight_ub,
+                discount_weight_lb=self.discount_weight_lb,
+                discount_weight_ub=self.discount_weight_ub,
+                adaptive_driving=self.adaptive_driving_agent,
+                k_scenarios=self.k_scenarios,
             )
             env_ids.append(env_id)
 
         self.c_envs = binding.vectorize(*env_ids)
 
+    def get_co_player_actions(self):
+        with torch.no_grad():
+            co_player_obs = self.observations[self.co_player_ids]
+
+            # Add conditioning to co-player observations if needed
+            if self.co_player_condition_type != "none":
+                co_player_obs = self._add_co_player_conditioning(co_player_obs)
+
+            co_player_obs = torch.as_tensor(co_player_obs)
+            logits, value = self.co_player_policy.forward_eval(co_player_obs, self.state)
+            co_player_action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+            co_player_action = co_player_action.cpu().numpy().reshape(self.co_player_actions.shape)
+        return co_player_action
+
+    def set_co_player_state(self): ## set in init (state doesnt get updated anywhere else)
+        self.state = dict(
+            lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
+            lstm_c=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
+        )
+
+    def reset_co_player_state(self, done_indices=None):
+        """Reset LSTM state for co-players whose episodes ended"""
+        if done_indices is None:
+            # Reset all
+            self.set_co_player_state()
+        else:
+            # Reset only specific co-players
+            device = self.state["lstm_h"].device
+            self.state["lstm_h"][done_indices] = 0
+            self.state["lstm_c"][done_indices] = 0
+
+    def _add_co_player_conditioning(self, observations):
+        """Add pre-sampled conditioning variables to co-player observations"""
+        if not (
+            self.co_player_reward_conditioned
+            or self.co_player_entropy_conditioned
+            or self.co_player_discount_conditioned
+        ):
+            return observations
+
+        conditioning_values = []
+        for i in range(self.num_envs):
+            num_co_players_in_env = len(self.local_co_player_ids[i])
+            if num_co_players_in_env == 0:
+                continue
+
+            for _ in range(num_co_players_in_env):
+                conditioning_values.append(self.env_conditioning[i])
+
+        conditioning_array = np.stack(conditioning_values, axis=0)
+
+        obs_with_conditioning = np.concatenate(
+            [
+                observations[:, :7],  # First 7 base observations
+                conditioning_array,  # Conditioning variables
+                observations[:, 7:],  # Rest of observations
+            ],
+            axis=1,
+        )
+
+        return obs_with_conditioning
+
+    def _set_co_player_conditioning(self):
+        """Sample and store conditioning values for each environment"""
+        self.env_conditioning = []
+
+        for i in range(self.num_envs):
+            env_cond = []
+
+            if self.co_player_reward_conditioned:
+                collision_weight = np.random.uniform(self.collision_weight_lb, self.collision_weight_ub)
+                offroad_weight = np.random.uniform(self.offroad_weight_lb, self.offroad_weight_ub)
+                goal_weight = np.random.uniform(self.goal_weight_lb, self.goal_weight_ub)
+                env_cond.extend([collision_weight, offroad_weight, goal_weight])
+
+            if self.co_player_entropy_conditioned:
+                entropy_weight = np.random.uniform(self.entropy_weight_lb, self.entropy_weight_ub)
+                env_cond.append(entropy_weight)
+
+            if self.co_player_discount_conditioned:
+                discount_weight = np.random.uniform(self.discount_weight_lb, self.discount_weight_ub)
+                env_cond.append(discount_weight)
+
+            self.env_conditioning.append(np.array(env_cond, dtype=np.float32))
+
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
+        info = []
+        if self.population_play:
+            info.append(self.ego_ids)
+            self.reset_co_player_state()
         self.tick = 0
-        return self.observations, []
+        return self.observations, info
 
     def step(self, actions):
         self.terminals[:] = 0
-        self.actions[:] = actions
-        binding.vec_step(self.c_envs)
         self.tick += 1
+
+        self.actions[self.ego_ids] = actions
+
+        if self.population_play:
+            co_player_actions = self.get_co_player_actions()
+            self.actions[self.co_player_ids] = co_player_actions
+
+        binding.vec_step(self.c_envs)
+
         info = []
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs)
             if log:
                 info.append(log)
-                # print(log)
+
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             will_resample = 1
             if will_resample:
                 binding.vec_close(self.c_envs)
-                agent_offsets, map_ids, num_envs = binding.shared(
+                my_shared_tuple = binding.shared(
                     num_agents=self.num_agents,
                     num_maps=self.num_maps,
                     num_policy_controlled_agents=self.num_policy_controlled_agents,
                     control_all_agents=1 if self.control_all_agents else 0,
                     deterministic_agent_selection=1 if self.deterministic_agent_selection else 0,
+                    population_play=self.population_play,
+                    num_ego_agents=self.num_ego_agents,
                 )
+                
+                if self.population_play:
+                    agent_offsets, map_ids, num_envs, ego_ids, co_player_ids = my_shared_tuple
+                    self.ego_ids = [item for sublist in ego_ids for item in sublist]
+                    self.co_player_ids = [item for sublist in co_player_ids for item in sublist]
+                    self.num_ego_agents = len(self.ego_ids)
+                    self.num_co_players = len(self.co_player_ids)
+
+                    self.num_envs = num_envs
+
+                    self.num_ego_agents = len(self.ego_ids)
+                    self.num_co_players = len(self.co_player_ids)
+                    self.num_agents = self.total_agents = self.num_co_players + self.num_ego_agents
+                    self.set_co_player_state()
+                    
+                    local_co_player_ids = []
+                    for i in range(num_envs):
+                        env_start = agent_offsets[i]
+                        env_end = agent_offsets[i + 1]
+                        local_co_player_ids.append(
+                            [cid - env_start for cid in co_player_ids[i] if env_start <= cid < env_end]
+                        )
+
+                    local_ego_ids = []
+                    for i in range(num_envs):
+                        env_start = agent_offsets[i]
+                        env_end = agent_offsets[i + 1]
+                        local_ego_ids.append([eid - env_start for eid in ego_ids[i] if env_start <= eid < env_end])
+
+                    self.local_co_player_ids = local_co_player_ids
+                    self.local_ego_ids = local_ego_ids
+                    if self.co_player_condition_type is not None and self.co_player_condition_type != "none":
+                        self._set_co_player_conditioning()
+                else:
+                    # Non-population play mode stays the same
+                    agent_offsets, map_ids, num_envs = my_shared_tuple
+                    self.num_agents = self.num_agents_const
+                    self.ego_ids = [i for i in range(agent_offsets[-1])]
+                    local_co_player_ids = [[] for i in range(num_envs)]
+                    local_ego_ids = [[0] for i in range(num_envs)]  # Single ego agent per env
+
                 env_ids = []
                 seed = np.random.randint(0, 2**32 - 1)
                 for i in range(num_envs):
                     cur = agent_offsets[i]
                     nxt = agent_offsets[i + 1]
+
                     env_id = binding.env_init(
                         self.observations[cur:nxt],
                         self.actions[cur:nxt],
@@ -191,8 +515,8 @@ class Drive(pufferlib.PufferEnv):
                         self.terminals[cur:nxt],
                         self.truncations[cur:nxt],
                         seed,
-                        action_type=self._action_type_flag,
                         human_agent_idx=self.human_agent_idx,
+                        dynamics_model=self.dynamics_model,
                         reward_vehicle_collision=self.reward_vehicle_collision,
                         reward_offroad_collision=self.reward_offroad_collision,
                         reward_goal=self.reward_goal,
@@ -205,16 +529,40 @@ class Drive(pufferlib.PufferEnv):
                         num_policy_controlled_agents=self.num_policy_controlled_agents,
                         deterministic_agent_selection=1 if self.deterministic_agent_selection else 0,
                         map_id=map_ids[i],
+                        use_rc=self.reward_conditioned,
+                        use_ec=self.entropy_conditioned,
+                        use_dc=self.discount_conditioned,
+                        collision_weight_lb=self.collision_weight_lb,
+                        collision_weight_ub=self.collision_weight_ub,
+                        offroad_weight_lb=self.offroad_weight_lb,
+                        offroad_weight_ub=self.offroad_weight_ub,
+                        goal_weight_lb=self.goal_weight_lb,
+                        goal_weight_ub=self.goal_weight_ub,
+                        entropy_weight_lb=self.entropy_weight_lb,
+                        entropy_weight_ub=self.entropy_weight_ub,
+                        discount_weight_lb=self.discount_weight_lb,
+                        discount_weight_ub=self.discount_weight_ub,
                         max_agents=nxt - cur,
-                        ini_file="pufferlib/config/ocean/drive.ini",
+                        population_play=self.population_play,
+                        num_co_players=len(local_co_player_ids[i]),
+                        co_player_ids=local_co_player_ids[i],
+                        ego_agent_ids=local_ego_ids[i],
+                        num_ego_agents=len(local_ego_ids[i]),
+                        ini_file=self.ini_file,
                         control_non_vehicles=int(self.control_non_vehicles),
                         init_steps=self.init_steps,
+                        adaptive_driving=self.adaptive_driving_agent,
+                        k_scenarios=self.k_scenarios,
                     )
+
                     env_ids.append(env_id)
+
                 self.c_envs = binding.vectorize(*env_ids)
 
                 binding.vec_reset(self.c_envs, seed)
                 self.terminals[:] = 1
+        if self.population_play:
+            info.append(self.ego_ids)  ## this is used to slice ego and co players correctly later on
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
     def render(self):
@@ -407,7 +755,7 @@ def process_all_maps():
     binary_dir.mkdir(parents=True, exist_ok=True)
 
     # Path to the training data
-    data_dir = Path("data/processed/training")
+    data_dir = Path("")
 
     # Get all JSON files in the training directory
     json_files = sorted(data_dir.glob("*.json"))
