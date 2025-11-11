@@ -71,28 +71,44 @@ class PuffeRL:
         # torch.manual_seed(seed)
 
         # Vecenv info
+        self.adaptive_driving_agent = getattr(vecenv.driver_env, "env_name", None) == "adaptive_driving_agent"
+        if self.adaptive_driving_agent:
+            config["bptt_horizon"] = vecenv.driver_env.episode_length
+
         vecenv.async_reset(seed)
         obs_space = vecenv.single_observation_space
         atn_space = vecenv.single_action_space
         total_agents = vecenv.num_agents
+        self.population_play = getattr(vecenv, "population_play", False)
+        if self.population_play:
+            total_ego_agents = vecenv.num_ego_agents
+            agents_for_calc = total_ego_agents
+            batch_size = vecenv.driver_env.num_ego_agents * config["bptt_horizon"] * vecenv.num_workers
+            config["batch_size"] = batch_size  ## this is dynamic and based on ego agents
+        else:
+            agents_for_calc = total_agents
+
+        # total_agents = vecenv.num_train_agents
         self.total_agents = total_agents
 
         # Experience
         if config["batch_size"] == "auto" and config["bptt_horizon"] == "auto":
             raise pufferlib.APIUsageError("Must specify batch_size or bptt_horizon")
         elif config["batch_size"] == "auto":
-            config["batch_size"] = total_agents * config["bptt_horizon"]
+            config["batch_size"] = agents_for_calc * config["bptt_horizon"]
         elif config["bptt_horizon"] == "auto":
-            config["bptt_horizon"] = config["batch_size"] // total_agents
+            config["bptt_horizon"] = config["batch_size"] // agents_for_calc
 
         batch_size = config["batch_size"]
         horizon = config["bptt_horizon"]
         segments = batch_size // horizon
         self.segments = segments
-        if total_agents > segments:
-            raise pufferlib.APIUsageError(f"Total agents {total_agents} <= segments {segments}")
+        if not self.population_play:
+            if total_agents > segments:
+                raise pufferlib.APIUsageError(f"Total agents {total_agents} <= segments {segments}")
 
         device = config["device"]
+        print(f"DEBUG: segments: {segments}, horizon: {horizon}", flush = True)
         self.observations = torch.zeros(
             segments,
             horizon,
@@ -116,7 +132,10 @@ class PuffeRL:
         self.ratio = torch.ones(segments, horizon, device=device)
         self.importance = torch.ones(segments, horizon, device=device)
         self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
-        self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
+        if self.population_play:
+            self.ep_indices = torch.arange(total_ego_agents, device=device, dtype=torch.int32)
+        else:
+            self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.free_idx = total_agents
         self.render = config["render"]
         self.render_interval = config["render_interval"]
@@ -126,15 +145,29 @@ class PuffeRL:
 
         # LSTM
         if config["use_rnn"]:
-            n = vecenv.agents_per_batch
             h = policy.hidden_size
-            self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
-            self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
+            if getattr(vecenv.driver_env, "population_play", False):
+                n = vecenv.ego_agents_per_batch  # Use ego agents per batch
+                num_chunks = total_ego_agents // n
+                self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(num_chunks)}
+                self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(num_chunks)}
+            else:
+                n = vecenv.agents_per_batch
+                self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
+                self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
 
         # Minibatching & gradient accumulation
-        minibatch_size = config["minibatch_size"]
+        if self.adaptive_driving_agent:
+            minibatch_size = config["minibatch_multiplier"] * horizon
+            self.minibatch_size = minibatch_size
+        else:
+            minibatch_size = config["minibatch_size"]
+
         max_minibatch_size = config["max_minibatch_size"]
         self.minibatch_size = min(minibatch_size, max_minibatch_size)
+
+        
+
         if minibatch_size > max_minibatch_size and minibatch_size % max_minibatch_size != 0:
             raise pufferlib.APIUsageError(
                 f"minibatch_size {minibatch_size} > max_minibatch_size {max_minibatch_size} must divide evenly"
@@ -186,11 +219,22 @@ class PuffeRL:
             raise ValueError(f"Unknown optimizer: {config['optimizer']}")
 
         self.optimizer = optimizer
-
         # Logging
         self.logger = logger
         if logger is None:
             self.logger = NoLogger(config)
+
+        if self.population_play:
+            co_player_path = f"resources/drive/{config['env']}_co_player.bin"
+            export_args = {"env_name": config["env"], "path": co_player_path, **config}
+            export(
+                args=export_args,
+                env_name=config["env"],
+                vecenv=vecenv,
+                policy=vecenv.driver_env.co_player_policy,
+                path=co_player_path,
+                silent=True,
+            )
 
         # Learning rate scheduler
         epochs = config["total_timesteps"] // config["batch_size"]
@@ -218,7 +262,6 @@ class PuffeRL:
         self.stats = defaultdict(list)
         self.last_stats = defaultdict(list)
         self.losses = {}
-
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
@@ -252,15 +295,39 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            if self.population_play:
+                batch_size = self.vecenv.batch_size
+                ego_ids = info[-1]
+
+                if batch_size > 1:
+                    total_agents = len(o)
+                    num_agents_per_env = total_agents // batch_size
+
+                    original_shape = o.shape
+
+                    o = o.reshape(batch_size, num_agents_per_env, *original_shape[1:])
+                    r = r.reshape(batch_size, num_agents_per_env)
+                    d = d.reshape(batch_size, num_agents_per_env)
+                    t = t.reshape(batch_size, num_agents_per_env)
+
+                    o = o[:, ego_ids].reshape(batch_size * len(ego_ids), *original_shape[1:])
+                    r = r[:, ego_ids].flatten()
+                    d = d[:, ego_ids].flatten()
+                    t = t[:, ego_ids].flatten()
+                else:
+                    o = o[ego_ids]
+                    r = r[ego_ids]
+                    d = d[ego_ids]
+                    t = t[ego_ids]
 
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
-
             done_mask = d + t  # TODO: Handle truncations separately
             self.global_step += int(mask.sum())
 
             profile("eval_copy", epoch)
             o = torch.as_tensor(o)
+
             o_device = o.to(device)  # , non_blocking=True)
             r = torch.as_tensor(r).to(device)  # , non_blocking=True)
             d = torch.as_tensor(d).to(device)  # , non_blocking=True)
@@ -280,13 +347,22 @@ class PuffeRL:
 
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+
                 r = torch.clamp(r, -1, 1)
 
             profile("eval_copy", epoch)
             with torch.no_grad():
                 if config["use_rnn"]:
-                    self.lstm_h[env_id.start] = state["lstm_h"]
-                    self.lstm_c[env_id.start] = state["lstm_c"]
+                    # Use the same lstm_key calculation
+                    if self.population_play:
+                        batch_size = self.vecenv.ego_agents_per_batch
+                    else:
+                        batch_size = self.vecenv.agents_per_batch
+
+                    lstm_key = (env_id.start // batch_size) * batch_size
+
+                    self.lstm_h[lstm_key] = state["lstm_h"]
+                    self.lstm_c[lstm_key] = state["lstm_c"]
 
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
@@ -327,6 +403,7 @@ class PuffeRL:
                         self.stats[k].append(v)
 
             profile("env", epoch)
+
             self.vecenv.send(action)
 
         profile("eval_misc", epoch)
@@ -533,6 +610,7 @@ class PuffeRL:
             self.msg = f"Checkpoint saved at update {self.epoch}"
 
         if self.render and self.epoch % self.render_interval == 0:
+            print("Attempting render", flush=True)
             run_id = self.logger.run_id
             model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{run_id}")
 
@@ -587,6 +665,8 @@ class PuffeRL:
                             cmd.append("--lasers")
                         if config["show_human_logs"]:
                             cmd.append("--log-trajectories")
+                        if self.population_play:
+                            cmd.append("--population_play")
                         if self.vecenv.driver_env.goal_radius is not None:
                             cmd.extend(["--goal-radius", str(self.vecenv.driver_env.goal_radius)])
                         if self.vecenv.driver_env.init_steps > 0:
@@ -1324,7 +1404,6 @@ def export(args=None, env_name=None, vecenv=None, policy=None, path=None, silent
     args = args or load_config(env_name)
     vecenv = vecenv or load_env(env_name, args)
     policy = policy or load_policy(args, vecenv)
-
     weights = []
     for name, param in policy.named_parameters():
         weights.append(param.data.cpu().numpy().flatten())
@@ -1445,14 +1524,15 @@ def load_config(env_name, config_dir=None):
     parser.add_argument("--gif-path", type=str, default="eval.gif")
     parser.add_argument("--fps", type=float, default=15)
     parser.add_argument("--max-runs", type=int, default=200, help="Max number of sweep runs")
-    parser.add_argument("--wandb", action="store_true", help="Use wandb for logging")
-    parser.add_argument("--wandb-project", type=str, default="pufferlib")
+    parser.add_argument("--wandb", action="store_true", help="Use wandb for logging", default=True)
+    parser.add_argument("--wandb-project", type=str, default="ada")
     parser.add_argument("--wandb-group", type=str, default="debug")
     parser.add_argument("--neptune", action="store_true", help="Use neptune for logging")
     parser.add_argument("--neptune-name", type=str, default="pufferai")
     parser.add_argument("--neptune-project", type=str, default="ablations")
     parser.add_argument("--local-rank", type=int, default=0, help="Used by torchrun for DDP")
     parser.add_argument("--tag", type=str, default=None, help="Tag for experiment")
+
     args = parser.parse_known_args()[0]
 
     if config_dir is None:
@@ -1469,6 +1549,7 @@ def load_config(env_name, config_dir=None):
         p.read(puffer_default_config)
     else:
         for path in glob.glob(puffer_config_dir, recursive=True):
+            print(f"config {[puffer_default_config, path]}")
             p = configparser.ConfigParser()
             p.read([puffer_default_config, path])
             if env_name in p["base"]["env_name"].split():

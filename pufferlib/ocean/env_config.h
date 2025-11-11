@@ -27,6 +27,17 @@ typedef struct
     int init_steps;
     int init_mode;
     int control_mode;
+    // Conditioning weight bounds
+    float reward_collision_weight_lb;
+    float reward_collision_weight_ub;
+    float reward_offroad_weight_lb;
+    float reward_offroad_weight_ub;
+    float reward_goal_weight_lb;
+    float reward_goal_weight_ub;
+    float entropy_weight_lb;
+    float entropy_weight_ub;
+    float discount_weight_lb;
+    float discount_weight_ub;
 } env_init_config;
 
 // INI file parser handler - parses all environment configuration from drive.ini

@@ -82,6 +82,7 @@
 #define MAX_RG_COORD 1000.0f
 #define MAX_ROAD_SCALE 100.0f
 #define MAX_ROAD_SEGMENT_LENGTH 100.0f
+#define DRIVE_ENV 1
 #define STOP_AGENT 1
 #define REMOVE_AGENT 2
 
@@ -118,8 +119,10 @@ struct timespec ts;
 typedef struct Drive Drive;
 typedef struct Client Client;
 typedef struct Log Log;
+typedef struct Co_Player_Log Co_Player_Log;
 typedef struct Graph Graph;
 typedef struct AdjListNode AdjListNode;
+typedef struct Adaptive_Agent_Log Adaptive_Agent_Log;
 
 struct Log {
     float episode_return;
@@ -192,6 +195,10 @@ struct Entity {
     float cumulative_displacement;
     int displacement_sample_count;
     float goal_radius;
+
+    // population play flags
+    bool is_ego;
+    bool is_co_player;
     int stopped; // 0/1 -> freeze if set
     int removed; //0/1 -> remove from sim if set
 
@@ -202,6 +209,63 @@ struct Entity {
     float jerk_lat;
     float steering_angle;
     float wheelbase;
+};
+
+struct Co_Player_Log {
+    float co_player_episode_return;
+    float co_player_episode_length;
+    float co_player_perf;
+    float co_player_score;
+    float co_player_offroad_rate;
+    float co_player_collision_rate;
+    float co_player_clean_collision_rate;
+    float co_player_num_goals_reached;
+    float co_player_completion_rate;
+    float co_player_dnf_rate;
+    float co_player_lane_alignment_rate;
+    float co_player_avg_displacement_error;
+    float co_player_n;
+
+    // Jerk dynamics
+    float a_long;
+    float a_lat;
+    float jerk_long;
+    float jerk_lat;
+    float steering_angle;
+    float wheelbase;
+};
+
+struct Adaptive_Agent_Log {
+    // Per-scenario metrics (arrays of length num_scenarios)
+    float* episode_return;
+    float* episode_length;
+    float* perf;
+    float* score;
+    float* offroad_rate;
+    float* collision_rate;
+    float* num_goals_reached;
+    float* completion_rate;
+    float* dnf_rate;
+    float* n;
+    float* lane_alignment_rate;
+    float* avg_displacement_error;
+    float* active_agent_count;
+    float* expert_static_agent_count;
+    float* static_agent_count;
+
+    // Delta metrics: last scenario - first scenario (single values per agent)
+    float delta_completion_rate;
+    float delta_score;
+    float delta_perf;
+    float delta_collision_rate;
+    float delta_offroad_rate;
+    float delta_num_goals_reached;
+    float delta_dnf_rate;
+    float delta_lane_alignment_rate;
+    float delta_avg_displacement_error;
+    float delta_episode_return;
+
+    int num_scenarios;
 };
 
 void free_entity(Entity* entity){
@@ -338,7 +402,18 @@ struct Drive {
     int* tracks_to_predict_indices;
     int init_mode;
     int control_mode;
-
+    Co_Player_Log co_player_log;
+    Co_Player_Log* co_player_logs;
+    int num_co_players;
+    int num_ego_agents;
+    int* co_player_ids;
+    int* ego_agent_ids;
+    bool population_play;
+    Adaptive_Agent_Log* ada_log;
+    Adaptive_Agent_Log** ada_logs;
+    bool adaptive_driving_agent;
+    int k_scenarios;
+    int current_scenario;
     // Reward conditioning
     bool use_rc;
     float collision_weight_lb;
@@ -362,43 +437,43 @@ struct Drive {
     float* discount_weights;
 };
 
-void add_log(Drive* env) {
-    for(int i = 0; i < env->active_agent_count; i++){
-        Entity* e = &env->entities[env->active_agent_indices[i]];
-
-        if(e->reached_goal_this_episode){
-            env->log.completion_rate += 1.0f;
-        }
-        int offroad = env->logs[i].offroad_rate;
-        env->log.offroad_rate += offroad;
-        int collided = env->logs[i].collision_rate;
-        env->log.collision_rate += collided;
-        float avg_offroad_per_agent = env->logs[i].avg_offroad_per_agent;
-        env->log.avg_offroad_per_agent += avg_offroad_per_agent;
-        float avg_collisions_per_agent = env->logs[i].avg_collisions_per_agent;
-        env->log.avg_collisions_per_agent += avg_collisions_per_agent;
-        int num_goals_reached = env->logs[i].num_goals_reached;
-        env->log.num_goals_reached += num_goals_reached;
-        if(e->reached_goal_this_episode && !e->collided_before_goal){
-            env->log.score += 1.0f;
-        }
-        if(!offroad && !collided && !e->reached_goal_this_episode){
-            env->log.dnf_rate += 1.0f;
-        }
-        int lane_aligned = env->logs[i].lane_alignment_rate;
-        env->log.lane_alignment_rate += lane_aligned;
-        float displacement_error = env->logs[i].avg_displacement_error;
-        env->log.avg_displacement_error += displacement_error;
-        env->log.episode_length += env->logs[i].episode_length;
-        env->log.episode_return += env->logs[i].episode_return;
-        // Log composition counts per agent so vec_log averaging recovers the per-env value
-        env->log.active_agent_count += env->active_agent_count;
-        env->log.expert_static_agent_count += env->expert_static_agent_count;
-        env->log.static_agent_count += env->static_agent_count;
-        env->log.n += 1;
-    }
-}
-
+// void add_log(Drive* env) {
+//     for(int i = 0; i < env->active_agent_count; i++){
+//         Entity* e = &env->entities[env->active_agent_indices[i]];
+//
+//         if(e->reached_goal_this_episode){
+//             env->log.completion_rate += 1.0f;
+//         }
+//         int offroad = env->logs[i].offroad_rate;
+//         env->log.offroad_rate += offroad;
+//         int collided = env->logs[i].collision_rate;
+//         env->log.collision_rate += collided;
+//         float avg_offroad_per_agent = env->logs[i].avg_offroad_per_agent;
+//         env->log.avg_offroad_per_agent += avg_offroad_per_agent;
+//         float avg_collisions_per_agent = env->logs[i].avg_collisions_per_agent;
+//         env->log.avg_collisions_per_agent += avg_collisions_per_agent;
+//         int num_goals_reached = env->logs[i].num_goals_reached;
+//         env->log.num_goals_reached += num_goals_reached;
+//         if(e->reached_goal_this_episode && !e->collided_before_goal){
+//             env->log.score += 1.0f;
+//         }
+//         if(!offroad && !collided && !e->reached_goal_this_episode){
+//             env->log.dnf_rate += 1.0f;
+//         }
+//         int lane_aligned = env->logs[i].lane_alignment_rate;
+//         env->log.lane_alignment_rate += lane_aligned;
+//         float displacement_error = env->logs[i].avg_displacement_error;
+//         env->log.avg_displacement_error += displacement_error;
+//         env->log.episode_length += env->logs[i].episode_length;
+//         env->log.episode_return += env->logs[i].episode_return;
+//         // Log composition counts per agent so vec_log averaging recovers the per-env value
+//         env->log.active_agent_count += env->active_agent_count;
+//         env->log.expert_static_agent_count += env->expert_static_agent_count;
+//         env->log.static_agent_count += env->static_agent_count;
+//         env->log.n += 1;
+//     }
+// }
+//
 
 struct AdjListNode {
     int dest;
@@ -425,6 +500,7 @@ struct Graph* createGraph(int V) {
     graph->array = calloc(V, sizeof(struct AdjListNode*));
     return graph;
 }
+
 
 // Function to get next lanes from a given lane entity index
 // Returns the number of next lanes found, fills next_lanes array with entity indices
@@ -462,7 +538,224 @@ void freeTopologyGraph(struct Graph* graph) {
     free(graph);
 }
 
+void add_log(Drive* env) {
+    int scenario =-1;
+    if  (env->adaptive_driving_agent && env->ada_logs != NULL) {
+        scenario = env->current_scenario % env->k_scenarios;
+    }
 
+    for (int i = 0; i < env->active_agent_count; i++) {
+        Entity* e = &env->entities[env->active_agent_indices[i]];
+
+        if (e->is_ego) {
+            // ALWAYS update regular logs for all ego agents
+            if (e->reached_goal_this_episode)
+                env->log.completion_rate += 1.0f;
+
+            int offroad = env->logs[i].offroad_rate;
+            env->log.offroad_rate += offroad;
+            int collided = env->logs[i].collision_rate;
+            env->log.collision_rate += collided;
+            int num_goals_reached = env->logs[i].num_goals_reached;
+            env->log.num_goals_reached += num_goals_reached;
+
+            if (e->reached_goal_this_episode && !e->collided_before_goal) {
+                env->log.score += 1.0f;
+            }
+
+            if (!offroad && !collided && !e->reached_goal_this_episode) {
+                env->log.dnf_rate += 1.0f;
+            }
+
+            int lane_aligned = env->logs[i].lane_alignment_rate;
+            env->log.lane_alignment_rate += lane_aligned;
+            float displacement_error = env->logs[i].avg_displacement_error;
+            env->log.avg_displacement_error += displacement_error;
+            env->log.episode_length += env->logs[i].episode_length;
+            env->log.episode_return += env->logs[i].episode_return;
+
+            env->log.active_agent_count += env->active_agent_count;
+            env->log.expert_static_agent_count += env->expert_static_agent_count;
+            env->log.static_agent_count += env->static_agent_count;
+            env->log.n += 1.0f;
+
+            // ADDITIONALLY, if adaptive, also track per-scenario for delta computation
+            if (env->adaptive_driving_agent && env->ada_logs != NULL) {
+                if (e->reached_goal_this_episode)
+                    env->ada_logs[i]->completion_rate[scenario] += 1.0f;
+
+                env->ada_logs[i]->offroad_rate[scenario] += offroad;
+                env->ada_logs[i]->collision_rate[scenario] += collided;
+                env->ada_logs[i]->num_goals_reached[scenario] += num_goals_reached;
+
+                if (e->reached_goal_this_episode && !e->collided_before_goal) {
+                    env->ada_logs[i]->score[scenario] += 1.0f;
+                    env->ada_logs[i]->perf[scenario] += 1.0f;
+                }
+
+                if (!offroad && !collided && !e->reached_goal_this_episode) {
+                    env->ada_logs[i]->dnf_rate[scenario] += 1.0f;
+                }
+
+                env->ada_logs[i]->lane_alignment_rate[scenario] += lane_aligned;
+                env->ada_logs[i]->avg_displacement_error[scenario] += displacement_error;
+                env->ada_logs[i]->episode_length[scenario] += env->logs[i].episode_length;
+                env->ada_logs[i]->episode_return[scenario] += env->logs[i].episode_return;
+
+                env->ada_logs[i]->active_agent_count[scenario] += env->active_agent_count;
+                env->ada_logs[i]->expert_static_agent_count[scenario] += env->expert_static_agent_count;
+                env->ada_logs[i]->static_agent_count[scenario] += env->static_agent_count;
+                env->ada_logs[i]->n[scenario] += 1.0f;
+
+                // Compute delta metrics when completing last scenario
+                if (scenario == env->k_scenarios - 1) {
+                    int first = 0;
+                    int last = env->k_scenarios - 1;
+
+                    float first_n = env->ada_logs[i]->n[first];
+                    float last_n = env->ada_logs[i]->n[last];
+
+                    // Completion rate (count metric)
+                    float first_completion = env->ada_logs[i]->completion_rate[first];
+                    float last_completion = env->ada_logs[i]->completion_rate[last];
+                    if (fabs(first_completion) < 0.0001f) {
+                        env->ada_logs[i]->delta_completion_rate = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_completion_rate =
+                            (last_completion - first_completion) / first_completion * 100.0f;
+                    }
+
+                    // Score (count metric)
+                    float first_score = env->ada_logs[i]->score[first];
+                    float last_score = env->ada_logs[i]->score[last];
+                    if (fabs(first_score) < 0.0001f) {
+                        env->ada_logs[i]->delta_score = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_score =
+                            (last_score - first_score) / first_score * 100.0f;
+                    }
+
+                    // Perf (count metric)
+                    float first_perf = env->ada_logs[i]->perf[first];
+                    float last_perf = env->ada_logs[i]->perf[last];
+                    if (fabs(first_perf) < 0.0001f) {
+                        env->ada_logs[i]->delta_perf = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_perf =
+                            (last_perf - first_perf) / first_perf * 100.0f;
+                    }
+
+                    // Collision rate (rate metric)
+                    float first_collision = env->ada_logs[i]->collision_rate[first];
+                    float last_collision = env->ada_logs[i]->collision_rate[last];
+                    if (fabs(first_collision) < 0.0001f) {
+                        env->ada_logs[i]->delta_collision_rate = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_collision_rate =
+                            (last_collision - first_collision) / first_collision * 100.0f;
+                    }
+
+                    // Offroad rate (rate metric)
+                    float first_offroad = env->ada_logs[i]->offroad_rate[first];
+                    float last_offroad = env->ada_logs[i]->offroad_rate[last];
+                    if (fabs(first_offroad) < 0.0001f) {
+                        env->ada_logs[i]->delta_offroad_rate = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_offroad_rate =
+                            (last_offroad - first_offroad) / first_offroad * 100.0f;
+                    }
+
+                    // Num goals reached (count metric)
+                    float first_goals = env->ada_logs[i]->num_goals_reached[first];
+                    float last_goals = env->ada_logs[i]->num_goals_reached[last];
+                    if (fabs(first_goals) < 0.0001f) {
+                        env->ada_logs[i]->delta_num_goals_reached = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_num_goals_reached =
+                            (last_goals - first_goals) / first_goals * 100.0f;
+                    }
+
+                    // DNF rate (rate metric)
+                    float first_dnf = env->ada_logs[i]->dnf_rate[first];
+                    float last_dnf = env->ada_logs[i]->dnf_rate[last];
+                    if (fabs(first_dnf) < 0.0001f) {
+                        env->ada_logs[i]->delta_dnf_rate = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_dnf_rate =
+                            (last_dnf - first_dnf) / first_dnf * 100.0f;
+                    }
+
+                    // Lane alignment rate (rate metric)
+                    float first_lane = env->ada_logs[i]->lane_alignment_rate[first];
+                    float last_lane = env->ada_logs[i]->lane_alignment_rate[last];
+                    if (fabs(first_lane) < 0.0001f) {
+                        env->ada_logs[i]->delta_lane_alignment_rate = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_lane_alignment_rate =
+                            (last_lane - first_lane) / first_lane * 100.0f;
+                    }
+
+                    float first_ade = (first_n != 0.0f) ?
+                        env->ada_logs[i]->avg_displacement_error[first] / first_n : 0.0f;
+                    float last_ade = (last_n != 0.0f) ?
+                        env->ada_logs[i]->avg_displacement_error[last] / last_n : 0.0f;
+                    if (fabs(first_ade) < 0.0001f) {
+                        env->ada_logs[i]->delta_avg_displacement_error = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_avg_displacement_error =
+                            (last_ade - first_ade) / first_ade * 100.0f;
+                    }
+
+                    float first_return = (first_n != 0.0f) ?
+                        env->ada_logs[i]->episode_return[first] / first_n : 0.0f;
+                    float last_return = (last_n != 0.0f) ?
+                        env->ada_logs[i]->episode_return[last] / last_n : 0.0f;
+                    if (fabs(first_return) < 0.0001f) {
+                        env->ada_logs[i]->delta_episode_return = 0.0f;
+                    } else {
+                        env->ada_logs[i]->delta_episode_return =
+                            (last_return - first_return) / fabs(first_return) * 100.0f;
+                    }
+                }
+            }
+        }
+        // Process co-player agents (separate if, not else-if!)
+        if (e->is_co_player && env->co_player_logs != NULL) {
+            if (e->reached_goal_this_episode)
+                env->co_player_log.co_player_completion_rate += 1.0f;
+
+            int co_offroad = env->co_player_logs[i].co_player_offroad_rate;
+            env->co_player_log.co_player_offroad_rate += co_offroad;
+            int co_collided = env->co_player_logs[i].co_player_collision_rate;
+            env->co_player_log.co_player_collision_rate += co_collided;
+            int co_num_goals_reached = env->co_player_logs[i].co_player_num_goals_reached;
+            env->co_player_log.co_player_num_goals_reached += co_num_goals_reached;
+
+            env->co_player_log.co_player_clean_collision_rate +=
+                env->co_player_logs[i].co_player_clean_collision_rate;
+
+            if (e->reached_goal_this_episode && !e->collided_before_goal) {
+                env->co_player_log.co_player_score += 1.0f;
+                env->co_player_log.co_player_perf += 1.0f;
+            }
+
+            if (!co_offroad && !co_collided && !e->reached_goal_this_episode) {
+                env->co_player_log.co_player_dnf_rate += 1.0f;
+            }
+
+            int co_lane_aligned = env->co_player_logs[i].co_player_lane_alignment_rate;
+            env->co_player_log.co_player_lane_alignment_rate += co_lane_aligned;
+            float co_displacement_error = env->co_player_logs[i].co_player_avg_displacement_error;
+            env->co_player_log.co_player_avg_displacement_error += co_displacement_error;
+            env->co_player_log.co_player_episode_return +=
+                env->co_player_logs[i].co_player_episode_return;
+            env->co_player_log.co_player_episode_length +=
+                env->co_player_logs[i].co_player_episode_length;
+
+            env->co_player_log.co_player_n += 1.0f;
+        }
+    }
+}
 Entity* load_map_binary(const char* filename, Drive* env) {
     FILE* file = fopen(filename, "rb");
     if (!file) return NULL;
@@ -493,6 +786,7 @@ Entity* load_map_binary(const char* filename, Drive* env) {
         fread(&entities[i].type, sizeof(int), 1, file);
         fread(&entities[i].id, sizeof(int), 1, file);
         fread(&entities[i].array_size, sizeof(int), 1, file);
+        entities[i].is_ego = true;
         // Allocate arrays based on type
         int size = entities[i].array_size;
         entities[i].traj_x = (float*)malloc(size * sizeof(float));
@@ -586,8 +880,6 @@ void set_start_position(Drive* env){
         e->cumulative_displacement = 0.0f;
         e->displacement_sample_count = 0;
         e->respawn_timestep = -1;
-	    e->stopped = 0;
-        e->removed = 0;
         e->respawn_count = 0;
 
         // Dynamics
@@ -1479,6 +1771,44 @@ void remove_bad_trajectories(Drive* env){
     env->timestep = 0;
 }
 
+void assign_ego_and_coplayer_roles(Drive* env) {
+    if (!env->population_play || env->num_ego_agents == 0) {
+        for (int i = 0; i < env->num_entities; i++) {
+            if (!env->entities[i].mark_as_expert) {
+                env->entities[i].is_ego = 1;
+            }
+        }
+        return;
+    }
+
+    // FIRST: Reset ALL flags for active agents
+    for (int i = 0; i < env->active_agent_count; i++) {
+        int entity_idx = env->active_agent_indices[i];
+        env->entities[entity_idx].is_ego = 0;
+        env->entities[entity_idx].is_co_player = 0;
+    }
+
+    // THEN: Mark ego agents
+    for (int j = 0; j < env->num_ego_agents; j++) {
+        int agent_idx = env->ego_agent_ids[j];
+        if (agent_idx >= 0 && agent_idx < env->active_agent_count) {
+            int entity_idx = env->active_agent_indices[agent_idx];
+            env->entities[entity_idx].is_ego = 1;
+        }
+    }
+
+    // FINALLY: Mark co-player agents
+    for (int j = 0; j < env->num_co_players; j++) {
+        int agent_idx = env->co_player_ids[j];
+        if (agent_idx >= 0 && agent_idx < env->active_agent_count) {
+            int entity_idx = env->active_agent_indices[agent_idx];
+            env->entities[entity_idx].is_co_player = 1;
+        }
+    }
+}
+
+
+
 void init_goal_positions(Drive* env){
     for(int x = 0;x<env->active_agent_count; x++){
         int agent_idx = env->active_agent_indices[x];
@@ -1486,6 +1816,34 @@ void init_goal_positions(Drive* env){
         env->entities[agent_idx].init_goal_y = env->entities[agent_idx].goal_position_y;
     }
 }
+
+
+// Initialization function
+Adaptive_Agent_Log* create_adaptive_agent_log(int num_scenarios) {
+    Adaptive_Agent_Log* log = (Adaptive_Agent_Log*)calloc(1, sizeof(Adaptive_Agent_Log));
+
+    log->num_scenarios = num_scenarios;
+
+    // Allocate all arrays
+    log->episode_return = (float*)calloc(num_scenarios, sizeof(float));
+    log->episode_length = (float*)calloc(num_scenarios, sizeof(float));
+    log->perf = (float*)calloc(num_scenarios, sizeof(float));
+    log->score = (float*)calloc(num_scenarios, sizeof(float));
+    log->offroad_rate = (float*)calloc(num_scenarios, sizeof(float));
+    log->collision_rate = (float*)calloc(num_scenarios, sizeof(float));
+    log->num_goals_reached = (float*)calloc(num_scenarios, sizeof(float));
+    log->completion_rate = (float*)calloc(num_scenarios, sizeof(float));
+    log->dnf_rate = (float*)calloc(num_scenarios, sizeof(float));
+    log->n = (float*)calloc(num_scenarios, sizeof(float));
+    log->lane_alignment_rate = (float*)calloc(num_scenarios, sizeof(float));
+    log->avg_displacement_error = (float*)calloc(num_scenarios, sizeof(float));
+    log->active_agent_count = (float*)calloc(num_scenarios, sizeof(float));
+    log->expert_static_agent_count = (float*)calloc(num_scenarios, sizeof(float));
+    log->static_agent_count = (float*)calloc(num_scenarios, sizeof(float));
+
+    return log;
+}
+
 
 void init(Drive* env){
     env->human_agent_idx = 0;
@@ -1504,21 +1862,66 @@ void init(Drive* env){
     set_start_position(env);
     init_goal_positions(env);
     env->logs = (Log*)calloc(env->active_agent_count, sizeof(Log));
-
+    
     if (env->use_rc) {
+        print("reward conditioning initialized.\n");
         env->collision_weights = (float*)calloc(env->active_agent_count, sizeof(float));
         env->offroad_weights = (float*)calloc(env->active_agent_count, sizeof(float));
         env->goal_weights = (float*)calloc(env->active_agent_count, sizeof(float));
     }
+    else{
+        print("reward conditioning not used.\n");
+    }
     if (env->use_ec) {
+        print("entropy conditioning initialized.\n");
         env->entropy_weights = (float*)calloc(env->active_agent_count, sizeof(float));
     }
+    else{
+        print("entropy conditioning not used.\n");
+    }
     if (env->use_dc) {
+        print("discount conditioning initialized.\n");
         env->discount_weights = (float*)calloc(env->active_agent_count, sizeof(float));
     }
+    else{
+        print("discount conditioning not used.\n");
+    }
+    
+}
+
+void free_adaptive_agent_log(Adaptive_Agent_Log* log) {
+    if (!log) return;
+
+    free(log->episode_return);
+    free(log->episode_length);
+    free(log->perf);
+    free(log->score);
+    free(log->offroad_rate);
+    free(log->collision_rate);
+    free(log->num_goals_reached);
+    free(log->completion_rate);
+    free(log->dnf_rate);
+    free(log->n);
+    free(log->lane_alignment_rate);
+    free(log->avg_displacement_error);
+    free(log->active_agent_count);
+    free(log->expert_static_agent_count);
+    free(log->static_agent_count);
+
+    free(log);
 }
 
 void c_close(Drive* env){
+    if (env->population_play){
+        free(env->co_player_logs);
+    }
+    if (env->adaptive_driving_agent && env->ada_logs != NULL) {
+    for (int i = 0; i < env->active_agent_count; i++) {
+        free_adaptive_agent_log(env->ada_logs[i]);
+    }
+    free(env->ada_logs);
+    }
+
     for(int i = 0; i < env->num_entities; i++){
         free_entity(&env->entities[i]);
     }
@@ -1567,11 +1970,13 @@ void allocate(Drive* env){
     }
 
     int max_obs = ego_dim + 7*(MAX_AGENTS - 1) + 7*MAX_ROAD_SEGMENT_OBSERVATIONS;
+    // printf("num static cars: %d\n", env->static_car_count);
+    // printf("active agent count: %d\n", env->active_agent_count);
+    // printf("num objects: %d\n", env->num_objects);
     env->observations = (float*)calloc(env->active_agent_count*max_obs, sizeof(float));
     env->actions = (float*)calloc(env->active_agent_count*2, sizeof(float));
     env->rewards = (float*)calloc(env->active_agent_count, sizeof(float));
     env->terminals= (unsigned char*)calloc(env->active_agent_count, sizeof(unsigned char));
-
 }
 
 void free_allocated(Drive* env){
@@ -1614,12 +2019,6 @@ float normalize_value(float value, float min, float max){
 
 void move_dynamics(Drive* env, int action_idx, int agent_idx){
     Entity* agent = &env->entities[agent_idx];
-    if (agent->removed) return;
-    if (agent->stopped) {
-        agent->vx = 0.0f;
-        agent->vy = 0.0f;
-        return;
-    }
 
     if (agent->collision_state != 0) {
         return;
@@ -1823,12 +2222,10 @@ void compute_observations(Drive* env) {
 
     memset(env->observations, 0, max_obs*env->active_agent_count*sizeof(float));
     float (*observations)[max_obs] = (float(*)[max_obs])env->observations;
-
     for(int i = 0; i < env->active_agent_count; i++) {
         float* obs = &observations[i][0];
         Entity* ego_entity = &env->entities[env->active_agent_indices[i]];
         if(ego_entity->type > 3) break;
-
         float cos_heading = ego_entity->heading_x;
         float sin_heading = ego_entity->heading_y;
         float ego_speed = sqrtf(ego_entity->vx*ego_entity->vx + ego_entity->vy*ego_entity->vy);
@@ -1869,7 +2266,6 @@ void compute_observations(Drive* env) {
         if (env->use_dc) {
             obs[obs_idx++] = env->discount_weights[i];
         }
-
         // Relative Pos of other cars
         int cars_seen = 0;
         for(int j = 0; j < MAX_AGENTS; j++) {
@@ -1895,7 +2291,6 @@ void compute_observations(Drive* env) {
             float rel_y = -dx*sin_heading + dy*cos_heading;
             // Store observations with correct indexing
             obs[obs_idx] = rel_x * 0.02f;
-        // Add conditioning weights to observations
             obs[obs_idx + 1] = rel_y * 0.02f;
             obs[obs_idx + 2] = other_entity->width / MAX_VEH_WIDTH;
             obs[obs_idx + 3] = other_entity->length / MAX_VEH_LEN;
@@ -2148,13 +2543,14 @@ void c_reset(Drive* env){
         env->entities[agent_idx].metrics_array[AVG_DISPLACEMENT_ERROR_IDX] = 0.0f;
         env->entities[agent_idx].cumulative_displacement = 0.0f;
         env->entities[agent_idx].displacement_sample_count = 0;
-	    env->entities[agent_idx].stopped = 0;
-        env->entities[agent_idx].removed = 0;
 
         if (env->goal_behavior==GOAL_GENERATE_NEW) {
             env->entities[agent_idx].goal_position_x = env->entities[agent_idx].init_goal_x;
             env->entities[agent_idx].goal_position_y = env->entities[agent_idx].init_goal_y;
             env->entities[agent_idx].sampled_new_goal = 0;
+        }
+        if (env->population_play){
+            env->co_player_logs[x] = (Co_Player_Log){0};
         }
 
         compute_agent_metrics(env, agent_idx);
@@ -2178,22 +2574,25 @@ void respawn_agent(Drive* env, int agent_idx){
     env->entities[agent_idx].cumulative_displacement = 0.0f;
     env->entities[agent_idx].displacement_sample_count = 0;
     env->entities[agent_idx].respawn_timestep = env->timestep;
-    env->entities[agent_idx].stopped = 0;
-    env->entities[agent_idx].removed = 0;
     env->entities[agent_idx].a_long = 0.0f;
     env->entities[agent_idx].a_lat = 0.0f;
     env->entities[agent_idx].jerk_long = 0.0f;
     env->entities[agent_idx].jerk_lat = 0.0f;
     env->entities[agent_idx].steering_angle = 0.0f;
 }
-
 void c_step(Drive* env){
     memset(env->rewards, 0, env->active_agent_count * sizeof(float));
     memset(env->terminals, 0, env->active_agent_count * sizeof(unsigned char));
+
     env->timestep++;
     if(env->timestep == env->scenario_length){
+        
         add_log(env);
-	    c_reset(env);
+        c_reset(env);
+        if (env->adaptive_driving_agent){
+            env->current_scenario += 1;
+        }
+
         return;
     }
 
@@ -2203,60 +2602,97 @@ void c_step(Drive* env){
         if(env->entities[expert_idx].x == INVALID_POSITION) continue;
         move_expert(env, env->actions, expert_idx);
     }
+
     // Process actions for all active agents
     for(int i = 0; i < env->active_agent_count; i++){
-        env->logs[i].score = 0.0f;
-	    env->logs[i].episode_length += 1;
         int agent_idx = env->active_agent_indices[i];
         env->entities[agent_idx].collision_state = 0;
         move_dynamics(env, i, agent_idx);
-        // move_expert(env, env->actions, agent_idx);
+
+        // Update logs based on agent type - use i directly as log index
+        if(env->entities[agent_idx].is_ego){
+            env->logs[i].score = 0.0f;
+            env->logs[i].episode_length += 1;
+        } else if(env->entities[agent_idx].is_co_player){
+            env->co_player_logs[i].co_player_score = 0.0f;
+            env->co_player_logs[i].co_player_episode_length += 1;
+        }
     }
+
+    // Compute metrics and rewards
     for(int i = 0; i < env->active_agent_count; i++){
         int agent_idx = env->active_agent_indices[i];
         env->entities[agent_idx].collision_state = 0;
-        //if(env->entities[agent_idx].respawn_timestep != -1) continue;
         compute_agent_metrics(env, agent_idx);
-        int collision_state = env->entities[agent_idx].collision_state;
 
+        int collision_state = env->entities[agent_idx].collision_state;
+        int is_ego = env->entities[agent_idx].is_ego;
+        int is_co_player = env->entities[agent_idx].is_co_player;
+
+        // Handle collisions - SAME REWARD for both ego and co-players
         if(collision_state > 0){
             if(collision_state == VEHICLE_COLLISION){
                 env->rewards[i] = env->reward_vehicle_collision;
-                env->logs[i].episode_return += env->reward_vehicle_collision;
-                env->logs[i].collision_rate = 1.0f;
-                env->logs[i].avg_collisions_per_agent += 1.0f;
-            }
-            else if(collision_state == OFFROAD){
+
+                if(is_ego){
+                    env->logs[i].episode_return += env->reward_vehicle_collision;
+                    env->logs[i].collision_rate = 1.0f;
+                } else if(is_co_player){
+                    env->co_player_logs[i].co_player_episode_return += env->reward_vehicle_collision;
+                    env->co_player_logs[i].co_player_collision_rate = 1.0f;
+                }
+            } else if(collision_state == OFFROAD){
                 env->rewards[i] = env->reward_offroad_collision;
-                env->logs[i].offroad_rate = 1.0f;
-                env->logs[i].episode_return += env->reward_offroad_collision;
-                env->logs[i].avg_offroad_per_agent += 1.0f;
+
+                if(is_ego){
+                    env->logs[i].episode_return += env->reward_offroad_collision;
+                    env->logs[i].offroad_rate = 1.0f;
+                } else if(is_co_player){
+                    env->co_player_logs[i].co_player_episode_return += env->reward_offroad_collision;
+                    env->co_player_logs[i].co_player_offroad_rate = 1.0f;
+                    env->logs[i].avg_offroad_per_agent += 1.0f;
             }
+            }
+
             if(!env->entities[agent_idx].reached_goal_this_episode){
                 env->entities[agent_idx].collided_before_goal = 1;
             }
         }
 
+        // Handle goal reward - SAME REWARD for both ego and co-players
         float distance_to_goal = relative_distance_2d(
-                env->entities[agent_idx].x,
-                env->entities[agent_idx].y,
-                env->entities[agent_idx].goal_position_x,
-                env->entities[agent_idx].goal_position_y);
+            env->entities[agent_idx].x,
+            env->entities[agent_idx].y,
+            env->entities[agent_idx].goal_position_x,
+            env->entities[agent_idx].goal_position_y
 
-        // Reward agent if it is within X meters of goal
+        );
+
         if(distance_to_goal < env->goal_radius){
             if(env->entities[agent_idx].respawn_timestep != -1){
                 env->rewards[i] += env->reward_goal_post_respawn;
-                env->logs[i].episode_return += env->reward_goal_post_respawn;
+
+                if(is_ego){
+                    env->logs[i].episode_return += env->reward_goal_post_respawn;
+                } else if(is_co_player){
+                    env->co_player_logs[i].co_player_episode_return += env->reward_goal_post_respawn;
+                }
             } else {
                 env->rewards[i] += env->reward_goal;
-                env->logs[i].episode_return += env->reward_goal;
                 env->entities[agent_idx].sampled_new_goal = 1;
-                env->logs[i].num_goals_reached += 1;
+
+                if(is_ego){
+                    env->logs[i].episode_return += env->reward_goal;
+                    env->logs[i].num_goals_reached += 1;
+                } else if(is_co_player){
+                    env->co_player_logs[i].co_player_episode_return += env->reward_goal;
+                    env->co_player_logs[i].co_player_num_goals_reached += 1;
+                }
             }
+
             env->entities[agent_idx].reached_goal_this_episode = 1;
             env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 1.0f;
-	    }
+        }
 
         if(env->entities[agent_idx].sampled_new_goal){
             if (env->goal_behavior==GOAL_GENERATE_NEW) {
@@ -2270,16 +2706,25 @@ void c_step(Drive* env){
 
 
         int lane_aligned = env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX];
-        env->logs[i].lane_alignment_rate = lane_aligned;
+        if(is_ego){
+            env->logs[i].lane_alignment_rate = lane_aligned;
+        } else if(is_co_player){
+            env->co_player_logs[i].co_player_lane_alignment_rate = lane_aligned;
+        }
 
-        // Apply ADE reward
         float current_ade = env->entities[agent_idx].metrics_array[AVG_DISPLACEMENT_ERROR_IDX];
-        if(current_ade > 0.0f && env->reward_ade != 0.0f) {
+        if(current_ade > 0.0f && env->reward_ade != 0.0f){
             float ade_reward = env->reward_ade * current_ade;
             env->rewards[i] += ade_reward;
-            env->logs[i].episode_return += ade_reward;
+
+            if(is_ego){
+                env->logs[i].episode_return += ade_reward;
+                env->logs[i].avg_displacement_error = current_ade;
+            } else if(is_co_player){
+                env->co_player_logs[i].co_player_episode_return += ade_reward;
+                env->co_player_logs[i].co_player_avg_displacement_error = current_ade;
+            }
         }
-        env->logs[i].avg_displacement_error = current_ade;
     }
 
     if (env->goal_behavior==GOAL_RESPAWN) {
@@ -2305,7 +2750,6 @@ void c_step(Drive* env){
 
     compute_observations(env);
 }
-
 const Color STONE_GRAY = (Color){80, 80, 80, 255};
 const Color PUFF_RED = (Color){187, 0, 0, 255};
 const Color PUFF_CYAN = (Color){0, 187, 187, 255};
@@ -2854,9 +3298,22 @@ void draw_scene(Drive* env, Client* client, int mode, int obs_only, int lasers, 
                 // --- Draw the car  ---
 
                 Vector3 carPos = { position.x, position.y, position.z };
-                Color car_color = GRAY;              // default for static
+                Color car_color = GRAY;
+                if (env->population_play){
+                    if (is_active_agent && env->entities[i].is_ego){
+                        car_color = BLUE;
+                    }
+                    else if (is_active_agent && env->entities[i].is_co_player){
+                        car_color = YELLOW;
+                    }
+
+                }
+                else{
+                  // default for static
                 if (is_expert) car_color = GOLD;      // expert replay
                 if (is_active_agent) car_color = BLUE; // policy-controlled
+                }
+
                 if (is_active_agent && env->entities[i].collision_state > 0) car_color = RED;
                 rlSetLineWidth(3.0f);
                 for (int j = 0; j < 4; j++) {
