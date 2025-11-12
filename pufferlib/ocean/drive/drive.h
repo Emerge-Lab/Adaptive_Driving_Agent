@@ -1864,27 +1864,27 @@ void init(Drive* env){
     env->logs = (Log*)calloc(env->active_agent_count, sizeof(Log));
     
     if (env->use_rc) {
-        print("reward conditioning initialized.\n");
+        printf("reward conditioning initialized.\n");
         env->collision_weights = (float*)calloc(env->active_agent_count, sizeof(float));
         env->offroad_weights = (float*)calloc(env->active_agent_count, sizeof(float));
         env->goal_weights = (float*)calloc(env->active_agent_count, sizeof(float));
     }
     else{
-        print("reward conditioning not used.\n");
+        printf("reward conditioning not used.\n");
     }
     if (env->use_ec) {
-        print("entropy conditioning initialized.\n");
+        printf("entropy conditioning initialized.\n");
         env->entropy_weights = (float*)calloc(env->active_agent_count, sizeof(float));
     }
     else{
-        print("entropy conditioning not used.\n");
+        printf("entropy conditioning not used.\n");
     }
     if (env->use_dc) {
-        print("discount conditioning initialized.\n");
+        printf("discount conditioning initialized.\n");
         env->discount_weights = (float*)calloc(env->active_agent_count, sizeof(float));
     }
     else{
-        print("discount conditioning not used.\n");
+        printf("discount conditioning not used.\n");
     }
     
 }

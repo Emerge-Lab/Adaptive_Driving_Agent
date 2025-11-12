@@ -833,7 +833,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
     # TODO: First step action space check
     env_k = env_kwargs[0]
-    if env_k.get("population_play", {}).get("enabled", False):
+    if env_k.get("co_player_policy", {}).get("enabled", False):
         import torch
         import os
         from types import SimpleNamespace
@@ -848,14 +848,14 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         elif dynamics_model == "jerk":
             ego_features = 10
 
-        pop_play_config = env_k["population_play"]
-        co_player_policy = pop_play_config["co_player_policy"]
+        co_player_config = env_k["co_player_policy"]
 
-        input_size = co_player_policy.get("input_size", 256)
-        hidden_size = co_player_policy.get("hidden_size", 256)
+        input_size = co_player_config.get("input_size", 256)
+        hidden_size = co_player_config.get("hidden_size", 256)
 
-        # Get conditioning type from pop_play_config
-        condition_type = pop_play_config.get("co_player_condition_type", "none")
+        # Get conditioning type from co_player_policy.conditioning
+        conditioning_config = co_player_config.get("conditioning", {})
+        condition_type = conditioning_config.get("type", "none")
         reward_conditioned = condition_type in ("reward", "all")
         entropy_conditioned = condition_type in ("entropy", "all")
         discount_conditioned = condition_type in ("discount", "all")
@@ -867,7 +867,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
         # Base observations + conditioning observations
         num_obs = ego_features + conditioning_dims + 63 * 7 + 200 * 7
-        
+
         temp_env = SimpleNamespace(
             single_action_space=gymnasium.spaces.MultiDiscrete([7, 13]),
             single_observation_space=gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32),
@@ -886,7 +886,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
             hidden_size=hidden_size,
         )
 
-        checkpoint_path = env_k["co_player_policy_path"]
+        checkpoint_path = co_player_config.get("policy_path")
 
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
