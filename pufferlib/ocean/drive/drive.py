@@ -127,6 +127,8 @@ class Drive(pufferlib.PufferEnv):
         self.co_player_entropy_conditioned = self.co_player_condition_type in ("entropy", "all")
         self.co_player_discount_conditioned = self.co_player_condition_type in ("discount", "all")
 
+        if self.co_player_condition_type != "none" and self.condition_type != "none":
+            raise NotImplementedError("Simultaneous Ego and Co player conditioning not impelemented ")
     
         self.num_agents = num_agents
         self.num_ego_agents = num_ego_agents
@@ -334,7 +336,6 @@ class Drive(pufferlib.PufferEnv):
                 self._set_co_player_conditioning()
 
         else:
-            print(f"my shared tuple {my_shared_tuple}", flush = True)
             self.agent_offsets, self.map_ids, self.num_envs = my_shared_tuple
             self.ego_ids = [i for i in range(self.agent_offsets[-1])]
             if len(self.ego_ids) != self.num_agents:
@@ -784,7 +785,7 @@ def process_all_maps():
     binary_dir.mkdir(parents=True, exist_ok=True)
 
     # Path to the training data
-    data_dir = Path("/scratch/kj2676/gpudrive/data/processed/training")
+    data_dir = Path("data/processed/training")
 
     # Get all JSON files in the training directory
     json_files = sorted(data_dir.glob("*.json"))

@@ -140,13 +140,23 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     if (env->population_play) {
         env->num_co_players = unpack(kwargs, "num_co_players");
         double* co_player_ids_d = unpack_float_array(kwargs, "co_player_ids", &env->num_co_players);
+
         if (co_player_ids_d != NULL && env->num_co_players > 0) {
             env->co_player_ids = (int*)malloc(env->num_co_players * sizeof(int));
-            for (int i = 0; i < env->num_co_players; i++) {
-                env->co_player_ids[i] = (int)co_player_ids_d[i];
-             }
-            free(co_player_ids_d);
+            if (env->co_player_ids == NULL) {
+                fprintf(stderr, "Error: Failed to allocate memory for co_player_ids\n");
+                free(co_player_ids_d);
+                env->num_co_players = 0;
+            } else {
+                for (int i = 0; i < env->num_co_players; i++) {
+                    env->co_player_ids[i] = (int)co_player_ids_d[i];
+                }
+                free(co_player_ids_d);
+            }
         } else {
+            if (co_player_ids_d != NULL) {
+                free(co_player_ids_d);
+            }
             env->co_player_ids = NULL;
             env->num_co_players = 0;
         }

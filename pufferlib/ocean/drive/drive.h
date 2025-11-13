@@ -1858,6 +1858,8 @@ void init(Drive* env){
 void c_close(Drive* env){
     if (env->population_play && env->co_player_logs != NULL) {
         free(env->co_player_logs);
+        free(env->co_player_ids);
+        free(env->ego_agent_ids);
     }
     for(int i = 0; i < env->num_entities; i++){
         free_entity(&env->entities[i]);
