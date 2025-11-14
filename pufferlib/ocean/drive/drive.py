@@ -343,12 +343,9 @@ class Drive(pufferlib.PufferEnv):
             self.local_co_player_ids = [[] for i in range(self.num_envs)]
             self.local_ego_ids = [[0] for i in range(self.num_envs)]
 
-   
-
     def get_co_player_actions(self):
         with torch.no_grad():
             co_player_obs = self.observations[self.co_player_ids]
-
             # Add conditioning to co-player observations if needed
             if self.co_player_condition_type != "none":
                 co_player_obs = self._add_co_player_conditioning(co_player_obs)
@@ -385,31 +382,32 @@ class Drive(pufferlib.PufferEnv):
         ):
             return observations
 
-        conditioning_values = []
-        for i in range(self.num_envs):
-            num_co_players_in_env = len(self.local_co_player_ids[i])
-            if num_co_players_in_env == 0:
-                continue
-
-            for _ in range(num_co_players_in_env):
-                conditioning_values.append(self.env_conditioning[i])
-
-        conditioning_array = np.stack(conditioning_values, axis=0)
+        # Get the number of co-players per environment
+        num_co_players_per_env = np.array([len(ids) for ids in self.local_co_player_ids])
+        
+        # Early return if no co-players at all
+        if num_co_players_per_env.sum() == 0:
+            return observations
+        
+        # Create indices for which environment each co-player belongs to
+        env_indices = np.repeat(np.arange(self.num_envs), num_co_players_per_env)
+        
+        # self.env_conditioning is already a 2D array, just index directly
+        conditioning_array = self.env_conditioning[env_indices]
 
         obs_with_conditioning = np.concatenate(
             [
                 observations[:, :7],  # First 7 base observations
-                conditioning_array,  # Conditioning variables
+                conditioning_array,   # Conditioning variables
                 observations[:, 7:],  # Rest of observations
             ],
             axis=1,
         )
 
         return obs_with_conditioning
-
     def _set_co_player_conditioning(self):
         """Sample and store conditioning values for each environment"""
-        self.env_conditioning = []
+        env_cond_list = []
 
         for i in range(self.num_envs):
             env_cond = []
@@ -428,7 +426,10 @@ class Drive(pufferlib.PufferEnv):
                 discount_weight = np.random.uniform(self.discount_weight_lb, self.discount_weight_ub)
                 env_cond.append(discount_weight)
 
-            self.env_conditioning.append(np.array(env_cond, dtype=np.float32))
+            env_cond_list.append(env_cond)
+
+        # Store as 2D array directly
+        self.env_conditioning = np.array(env_cond_list, dtype=np.float32)
 
     def step(self, actions):
         self.terminals[:] = 0
