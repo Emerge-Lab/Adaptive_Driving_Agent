@@ -71,7 +71,8 @@ class PuffeRL:
         # torch.manual_seed(seed)
 
         # Vecenv info
-        self.adaptive_driving_agent = getattr(vecenv.driver_env, "env_name", None) == "adaptive_driving_agent"
+        self.adaptive_driving_agent = getattr(vecenv.driver_env, "env_name", None) == "adaptive_drive"
+        print(f"ENV name is {getattr(vecenv.driver_env, "env_name", None)}", flush=True)
         if self.adaptive_driving_agent:
             config["bptt_horizon"] = vecenv.driver_env.episode_length
 
@@ -294,6 +295,7 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            # print(f"o shape is {o.shape}", flush = True)
             if self.population_play:
                 batch_size = self.vecenv.batch_size
                 ego_ids = info[-1]

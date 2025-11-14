@@ -438,7 +438,6 @@ struct Drive {
 
 };
 
-
 void add_log(Drive* env) {
     int scenario =-1;
     if  (env->adaptive_driving_agent && env->ada_logs != NULL) {
@@ -467,10 +466,7 @@ void add_log(Drive* env) {
             if (!offroad && !collided && !e->reached_goal_this_episode) {
                 env->log.dnf_rate += 1.0f;
             }
-            float avg_offroad_per_agent = env->logs[i].avg_offroad_per_agent;
-            env->log.avg_offroad_per_agent += avg_offroad_per_agent;
-            float avg_collisions_per_agent = env->logs[i].avg_collisions_per_agent;
-            env->log.avg_collisions_per_agent += avg_collisions_per_agent;
+
             int lane_aligned = env->logs[i].lane_alignment_rate;
             env->log.lane_alignment_rate += lane_aligned;
             float displacement_error = env->logs[i].avg_displacement_error;
@@ -1748,7 +1744,6 @@ void init_goal_positions(Drive* env){
     }
 }
 
-// Initialization function
 Adaptive_Agent_Log* create_adaptive_agent_log(int num_scenarios) {
     Adaptive_Agent_Log* log = (Adaptive_Agent_Log*)calloc(1, sizeof(Adaptive_Agent_Log));
 
@@ -1773,7 +1768,6 @@ Adaptive_Agent_Log* create_adaptive_agent_log(int num_scenarios) {
 
     return log;
 }
-
 
 void free_adaptive_agent_log(Adaptive_Agent_Log* log) {
     if (!log) return;
@@ -2581,7 +2575,6 @@ void c_step(Drive* env){
 
     env->timestep++;
     if(env->timestep == env->scenario_length){
-        
         add_log(env);
         c_reset(env);
         if (env->adaptive_driving_agent){
@@ -2632,6 +2625,7 @@ void c_step(Drive* env){
                 if(is_ego){
                     env->logs[i].episode_return += env->reward_vehicle_collision;
                     env->logs[i].collision_rate = 1.0f;
+                    env->logs[i].avg_collisions_per_agent += 1.0f;
                 } else if(is_co_player){
                     env->co_player_logs[i].co_player_episode_return += env->reward_vehicle_collision;
                     env->co_player_logs[i].co_player_collision_rate = 1.0f;
@@ -2642,6 +2636,7 @@ void c_step(Drive* env){
                 if(is_ego){
                     env->logs[i].episode_return += env->reward_offroad_collision;
                     env->logs[i].offroad_rate = 1.0f;
+                    env->logs[i].avg_offroad_per_agent += 1.0f;  // ADD THIS
                 } else if(is_co_player){
                     env->co_player_logs[i].co_player_episode_return += env->reward_offroad_collision;
                     env->co_player_logs[i].co_player_offroad_rate = 1.0f;
