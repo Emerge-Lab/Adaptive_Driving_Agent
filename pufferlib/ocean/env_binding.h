@@ -586,6 +586,9 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
     float ada_delta_avg_displacement_error = 0.0f;
     float ada_delta_episode_return = 0.0f;
     int ada_agent_count = 0;
+    int has_co_players = 0;  // Flag to check if any env has co-players
+    Co_Player_Log co_player_aggregate = {0};
+    int num_co_player_keys = sizeof(Co_Player_Log) / sizeof(float);
 
     for (int i = 0; i < vec->num_envs; i++) {
         Env* env = vec->envs[i];
@@ -594,6 +597,17 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
             ((float*)&aggregate)[j] += ((float*)&env->log)[j];
             ((float*)&env->log)[j] = 0.0f;
         }
+
+        if (env->population_play && env->num_co_players > 0 && env->co_player_ids != NULL) {
+            has_co_players = 1;
+
+            // Aggregate co-player logs
+            for (int j = 0; j < num_co_player_keys; j++) {
+                ((float*)&co_player_aggregate)[j] += ((float*)&env->co_player_log)[j];
+                ((float*)&env->co_player_log)[j] = 0.0f;  // Reset after aggregating
+            }
+        }
+
 
         if (env->adaptive_driving_agent && env->ada_logs != NULL) {
             has_adaptive_agents = 1;
@@ -631,6 +645,32 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
         // User populates dict
         my_log(dict, &aggregate);
         assign_to_dict(dict, "n", n);
+    }
+
+    if (has_co_players && co_player_aggregate.co_player_n > 0.0f) {
+        float co_player_n = co_player_aggregate.co_player_n;
+        // Only divide non-zero values to avoid corruption
+        for (int i = 0; i < num_co_player_keys; i++) {
+            if (((float*)&co_player_aggregate)[i] != 0.0f) {
+                ((float*)&co_player_aggregate)[i] /= co_player_n;
+            }
+        }
+
+        // Add co-player metrics directly
+        assign_to_dict(dict, "ego_co_player_ratio", aggregate.n / co_player_n);
+        assign_to_dict(dict, "co_player_completion_rate", co_player_aggregate.co_player_completion_rate);
+        assign_to_dict(dict, "co_player_collision_rate", co_player_aggregate.co_player_collision_rate);
+        assign_to_dict(dict, "co_player_offroad_rate", co_player_aggregate.co_player_offroad_rate);
+        assign_to_dict(dict, "co_player_clean_collision_rate", co_player_aggregate.co_player_clean_collision_rate);
+        assign_to_dict(dict, "co_player_num_goals_reached", co_player_aggregate.co_player_num_goals_reached);
+        assign_to_dict(dict, "co_player_score", co_player_aggregate.co_player_score);
+        assign_to_dict(dict, "co_player_perf", co_player_aggregate.co_player_perf);
+        assign_to_dict(dict, "co_player_dnf_rate", co_player_aggregate.co_player_dnf_rate);
+        assign_to_dict(dict, "co_player_episode_length", co_player_aggregate.co_player_episode_length);
+        assign_to_dict(dict, "co_player_episode_return", co_player_aggregate.co_player_episode_return);
+        assign_to_dict(dict, "co_player_lane_alignment_rate", co_player_aggregate.co_player_lane_alignment_rate);
+        assign_to_dict(dict, "co_player_avg_displacement_error", co_player_aggregate.co_player_avg_displacement_error);
+        assign_to_dict(dict, "co_player_n", co_player_n);
     }
 
     // Average and add adaptive agent delta metrics if they exist
