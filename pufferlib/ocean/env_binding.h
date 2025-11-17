@@ -612,8 +612,17 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
         if (env->adaptive_driving_agent && env->ada_logs != NULL) {
             has_adaptive_agents = 1;
 
-            // Aggregate delta metrics across all agents in this environment
+            // Count the number of ego agents in this environment
+            int num_ego_agents = 0;
             for (int a = 0; a < env->active_agent_count; a++) {
+                Entity* e = &env->entities[env->active_agent_indices[a]];
+                if (e->is_ego) {
+                    num_ego_agents++;
+                }
+            }
+
+            // Aggregate delta metrics across ONLY ego agents
+            for (int a = 0; a < num_ego_agents; a++) {
                 ada_delta_completion_rate += env->ada_logs[a]->delta_completion_rate;
                 ada_delta_score += env->ada_logs[a]->delta_score;
                 ada_delta_perf += env->ada_logs[a]->delta_perf;

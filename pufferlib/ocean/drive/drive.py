@@ -127,7 +127,7 @@ class Drive(pufferlib.PufferEnv):
         self.co_player_entropy_conditioned = self.co_player_condition_type in ("entropy", "all")
         self.co_player_discount_conditioned = self.co_player_condition_type in ("discount", "all")
 
-        if self.co_player_condition_type != "none" and self.condition_type != "none":
+        if self.co_player_condition_type != "none" and self.condition_type != "none" and self.population_play:
             raise NotImplementedError("Simultaneous Ego and Co player conditioning not impelemented ")
     
         self.num_agents = num_agents
@@ -269,7 +269,7 @@ class Drive(pufferlib.PufferEnv):
         info = []
         if self.population_play:
             info.append(self.ego_ids)
-            self.reset_co_player_state()
+            self._reset_co_player_state()
         self.tick = 0
         return self.observations, info
 
@@ -357,79 +357,83 @@ class Drive(pufferlib.PufferEnv):
         return co_player_action
 
     def _set_co_player_state(self): ## set in init (state doesnt get updated anywhere else)
-        self.state = dict(
-            lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
-            lstm_c=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
-        )
+        with torch.no_grad():
+            self.state = dict(
+                lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
+                lstm_c=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
+            )
 
-    def reset_co_player_state(self, done_indices=None):
+    def _reset_co_player_state(self, done_indices=None):
         """Reset LSTM state for co-players whose episodes ended"""
-        if done_indices is None:
-            # Reset all
-            self._set_co_player_state()
-        else:
-            # Reset only specific co-players
-            device = self.state["lstm_h"].device
-            self.state["lstm_h"][done_indices] = 0
-            self.state["lstm_c"][done_indices] = 0
+        with torch.no_grad():
+            if done_indices is None:
+                # Reset all
+                self._set_co_player_state()
+            else:
+                # Reset only specific co-players
+                device = self.state["lstm_h"].device
+                self.state["lstm_h"][done_indices] = 0
+                self.state["lstm_c"][done_indices] = 0
 
     def _add_co_player_conditioning(self, observations):
         """Add pre-sampled conditioning variables to co-player observations"""
-        if not (
-            self.co_player_reward_conditioned
-            or self.co_player_entropy_conditioned
-            or self.co_player_discount_conditioned
-        ):
-            return observations
+        with torch.no_grad():
+            if not (
+                self.co_player_reward_conditioned
+                or self.co_player_entropy_conditioned
+                or self.co_player_discount_conditioned
+            ):
+                return observations
 
-        # Get the number of co-players per environment
-        num_co_players_per_env = np.array([len(ids) for ids in self.local_co_player_ids])
-        
-        # Early return if no co-players at all
-        if num_co_players_per_env.sum() == 0:
-            return observations
-        
-        # Create indices for which environment each co-player belongs to
-        env_indices = np.repeat(np.arange(self.num_envs), num_co_players_per_env)
-        
-        # self.env_conditioning is already a 2D array, just index directly
-        conditioning_array = self.env_conditioning[env_indices]
+            # Get the number of co-players per environment
+            num_co_players_per_env = np.array([len(ids) for ids in self.local_co_player_ids])
+            
+            # Early return if no co-players at all
+            if num_co_players_per_env.sum() == 0:
+                return observations
+            
+            # Create indices for which environment each co-player belongs to
+            env_indices = np.repeat(np.arange(self.num_envs), num_co_players_per_env)
+            
+            # self.env_conditioning is already a 2D array, just index directly
+            conditioning_array = self.env_conditioning[env_indices]
 
-        obs_with_conditioning = np.concatenate(
-            [
-                observations[:, :7],  # First 7 base observations
-                conditioning_array,   # Conditioning variables
-                observations[:, 7:],  # Rest of observations
-            ],
-            axis=1,
-        )
+            obs_with_conditioning = np.concatenate(
+                [
+                    observations[:, :7],  # First 7 base observations
+                    conditioning_array,   # Conditioning variables
+                    observations[:, 7:],  # Rest of observations
+                ],
+                axis=1,
+            )
 
-        return obs_with_conditioning
+            return obs_with_conditioning
     def _set_co_player_conditioning(self):
         """Sample and store conditioning values for each environment"""
-        env_cond_list = []
+        with torch.no_grad():
+            env_cond_list = []
 
-        for i in range(self.num_envs):
-            env_cond = []
+            for i in range(self.num_envs):
+                env_cond = []
 
-            if self.co_player_reward_conditioned:
-                collision_weight = np.random.uniform(self.collision_weight_lb, self.collision_weight_ub)
-                offroad_weight = np.random.uniform(self.offroad_weight_lb, self.offroad_weight_ub)
-                goal_weight = np.random.uniform(self.goal_weight_lb, self.goal_weight_ub)
-                env_cond.extend([collision_weight, offroad_weight, goal_weight])
+                if self.co_player_reward_conditioned:
+                    collision_weight = np.random.uniform(self.collision_weight_lb, self.collision_weight_ub)
+                    offroad_weight = np.random.uniform(self.offroad_weight_lb, self.offroad_weight_ub)
+                    goal_weight = np.random.uniform(self.goal_weight_lb, self.goal_weight_ub)
+                    env_cond.extend([collision_weight, offroad_weight, goal_weight])
 
-            if self.co_player_entropy_conditioned:
-                entropy_weight = np.random.uniform(self.entropy_weight_lb, self.entropy_weight_ub)
-                env_cond.append(entropy_weight)
+                if self.co_player_entropy_conditioned:
+                    entropy_weight = np.random.uniform(self.entropy_weight_lb, self.entropy_weight_ub)
+                    env_cond.append(entropy_weight)
 
-            if self.co_player_discount_conditioned:
-                discount_weight = np.random.uniform(self.discount_weight_lb, self.discount_weight_ub)
-                env_cond.append(discount_weight)
+                if self.co_player_discount_conditioned:
+                    discount_weight = np.random.uniform(self.discount_weight_lb, self.discount_weight_ub)
+                    env_cond.append(discount_weight)
 
-            env_cond_list.append(env_cond)
+                env_cond_list.append(env_cond)
 
-        # Store as 2D array directly
-        self.env_conditioning = np.array(env_cond_list, dtype=np.float32)
+            # Store as 2D array directly
+            self.env_conditioning = np.array(env_cond_list, dtype=np.float32)
 
     def step(self, actions):
         self.terminals[:] = 0
