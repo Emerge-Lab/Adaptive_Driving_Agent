@@ -1744,6 +1744,42 @@ void init_goal_positions(Drive* env){
     }
 }
 
+void assign_ego_and_coplayer_roles(Drive* env) {
+    if (!env->population_play || env->num_ego_agents == 0) {
+        for (int i = 0; i < env->num_entities; i++) {
+            if (!env->entities[i].mark_as_expert) {
+                env->entities[i].is_ego = 1;
+            }
+        }
+        return;
+    }
+
+    // FIRST: Reset ALL flags for active agents
+    for (int i = 0; i < env->active_agent_count; i++) {
+        int entity_idx = env->active_agent_indices[i];
+        env->entities[entity_idx].is_ego = 0;
+        env->entities[entity_idx].is_co_player = 0;
+    }
+
+    // THEN: Mark ego agents
+    for (int j = 0; j < env->num_ego_agents; j++) {
+        int agent_idx = env->ego_agent_ids[j];
+        if (agent_idx >= 0 && agent_idx < env->active_agent_count) {
+            int entity_idx = env->active_agent_indices[agent_idx];
+            env->entities[entity_idx].is_ego = 1;
+        }
+    }
+
+    // FINALLY: Mark co-player agents
+    for (int j = 0; j < env->num_co_players; j++) {
+        int agent_idx = env->co_player_ids[j];
+        if (agent_idx >= 0 && agent_idx < env->active_agent_count) {
+            int entity_idx = env->active_agent_indices[agent_idx];
+            env->entities[entity_idx].is_co_player = 1;
+        }
+    }
+}
+
 Adaptive_Agent_Log* create_adaptive_agent_log(int num_scenarios) {
     Adaptive_Agent_Log* log = (Adaptive_Agent_Log*)calloc(1, sizeof(Adaptive_Agent_Log));
 
@@ -2124,42 +2160,6 @@ void move_dynamics(Drive* env, int action_idx, int agent_idx){
     }
 
     return;
-}
-
-void assign_ego_and_coplayer_roles(Drive* env) {
-    if (!env->population_play || env->num_ego_agents == 0) {
-        for (int i = 0; i < env->num_entities; i++) {
-            if (!env->entities[i].mark_as_expert) {
-                env->entities[i].is_ego = 1;
-            }
-        }
-        return;
-    }
-
-    // FIRST: Reset ALL flags for active agents
-    for (int i = 0; i < env->active_agent_count; i++) {
-        int entity_idx = env->active_agent_indices[i];
-        env->entities[entity_idx].is_ego = 0;
-        env->entities[entity_idx].is_co_player = 0;
-    }
-
-    // THEN: Mark ego agents
-    for (int j = 0; j < env->num_ego_agents; j++) {
-        int agent_idx = env->ego_agent_ids[j];
-        if (agent_idx >= 0 && agent_idx < env->active_agent_count) {
-            int entity_idx = env->active_agent_indices[agent_idx];
-            env->entities[entity_idx].is_ego = 1;
-        }
-    }
-
-    // FINALLY: Mark co-player agents
-    for (int j = 0; j < env->num_co_players; j++) {
-        int agent_idx = env->co_player_ids[j];
-        if (agent_idx >= 0 && agent_idx < env->active_agent_count) {
-            int entity_idx = env->active_agent_indices[agent_idx];
-            env->entities[entity_idx].is_co_player = 1;
-        }
-    }
 }
 
 void c_get_global_agent_state(Drive* env, float* x_out, float* y_out, float* z_out, float* heading_out, int* id_out) {

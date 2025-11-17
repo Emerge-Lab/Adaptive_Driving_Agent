@@ -1248,14 +1248,42 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
 
 def eval(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
+
+    wosac_enabled = args["wosac"]["enabled"]
+    backend = args["wosac"]["backend"] if wosac_enabled else args["vec"]["backend"]
+    assert backend == "PufferEnv" or not wosac_enabled, "WOSAC evaluation only supports PufferEnv backend."
     backend = args["vec"]["backend"]
     if backend != "PufferEnv":
         backend = "Serial"
 
     args["vec"] = dict(backend=backend, num_envs=1)
+    args["env"]["num_agents"] = args["wosac"]["num_total_wosac_agents"] if wosac_enabled else 1
+    args["env"]["init_mode"] = args["wosac"]["init_mode"] if wosac_enabled else args["env"]["init_mode"]
+    args["env"]["control_mode"] = args["wosac"]["control_mode"] if wosac_enabled else args["env"]["control_mode"]
+    args["env"]["init_steps"] = args["wosac"]["init_steps"] if wosac_enabled else args["env"]["init_steps"]
+    args["env"]["goal_behavior"] = args["wosac"]["goal_behavior"] if wosac_enabled else args["env"]["goal_behavior"]
     vecenv = vecenv or load_env(env_name, args)
 
     policy = policy or load_policy(args, vecenv, env_name)
+
+    if wosac_enabled:
+        print(f"Running WOSAC evaluation with {args['env']['num_agents']} agents. \n")
+        from pufferlib.ocean.benchmark.evaluator import WOSACEvaluator
+
+        evaluator = WOSACEvaluator(args)
+
+        # Collect ground truth trajectories from the dataset
+        gt_trajectories = evaluator.collect_ground_truth_trajectories(vecenv)
+
+        # Roll out trained policy in the simulator
+        simulated_trajectories = evaluator.collect_simulated_trajectories(args, vecenv, policy)
+
+        if args["wosac"]["sanity_check"]:
+            evaluator._quick_sanity_check(gt_trajectories, simulated_trajectories)
+
+        # Analyze and compute metrics
+        results = evaluator.compute_metrics(gt_trajectories, simulated_trajectories)
+
     ob, info = vecenv.reset()
     driver = vecenv.driver_env
     num_agents = vecenv.observation_space.shape[0]
