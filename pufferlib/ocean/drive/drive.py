@@ -458,6 +458,7 @@ class Drive(pufferlib.PufferEnv):
             self.tick = 0
             will_resample = 1
             if will_resample:
+                binding.vec_close(self.c_envs)
                 self._set_env_variables()
                 env_ids = []
                 seed = np.random.randint(0, 2**32 - 1)

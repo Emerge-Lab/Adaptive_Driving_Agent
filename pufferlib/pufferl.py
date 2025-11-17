@@ -72,7 +72,6 @@ class PuffeRL:
 
         # Vecenv info
         self.adaptive_driving_agent = getattr(vecenv.driver_env, "env_name", None) == "adaptive_drive"
-        print(f"ENV name is {getattr(vecenv.driver_env, "env_name", None)}", flush=True)
         if self.adaptive_driving_agent:
             config["bptt_horizon"] = vecenv.driver_env.episode_length
 
@@ -132,10 +131,8 @@ class PuffeRL:
         self.ratio = torch.ones(segments, horizon, device=device)
         self.importance = torch.ones(segments, horizon, device=device)
         self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
-        if self.population_play:
-            self.ep_indices = torch.arange(total_ego_agents, device=device, dtype=torch.int32)
-        else:
-            self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
+        self.ep_indices = torch.arange(total_ego_agents if self.population_play else total_agents, device=device, dtype=torch.int32)
+
         self.free_idx = total_agents
         self.render = config["render"]
         self.render_interval = config["render_interval"]
@@ -146,7 +143,7 @@ class PuffeRL:
         # LSTM
         if config["use_rnn"]:
             h = policy.hidden_size
-            if getattr(vecenv.driver_env, "population_play", False):
+            if self.population_play:
                 n = vecenv.ego_agents_per_batch  # Use ego agents per batch
                 num_chunks = total_ego_agents // n
                 self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(num_chunks)}
@@ -441,6 +438,7 @@ class PuffeRL:
                     and self.vecenv.driver_env.dynamics_model == "jerk"
                 ):
                     disc_idx = 7  # base ego obs
+                
 
                 if self.vecenv.driver_env.reward_conditioned:
                     disc_idx += 3
