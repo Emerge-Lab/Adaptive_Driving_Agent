@@ -61,6 +61,30 @@ class Drive(pufferlib.PufferEnv):
         control_mode="control_vehicles",
         k_scenarios=0,
         adaptive_driving_agent=False,
+<<<<<<< Updated upstream
+=======
+        ini_file=None,
+        # Population play parameters
+        population_play=False,
+        num_ego_agents=512,
+        ego_probability=0.9,
+        co_player_policy_name=None,
+        co_player_rnn_name=None,
+        co_player_policy_path=None,
+        co_player_policy=None,
+        co_player_rnn=None,
+        co_player_condition_type="none",
+        co_player_collision_weight_lb=-0.5,
+        co_player_collision_weight_ub=-0.5,
+        co_player_offroad_weight_lb=-0.2,
+        co_player_offroad_weight_ub=-0.2,
+        co_player_goal_weight_lb=1.0,
+        co_player_goal_weight_ub=1.0,
+        co_player_entropy_weight_lb=0.001,
+        co_player_entropy_weight_ub=0.001,
+        co_player_discount_weight_lb=0.98,
+        co_player_discount_weight_ub=0.98,
+>>>>>>> Stashed changes
     ):
         # env
         self.dt = dt
@@ -81,6 +105,39 @@ class Drive(pufferlib.PufferEnv):
         self.resample_frequency = resample_frequency
         self.ini_file = ini_file
 
+<<<<<<< Updated upstream
+=======
+        # Adaptive driving agent setup
+        self.adaptive_driving_agent = int(adaptive_driving_agent)
+        self.k_scenarios = int(k_scenarios)
+
+        # Population play setup
+        self.population_play = population_play
+        self.num_ego_agents = num_ego_agents
+        self.ego_probability = ego_probability
+        self.co_player_policy_name = co_player_policy_name
+        self.co_player_rnn_name = co_player_rnn_name
+        self.co_player_policy_path = co_player_policy_path
+        self.co_player_policy = co_player_policy
+        self.co_player_rnn = co_player_rnn
+
+        # Co-player conditioning setup
+        self.co_player_condition_type = co_player_condition_type
+        self.co_player_reward_conditioned = co_player_condition_type in ("reward", "all")
+        self.co_player_entropy_conditioned = co_player_condition_type in ("entropy", "all")
+        self.co_player_discount_conditioned = co_player_condition_type in ("discount", "all")
+        self.co_player_collision_weight_lb = co_player_collision_weight_lb
+        self.co_player_collision_weight_ub = co_player_collision_weight_ub
+        self.co_player_offroad_weight_lb = co_player_offroad_weight_lb
+        self.co_player_offroad_weight_ub = co_player_offroad_weight_ub
+        self.co_player_goal_weight_lb = co_player_goal_weight_lb
+        self.co_player_goal_weight_ub = co_player_goal_weight_ub
+        self.co_player_entropy_weight_lb = co_player_entropy_weight_lb
+        self.co_player_entropy_weight_ub = co_player_entropy_weight_ub
+        self.co_player_discount_weight_lb = co_player_discount_weight_lb
+        self.co_player_discount_weight_ub = co_player_discount_weight_ub
+
+>>>>>>> Stashed changes
         # Conditioning setup
         self.condition_type = condition_type
         self.reward_conditioned = condition_type in ("reward", "all")
@@ -177,6 +234,7 @@ class Drive(pufferlib.PufferEnv):
                 f"num_maps ({num_maps}) exceeds available maps in directory ({available_maps}). Please reduce num_maps or add more maps to resources/drive/binaries."
             )
 
+<<<<<<< Updated upstream
         if population_play:
             if num_ego_agents > num_agents:
                 raise ValueError(
@@ -276,11 +334,48 @@ class Drive(pufferlib.PufferEnv):
             local_co_player_ids = [[] for i in range(num_envs)]
             local_ego_ids = [[0] for i in range(num_envs)]
 
+=======
+        # Iterate through all maps to count total agents that can be initialized for each map
+        if self.population_play:
+            agent_offsets, map_ids, num_envs, ego_ids, co_player_ids = binding.shared(
+                num_agents=num_ego_agents,
+                num_maps=num_maps,
+                population_play=True,
+                ego_probability=ego_probability,
+            )
+            # Flatten the ego/co-player ID lists
+            self.ego_ids = [item for sublist in ego_ids for item in sublist]
+            self.co_player_ids = [item for sublist in co_player_ids for item in sublist]
+            self.total_agents = agent_offsets[num_envs]
+            self.num_ego_agents_count = len(self.ego_ids)  # Number of ego agents
+            self.num_agents = self.total_agents  # Allocate buffers for all agents (ego + co-player)
+
+            # Load co-player policy if path provided
+            if self.co_player_policy is None and self.co_player_policy_path:
+                import torch
+                checkpoint = torch.load(self.co_player_policy_path, map_location='cpu')
+                # Policy and RNN will be set by the training loop
+                print(f"Loaded co-player checkpoint from {self.co_player_policy_path}")
+        else:
+            agent_offsets, map_ids, num_envs = binding.shared(
+                num_agents=num_agents,
+                num_maps=num_maps,
+                init_mode=self.init_mode,
+                control_mode=self.control_mode,
+                init_steps=init_steps,
+                max_controlled_agents=self.max_controlled_agents,
+                population_play=False,
+            )
+            self.num_agents = num_agents
+            self.total_agents = num_agents
+
+>>>>>>> Stashed changes
         self.agent_offsets = agent_offsets
         self.map_ids = map_ids
         self.num_envs = num_envs
 
         super().__init__(buf=buf)
+<<<<<<< Updated upstream
         if self.population_play:
             self.action_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_ego_agents)
             co_player_atn_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_co_players)
@@ -290,10 +385,29 @@ class Drive(pufferlib.PufferEnv):
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=np.int32)
 
         # Create environments
+=======
+
+        # Set up co-player state if population play
+        if self.population_play:
+            self.set_co_player_state()
+
+>>>>>>> Stashed changes
         env_ids = []
         for i in range(num_envs):
             cur = agent_offsets[i]
             nxt = agent_offsets[i + 1]
+
+            # Get ego and co-player IDs for this environment
+            if self.population_play:
+                env_ego_ids = [agent_id for agent_id in self.ego_ids if cur <= agent_id < nxt]
+                env_co_player_ids = [agent_id for agent_id in self.co_player_ids if cur <= agent_id < nxt]
+                # Convert to local indices within this environment
+                env_ego_ids_local = [agent_id - cur for agent_id in env_ego_ids]
+                env_co_player_ids_local = [agent_id - cur for agent_id in env_co_player_ids]
+            else:
+                env_ego_ids_local = []
+                env_co_player_ids_local = []
+
             env_id = binding.env_init(
                 self.observations[cur:nxt],
                 self.actions[cur:nxt],
@@ -343,11 +457,39 @@ class Drive(pufferlib.PufferEnv):
                 entropy_weight_ub=self.entropy_weight_ub,
                 discount_weight_lb=self.discount_weight_lb,
                 discount_weight_ub=self.discount_weight_ub,
+<<<<<<< Updated upstream
+=======
+                init_mode=self.init_mode,
+                control_mode=self.control_mode,
+                adaptive_driving=self.adaptive_driving_agent,
+                k_scenarios=self.k_scenarios,
+                # Population play parameters
+                population_play=self.population_play,
+                num_ego_agents=len(env_ego_ids_local) if self.population_play else 0,
+                ego_agent_ids=env_ego_ids_local if self.population_play else [],
+                num_co_players=len(env_co_player_ids_local) if self.population_play else 0,
+                co_player_ids=env_co_player_ids_local if self.population_play else [],
+                # Co-player conditioning parameters
+                co_player_use_rc=self.co_player_reward_conditioned,
+                co_player_use_ec=self.co_player_entropy_conditioned,
+                co_player_use_dc=self.co_player_discount_conditioned,
+                co_player_collision_weight_lb=self.co_player_collision_weight_lb,
+                co_player_collision_weight_ub=self.co_player_collision_weight_ub,
+                co_player_offroad_weight_lb=self.co_player_offroad_weight_lb,
+                co_player_offroad_weight_ub=self.co_player_offroad_weight_ub,
+                co_player_goal_weight_lb=self.co_player_goal_weight_lb,
+                co_player_goal_weight_ub=self.co_player_goal_weight_ub,
+                co_player_entropy_weight_lb=self.co_player_entropy_weight_lb,
+                co_player_entropy_weight_ub=self.co_player_entropy_weight_ub,
+                co_player_discount_weight_lb=self.co_player_discount_weight_lb,
+                co_player_discount_weight_ub=self.co_player_discount_weight_ub,
+>>>>>>> Stashed changes
             )
             env_ids.append(env_id)
 
         self.c_envs = binding.vectorize(*env_ids)
 
+<<<<<<< Updated upstream
     def get_co_player_actions(self):
         with torch.no_grad():
             co_player_obs = self.observations[self.co_player_ids]
@@ -432,6 +574,90 @@ class Drive(pufferlib.PufferEnv):
                 env_cond.append(discount_weight)
 
             self.env_conditioning.append(np.array(env_cond, dtype=np.float32))
+=======
+    def set_co_player_state(self):
+        """Initialize hidden states for co-player policy."""
+        import torch
+
+        if not self.population_play:
+            return
+
+        num_co_players = len(self.co_player_ids)
+        if num_co_players == 0:
+            self.co_player_lstm_h = None
+            self.co_player_lstm_c = None
+            return
+
+        # Initialize hidden states for co-player RNN
+        # These will be updated by the co-player policy during inference
+        if self.co_player_rnn is not None:
+            hidden_size = self.co_player_rnn.hidden_size if hasattr(self.co_player_rnn, 'hidden_size') else 256
+            self.co_player_lstm_h = torch.zeros(num_co_players, hidden_size)
+            self.co_player_lstm_c = torch.zeros(num_co_players, hidden_size)
+        else:
+            self.co_player_lstm_h = None
+            self.co_player_lstm_c = None
+
+        # Note: Co-player conditioning weights are now sampled in C code (drive.h init function)
+
+    def get_co_player_actions(self):
+        """Run inference on co-player policy to get actions for co-player agents."""
+        import torch
+
+        if not self.population_play or len(self.co_player_ids) == 0:
+            return np.array([])
+
+        if self.co_player_policy is None or self.co_player_rnn is None:
+            # Return random actions if no co-player policy is loaded
+            num_co_players = len(self.co_player_ids)
+            if self._action_type_flag == 0:  # discrete
+                if self.dynamics_model == "classic":
+                    return np.random.randint(0, [7, 13], size=(num_co_players, 2))
+                else:  # jerk
+                    return np.random.randint(0, [4, 3], size=(num_co_players, 2))
+            else:  # continuous
+                return np.random.uniform(-1, 1, size=(num_co_players, 2)).astype(np.float32)
+
+        # Get observations for co-player agents
+        co_player_obs = self.observations[self.co_player_ids]
+
+        with torch.no_grad():
+            obs_tensor = torch.from_numpy(co_player_obs).float()
+
+            # Run policy forward pass
+            hidden = self.co_player_policy(obs_tensor)
+
+            # Run RNN forward pass
+            if self.co_player_lstm_h is not None:
+                hidden, (self.co_player_lstm_h, self.co_player_lstm_c) = self.co_player_rnn(
+                    hidden, (self.co_player_lstm_h, self.co_player_lstm_c), done=None
+                )
+
+            # Get actions from policy
+            # Assuming policy has an actor head that produces logits
+            if hasattr(self.co_player_policy, 'actor'):
+                logits = self.co_player_policy.actor(hidden)
+            else:
+                logits = hidden
+
+            if self._action_type_flag == 0:  # discrete
+                # Sample from categorical distribution
+                if self.dynamics_model == "classic":
+                    logits_accel = logits[:, :7]
+                    logits_steer = logits[:, 7:20]
+                    actions_accel = torch.argmax(logits_accel, dim=-1)
+                    actions_steer = torch.argmax(logits_steer, dim=-1)
+                    actions = torch.stack([actions_accel, actions_steer], dim=-1)
+                else:  # jerk
+                    logits_long = logits[:, :4]
+                    logits_lat = logits[:, 4:7]
+                    actions_long = torch.argmax(logits_long, dim=-1)
+                    actions_lat = torch.argmax(logits_lat, dim=-1)
+                    actions = torch.stack([actions_long, actions_lat], dim=-1)
+                return actions.cpu().numpy()
+            else:  # continuous
+                return torch.tanh(logits).cpu().numpy()
+>>>>>>> Stashed changes
 
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
@@ -440,10 +666,34 @@ class Drive(pufferlib.PufferEnv):
             info.append(self.ego_ids)
             self.reset_co_player_state()
         self.tick = 0
+<<<<<<< Updated upstream
         return self.observations, info
 
     def step(self, actions):
         self.terminals[:] = 0
+=======
+        if self.population_play:
+            # Reset co-player hidden states
+            self.set_co_player_state()
+            # Return only ego agent observations
+            return self.observations[self.ego_ids], []
+        return self.observations, []
+
+    def step(self, actions):
+        self.terminals[:] = 0
+
+        if self.population_play:
+            # Set actions for ego agents
+            self.actions[self.ego_ids] = actions
+            # Get actions for co-player agents
+            co_player_actions = self.get_co_player_actions()
+            if len(co_player_actions) > 0:
+                self.actions[self.co_player_ids] = co_player_actions
+        else:
+            self.actions[:] = actions
+
+        binding.vec_step(self.c_envs)
+>>>>>>> Stashed changes
         self.tick += 1
 
         self.actions[self.ego_ids] = actions
@@ -465,6 +715,7 @@ class Drive(pufferlib.PufferEnv):
             will_resample = 1
             if will_resample:
                 binding.vec_close(self.c_envs)
+<<<<<<< Updated upstream
                 my_shared_tuple = binding.shared(
                     num_agents=self.num_agents,
                     num_maps=self.num_maps,
@@ -511,6 +762,35 @@ class Drive(pufferlib.PufferEnv):
                     self.ego_ids = [i for i in range(agent_offsets[-1])]
                     local_co_player_ids = [[] for i in range(num_envs)]
                     local_ego_ids = [[0] for i in range(num_envs)]  # Single ego agent per env
+=======
+
+                # Resample environments
+                if self.population_play:
+                    agent_offsets, map_ids, num_envs, ego_ids, co_player_ids = binding.shared(
+                        num_agents=self.num_ego_agents,
+                        num_maps=self.num_maps,
+                        population_play=True,
+                        ego_probability=self.ego_probability,
+                    )
+                    # Update ego and co-player IDs
+                    self.ego_ids = [item for sublist in ego_ids for item in sublist]
+                    self.co_player_ids = [item for sublist in co_player_ids for item in sublist]
+                    self.total_agents = agent_offsets[num_envs]
+                    self.num_agents = len(self.ego_ids)
+
+                    # Reset co-player state with new number of co-players
+                    self.set_co_player_state()
+                else:
+                    agent_offsets, map_ids, num_envs = binding.shared(
+                        num_agents=self.num_agents,
+                        num_maps=self.num_maps,
+                        init_mode=self.init_mode,
+                        control_mode=self.control_mode,
+                        init_steps=self.init_steps,
+                        max_controlled_agents=self.max_controlled_agents,
+                        population_play=False,
+                    )
+>>>>>>> Stashed changes
 
                 env_ids = []
                 seed = np.random.randint(0, 2**32 - 1)
@@ -518,6 +798,19 @@ class Drive(pufferlib.PufferEnv):
                     cur = agent_offsets[i]
                     nxt = agent_offsets[i + 1]
 
+<<<<<<< Updated upstream
+=======
+                    # Get ego and co-player IDs for this environment (population play)
+                    if self.population_play:
+                        env_ego_ids = [agent_id for agent_id in self.ego_ids if cur <= agent_id < nxt]
+                        env_co_player_ids = [agent_id for agent_id in self.co_player_ids if cur <= agent_id < nxt]
+                        env_ego_ids_local = [agent_id - cur for agent_id in env_ego_ids]
+                        env_co_player_ids_local = [agent_id - cur for agent_id in env_co_player_ids]
+                    else:
+                        env_ego_ids_local = []
+                        env_co_player_ids_local = []
+
+>>>>>>> Stashed changes
                     env_id = binding.env_init(
                         self.observations[cur:nxt],
                         self.actions[cur:nxt],
@@ -566,6 +859,26 @@ class Drive(pufferlib.PufferEnv):
                         num_ego_agents=len(local_ego_ids[i]),
                         adaptive_driving=self.adaptive_driving_agent,
                         k_scenarios=self.k_scenarios,
+                        # Population play parameters
+                        population_play=self.population_play,
+                        num_ego_agents=len(env_ego_ids_local) if self.population_play else 0,
+                        ego_agent_ids=env_ego_ids_local if self.population_play else [],
+                        num_co_players=len(env_co_player_ids_local) if self.population_play else 0,
+                        co_player_ids=env_co_player_ids_local if self.population_play else [],
+                        # Co-player conditioning parameters
+                        co_player_use_rc=self.co_player_reward_conditioned,
+                        co_player_use_ec=self.co_player_entropy_conditioned,
+                        co_player_use_dc=self.co_player_discount_conditioned,
+                        co_player_collision_weight_lb=self.co_player_collision_weight_lb,
+                        co_player_collision_weight_ub=self.co_player_collision_weight_ub,
+                        co_player_offroad_weight_lb=self.co_player_offroad_weight_lb,
+                        co_player_offroad_weight_ub=self.co_player_offroad_weight_ub,
+                        co_player_goal_weight_lb=self.co_player_goal_weight_lb,
+                        co_player_goal_weight_ub=self.co_player_goal_weight_ub,
+                        co_player_entropy_weight_lb=self.co_player_entropy_weight_lb,
+                        co_player_entropy_weight_ub=self.co_player_entropy_weight_ub,
+                        co_player_discount_weight_lb=self.co_player_discount_weight_lb,
+                        co_player_discount_weight_ub=self.co_player_discount_weight_ub,
                     )
 
                     env_ids.append(env_id)
@@ -574,8 +887,21 @@ class Drive(pufferlib.PufferEnv):
 
                 binding.vec_reset(self.c_envs, seed)
                 self.terminals[:] = 1
+<<<<<<< Updated upstream
         if self.population_play:
             info.append(self.ego_ids)  ## this is used to slice ego and co players correctly later on
+=======
+
+        # Return only ego observations/rewards in population play mode
+        if self.population_play:
+            return (
+                self.observations[self.ego_ids],
+                self.rewards[self.ego_ids],
+                self.terminals[self.ego_ids],
+                self.truncations[self.ego_ids],
+                info
+            )
+>>>>>>> Stashed changes
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
     def get_global_agent_state(self):

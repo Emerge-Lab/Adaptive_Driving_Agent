@@ -162,6 +162,261 @@ static PyObject* my_shared_self_play(PyObject* self, PyObject* args, PyObject* k
     return tuple;
 }
 
+<<<<<<< Updated upstream
+=======
+static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObject* kwargs) {
+    int num_agents = unpack(kwargs, "num_agents");  // Number of EGO agents desired
+    int num_maps = unpack(kwargs, "num_maps");
+    double ego_probability = unpack(kwargs, "ego_probability");
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    srand(ts.tv_nsec);
+
+    // Pick one random map to use
+    int map_id = rand() % num_maps;
+    char map_file[100];
+    sprintf(map_file, "resources/drive/binaries/map_%03d.bin", map_id);
+
+    // Load the map once to see how many agents it has
+    Drive* env = calloc(1, sizeof(Drive));
+    env->init_mode = 0;  // INIT_ALL_VALID
+    env->control_mode = 0;  // CONTROL_VEHICLES
+    env->init_steps = 0;
+    env->max_controlled_agents = -1;  // No limit
+    env->entities = load_map_binary(map_file, env);
+    set_active_agents(env);
+
+    int agents_per_world = env->active_agent_count;
+
+    // Clean up the temporary env
+    for(int j = 0; j < env->num_entities; j++) {
+        free_entity(&env->entities[j]);
+    }
+    free(env->entities);
+    free(env->active_agent_indices);
+    free(env->static_agent_indices);
+    free(env->expert_static_agent_indices);
+    free(env);
+
+    if(agents_per_world == 0) {
+        PyErr_SetString(PyExc_RuntimeError, "Selected map has no agents");
+        return NULL;
+    }
+
+    // Calculate how many worlds we need to get enough agents
+    // We need more total agents than num_agents to have co-players
+    int estimated_total_agents = (int)(num_agents / ego_probability) + agents_per_world;
+    int num_worlds = (estimated_total_agents + agents_per_world - 1) / agents_per_world;  // Ceiling division
+
+    int total_agents = num_worlds * agents_per_world;
+
+    printf("Using map %d with %d agents per world\n", map_id, agents_per_world);
+    printf("Creating %d worlds for %d total agents\n", num_worlds, total_agents);
+
+    // Assign ego/co-player status to each agent
+    int* is_ego = calloc(total_agents, sizeof(int));
+    int ego_count = 0;
+
+    // First pass: assign based on probability
+    for (int i = 0; i < total_agents; i++) {
+        double rand_val = (double)rand() / RAND_MAX;
+        if (rand_val < ego_probability) {
+            is_ego[i] = 1;
+            ego_count++;
+        }
+    }
+
+    // Adjust to get exactly num_agents egos
+    while (ego_count < num_agents) {
+        int idx = rand() % total_agents;
+        if (!is_ego[idx]) {
+            is_ego[idx] = 1;
+            ego_count++;
+        }
+    }
+
+    while (ego_count > num_agents) {
+        int idx = rand() % total_agents;
+        if (is_ego[idx]) {
+            is_ego[idx] = 0;
+            ego_count--;
+        }
+    }
+
+    // Apply per-world constraints
+    for (int w = 0; w < num_worlds; w++) {
+        int world_start = w * agents_per_world;
+        int world_end = world_start + agents_per_world;
+
+        int num_egos = 0;
+        int num_coplayers = 0;
+
+        // Count egos and co-players in this world
+        for (int i = world_start; i < world_end; i++) {
+            if (is_ego[i]) {
+                num_egos++;
+            } else {
+                num_coplayers++;
+            }
+        }
+
+        // Constraint 1: At least 1 ego per world
+        if (num_egos == 0) {
+            // Promote a co-player to ego
+            for (int i = world_start; i < world_end; i++) {
+                if (!is_ego[i]) {
+                    is_ego[i] = 1;
+                    ego_count++;
+                    num_egos++;
+                    num_coplayers--;
+                    break;
+                }
+            }
+        }
+
+        // Constraint 2: If 2+ agents, at least 1 co-player
+        if (agents_per_world >= 2 && num_coplayers == 0) {
+            // Demote an ego to co-player
+            for (int i = world_start; i < world_end; i++) {
+                if (is_ego[i]) {
+                    is_ego[i] = 0;
+                    ego_count--;
+                    num_egos--;
+                    num_coplayers++;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Final rebalance to exactly num_agents egos while respecting constraints
+    while (ego_count < num_agents) {
+        int found = 0;
+        for (int w = 0; w < num_worlds && !found; w++) {
+            int world_start = w * agents_per_world;
+            int world_end = world_start + agents_per_world;
+
+            // Count co-players in this world
+            int coplayer_count = 0;
+            for (int i = world_start; i < world_end; i++) {
+                if (!is_ego[i]) coplayer_count++;
+            }
+
+            // Can we promote a co-player? (need to keep at least 1 if world has 2+ agents)
+            if (agents_per_world < 2 || coplayer_count > 1) {
+                for (int i = world_start; i < world_end; i++) {
+                    if (!is_ego[i]) {
+                        is_ego[i] = 1;
+                        ego_count++;
+                        found = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found) break;
+    }
+
+    while (ego_count > num_agents) {
+        int found = 0;
+        for (int w = 0; w < num_worlds && !found; w++) {
+            int world_start = w * agents_per_world;
+            int world_end = world_start + agents_per_world;
+
+            // Count egos in this world
+            int ego_count_in_world = 0;
+            for (int i = world_start; i < world_end; i++) {
+                if (is_ego[i]) ego_count_in_world++;
+            }
+
+            // Can we demote an ego? (need to keep at least 1)
+            if (ego_count_in_world > 1) {
+                for (int i = world_start; i < world_end; i++) {
+                    if (is_ego[i]) {
+                        is_ego[i] = 0;
+                        ego_count--;
+                        found = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found) break;
+    }
+
+    // Build output lists (similar to my_shared_self_play)
+    PyObject* agent_offsets = PyList_New(num_worlds + 1);
+    PyObject* map_ids = PyList_New(num_worlds);
+    PyObject* ego_agent_ids = PyList_New(num_worlds);
+    PyObject* coplayer_ids = PyList_New(num_worlds);
+
+    int current_agent_id = 0;
+    int total_egos = 0;
+    int total_coplayers = 0;
+
+    for (int w = 0; w < num_worlds; w++) {
+        // Store agent offset for this world
+        PyList_SetItem(agent_offsets, w, PyLong_FromLong(current_agent_id));
+
+        // Store map_id (same map for all worlds)
+        PyList_SetItem(map_ids, w, PyLong_FromLong(map_id));
+
+        // Build ego and co-player lists for this world
+        PyObject* ego_list = PyList_New(0);
+        PyObject* coplayer_list = PyList_New(0);
+
+        int world_start = w * agents_per_world;
+        int world_end = world_start + agents_per_world;
+
+        for (int i = world_start; i < world_end; i++) {
+            PyObject* agent_id = PyLong_FromLong(current_agent_id);
+
+            if (is_ego[i]) {
+                PyList_Append(ego_list, agent_id);
+                total_egos++;
+            } else {
+                PyList_Append(coplayer_list, agent_id);
+                total_coplayers++;
+            }
+
+            Py_DECREF(agent_id);
+            current_agent_id++;
+        }
+
+        PyList_SetItem(ego_agent_ids, w, ego_list);
+        PyList_SetItem(coplayer_ids, w, coplayer_list);
+    }
+
+    // Store final total agent count
+    PyList_SetItem(agent_offsets, num_worlds, PyLong_FromLong(current_agent_id));
+
+    // Create return tuple
+    PyObject* tuple = PyTuple_New(5);
+    PyTuple_SetItem(tuple, 0, agent_offsets);
+    PyTuple_SetItem(tuple, 1, map_ids);
+    PyTuple_SetItem(tuple, 2, PyLong_FromLong(num_worlds));
+    PyTuple_SetItem(tuple, 3, ego_agent_ids);
+    PyTuple_SetItem(tuple, 4, coplayer_ids);
+
+    // Cleanup
+    free(is_ego);
+
+    printf("Total worlds: %d, Total agents: %d (egos: %d, co-players: %d)\n",
+           num_worlds, current_agent_id, total_egos, total_coplayers);
+
+    return tuple;
+}
+
+static PyObject* my_shared(PyObject* self, PyObject* args, PyObject* kwargs) {
+    int population_play = unpack(kwargs, "population_play");
+    if (population_play) {
+        return my_shared_population_play(self, args, kwargs);
+    } else {
+        return my_shared_self_play(self, args, kwargs);
+    }
+}
+
+>>>>>>> Stashed changes
 static double* unpack_float_array(PyObject* kwargs, char* key, Py_ssize_t* out_size) {
     PyObject* val = PyDict_GetItemString(kwargs, key);
     if (val == NULL) {
@@ -194,7 +449,10 @@ static double* unpack_float_array(PyObject* kwargs, char* key, Py_ssize_t* out_s
         return NULL;
     }
 
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
     for (Py_ssize_t i = 0; i < size; i++) {
         PyObject* item = PySequence_GetItem(val, i);
         if (item == NULL) {
@@ -231,6 +489,7 @@ static double* unpack_float_array(PyObject* kwargs, char* key, Py_ssize_t* out_s
         Py_DECREF(item);
     }
 
+<<<<<<< Updated upstream
     return array;
 }
 
@@ -461,6 +720,12 @@ static PyObject* my_shared(PyObject* self, PyObject* args, PyObject* kwargs) {
     }
 
 }
+=======
+    *out_size = size;
+    return array;
+}
+
+>>>>>>> Stashed changes
 static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->human_agent_idx = unpack(kwargs, "human_agent_idx");
     env->ini_file = unpack_str(kwargs, "ini_file");
@@ -572,6 +837,70 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     }
 
     int init_steps = unpack(kwargs, "init_steps");
+
+    // Population play setup
+    env->population_play = unpack(kwargs, "population_play");
+
+    if (env->population_play) {
+        env->num_co_players = unpack(kwargs, "num_co_players");
+        Py_ssize_t co_player_count;
+        double* co_player_ids_d = unpack_float_array(kwargs, "co_player_ids", &co_player_count);
+        if (co_player_ids_d != NULL && co_player_count > 0) {
+            env->co_player_ids = (int*)malloc(co_player_count * sizeof(int));
+            for (int i = 0; i < co_player_count; i++) {
+                env->co_player_ids[i] = (int)co_player_ids_d[i];
+            }
+            free(co_player_ids_d);
+        } else {
+            env->co_player_ids = NULL;
+            env->num_co_players = 0;
+        }
+
+        // Handle ego agents
+        env->num_ego_agents = unpack(kwargs, "num_ego_agents");
+        if (env->num_ego_agents > 0) {
+            Py_ssize_t ego_count;
+            double* ego_agent_ids_d = unpack_float_array(kwargs, "ego_agent_ids", &ego_count);
+            if (ego_agent_ids_d != NULL) {
+                env->ego_agent_ids = (int*)malloc(ego_count * sizeof(int));
+                for (int i = 0; i < ego_count; i++) {
+                    env->ego_agent_ids[i] = (int)ego_agent_ids_d[i];
+                }
+                free(ego_agent_ids_d);
+            } else {
+                env->ego_agent_ids = NULL;
+                env->num_ego_agents = 0;
+            }
+        } else {
+            env->ego_agent_ids = NULL;
+            env->num_ego_agents = 0;
+        }
+
+        // Co-player conditioning parameters
+        env->co_player_use_rc = (bool)unpack(kwargs, "co_player_use_rc");
+        env->co_player_use_ec = (bool)unpack(kwargs, "co_player_use_ec");
+        env->co_player_use_dc = (bool)unpack(kwargs, "co_player_use_dc");
+        env->co_player_collision_weight_lb = (float)unpack(kwargs, "co_player_collision_weight_lb");
+        env->co_player_collision_weight_ub = (float)unpack(kwargs, "co_player_collision_weight_ub");
+        env->co_player_offroad_weight_lb = (float)unpack(kwargs, "co_player_offroad_weight_lb");
+        env->co_player_offroad_weight_ub = (float)unpack(kwargs, "co_player_offroad_weight_ub");
+        env->co_player_goal_weight_lb = (float)unpack(kwargs, "co_player_goal_weight_lb");
+        env->co_player_goal_weight_ub = (float)unpack(kwargs, "co_player_goal_weight_ub");
+        env->co_player_entropy_weight_lb = (float)unpack(kwargs, "co_player_entropy_weight_lb");
+        env->co_player_entropy_weight_ub = (float)unpack(kwargs, "co_player_entropy_weight_ub");
+        env->co_player_discount_weight_lb = (float)unpack(kwargs, "co_player_discount_weight_lb");
+        env->co_player_discount_weight_ub = (float)unpack(kwargs, "co_player_discount_weight_ub");
+    } else {
+        // Non-population play mode - set defaults
+        env->num_ego_agents = 0;
+        env->ego_agent_ids = NULL;
+        env->num_co_players = 0;
+        env->co_player_ids = NULL;
+        env->co_player_use_rc = false;
+        env->co_player_use_ec = false;
+        env->co_player_use_dc = false;
+    }
+
     char map_file[100];
     sprintf(map_file, "resources/drive/binaries/map_%03d.bin", map_id);
     env->num_agents = max_agents;

@@ -149,6 +149,20 @@ struct Log {
     float avg_collisions_per_agent;
 };
 
+typedef struct Co_Player_Log Co_Player_Log;
+struct Co_Player_Log {
+    float co_player_episode_return;
+    float co_player_episode_length;
+    float co_player_perf;
+    float co_player_score;
+    float co_player_offroad_rate;
+    float co_player_collision_rate;
+    float co_player_clean_collision_rate;
+    float co_player_completion_rate;
+    float co_player_dnf_rate;
+    float co_player_n;
+};
+
 typedef struct Entity Entity;
 struct Entity {
     int scenario_id;
@@ -209,6 +223,10 @@ struct Entity {
     float jerk_lat;
     float steering_angle;
     float wheelbase;
+
+    // Population play
+    bool is_ego;
+    bool is_co_player;
 };
 
 struct Co_Player_Log {
@@ -435,6 +453,44 @@ struct Drive {
     float discount_weight_lb;
     float discount_weight_ub;
     float* discount_weights;
+<<<<<<< Updated upstream
+=======
+    // Adaptive driving agent
+    Adaptive_Agent_Log* ada_log;
+    Adaptive_Agent_Log** ada_logs;
+    bool adaptive_driving_agent;
+    int k_scenarios;
+    int current_scenario;
+
+    // Population play
+    bool population_play;
+    int* co_player_ids;
+    int* ego_agent_ids;
+    int num_co_players;
+    int num_ego_agents;
+    Co_Player_Log co_player_log;
+    Co_Player_Log* co_player_logs;
+
+    // Co-player conditioning
+    bool co_player_use_rc;
+    bool co_player_use_ec;
+    bool co_player_use_dc;
+    float co_player_collision_weight_lb;
+    float co_player_collision_weight_ub;
+    float co_player_offroad_weight_lb;
+    float co_player_offroad_weight_ub;
+    float co_player_goal_weight_lb;
+    float co_player_goal_weight_ub;
+    float co_player_entropy_weight_lb;
+    float co_player_entropy_weight_ub;
+    float co_player_discount_weight_lb;
+    float co_player_discount_weight_ub;
+    float* co_player_collision_weights;
+    float* co_player_offroad_weights;
+    float* co_player_goal_weights;
+    float* co_player_entropy_weights;
+    float* co_player_discount_weights;
+>>>>>>> Stashed changes
 };
 
 // void add_log(Drive* env) {
@@ -1862,7 +1918,50 @@ void init(Drive* env){
     set_start_position(env);
     init_goal_positions(env);
     env->logs = (Log*)calloc(env->active_agent_count, sizeof(Log));
+<<<<<<< Updated upstream
     
+=======
+
+    // Population play: mark agents as ego or co-player
+    if (env->population_play) {
+        // Initialize co-player logs
+        env->co_player_logs = (Co_Player_Log*)calloc(env->active_agent_count, sizeof(Co_Player_Log));
+        memset(&env->co_player_log, 0, sizeof(Co_Player_Log));
+
+        // Mark all agents as ego or co-player based on the IDs
+        for (int i = 0; i < env->active_agent_count; i++) {
+            int agent_id = env->active_agent_indices[i];
+            Entity* e = &env->entities[agent_id];
+            e->is_ego = false;
+            e->is_co_player = false;
+
+            // Check if this agent is in ego_agent_ids
+            for (int j = 0; j < env->num_ego_agents; j++) {
+                if (i == env->ego_agent_ids[j]) {
+                    e->is_ego = true;
+                    break;
+                }
+            }
+
+            // Check if this agent is in co_player_ids
+            for (int j = 0; j < env->num_co_players; j++) {
+                if (i == env->co_player_ids[j]) {
+                    e->is_co_player = true;
+                    break;
+                }
+            }
+        }
+    } else {
+        // Non-population play: all agents are ego agents
+        for (int i = 0; i < env->active_agent_count; i++) {
+            int agent_id = env->active_agent_indices[i];
+            Entity* e = &env->entities[agent_id];
+            e->is_ego = true;
+            e->is_co_player = false;
+        }
+    }
+
+>>>>>>> Stashed changes
     if (env->use_rc) {
         printf("reward conditioning initialized.\n");
         env->collision_weights = (float*)calloc(env->active_agent_count, sizeof(float));
@@ -1883,6 +1982,7 @@ void init(Drive* env){
         printf("discount conditioning initialized.\n");
         env->discount_weights = (float*)calloc(env->active_agent_count, sizeof(float));
     }
+<<<<<<< Updated upstream
     else{
         printf("discount conditioning not used.\n");
     }
@@ -1909,6 +2009,23 @@ void free_adaptive_agent_log(Adaptive_Agent_Log* log) {
     free(log->static_agent_count);
 
     free(log);
+=======
+
+    // Co-player conditioning weights allocation (sampling happens in c_reset)
+    if (env->population_play && env->num_co_players > 0) {
+        if (env->co_player_use_rc) {
+            env->co_player_collision_weights = (float*)calloc(env->active_agent_count, sizeof(float));
+            env->co_player_offroad_weights = (float*)calloc(env->active_agent_count, sizeof(float));
+            env->co_player_goal_weights = (float*)calloc(env->active_agent_count, sizeof(float));
+        }
+        if (env->co_player_use_ec) {
+            env->co_player_entropy_weights = (float*)calloc(env->active_agent_count, sizeof(float));
+        }
+        if (env->co_player_use_dc) {
+            env->co_player_discount_weights = (float*)calloc(env->active_agent_count, sizeof(float));
+        }
+    }
+>>>>>>> Stashed changes
 }
 
 void c_close(Drive* env){
@@ -1928,6 +2045,33 @@ void c_close(Drive* env){
     free(env->entities);
     free(env->active_agent_indices);
     free(env->logs);
+<<<<<<< Updated upstream
+=======
+    // Adaptive agent logs cleanup
+    if (env->adaptive_driving_agent && env->ada_logs != NULL) {
+        for (int i = 0; i < env->active_agent_count; i++) {
+            free_adaptive_agent_log(env->ada_logs[i]);
+        }
+        free(env->ada_logs);
+    }
+    // Population play cleanup
+    if (env->population_play) {
+        free(env->co_player_logs);
+        free(env->co_player_ids);
+        free(env->ego_agent_ids);
+        if (env->co_player_use_rc) {
+            free(env->co_player_collision_weights);
+            free(env->co_player_offroad_weights);
+            free(env->co_player_goal_weights);
+        }
+        if (env->co_player_use_ec) {
+            free(env->co_player_entropy_weights);
+        }
+        if (env->co_player_use_dc) {
+            free(env->co_player_discount_weights);
+        }
+    }
+>>>>>>> Stashed changes
     // GridMap cleanup
     int grid_cell_count = env->grid_map->grid_cols*env->grid_map->grid_rows;
     for(int grid_index = 0; grid_index < grid_cell_count; grid_index++){
@@ -2526,6 +2670,46 @@ void c_reset(Drive* env){
     if (env->use_dc) {
         for(int i = 0; i < env->active_agent_count; i++) {
             env->discount_weights[i] = ((float)rand() / RAND_MAX) * (env->discount_weight_ub - env->discount_weight_lb) + env->discount_weight_lb;
+        }
+    }
+
+    // Co-player conditioning weights sampling
+    if (env->population_play && env->num_co_players > 0) {
+        if (env->co_player_use_rc) {
+            for (int i = 0; i < env->active_agent_count; i++) {
+                Entity* e = &env->entities[env->active_agent_indices[i]];
+                if (e->is_co_player) {
+                    env->co_player_collision_weights[i] =
+                        env->co_player_collision_weight_lb +
+                        ((float)rand() / RAND_MAX) * (env->co_player_collision_weight_ub - env->co_player_collision_weight_lb);
+                    env->co_player_offroad_weights[i] =
+                        env->co_player_offroad_weight_lb +
+                        ((float)rand() / RAND_MAX) * (env->co_player_offroad_weight_ub - env->co_player_offroad_weight_lb);
+                    env->co_player_goal_weights[i] =
+                        env->co_player_goal_weight_lb +
+                        ((float)rand() / RAND_MAX) * (env->co_player_goal_weight_ub - env->co_player_goal_weight_lb);
+                }
+            }
+        }
+        if (env->co_player_use_ec) {
+            for (int i = 0; i < env->active_agent_count; i++) {
+                Entity* e = &env->entities[env->active_agent_indices[i]];
+                if (e->is_co_player) {
+                    env->co_player_entropy_weights[i] =
+                        env->co_player_entropy_weight_lb +
+                        ((float)rand() / RAND_MAX) * (env->co_player_entropy_weight_ub - env->co_player_entropy_weight_lb);
+                }
+            }
+        }
+        if (env->co_player_use_dc) {
+            for (int i = 0; i < env->active_agent_count; i++) {
+                Entity* e = &env->entities[env->active_agent_indices[i]];
+                if (e->is_co_player) {
+                    env->co_player_discount_weights[i] =
+                        env->co_player_discount_weight_lb +
+                        ((float)rand() / RAND_MAX) * (env->co_player_discount_weight_ub - env->co_player_discount_weight_lb);
+                }
+            }
         }
     }
 

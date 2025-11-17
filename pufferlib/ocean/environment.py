@@ -181,6 +181,11 @@ def make_multiagent(buf=None, **kwargs):
 
 MAKE_FUNCTIONS = {
     "drive": "Drive",
+<<<<<<< Updated upstream
+=======
+    "adaptive_drive": "AdaptiveDrivingAgent",
+    "drive_population": "Drive",  # Population play uses same Drive class
+>>>>>>> Stashed changes
     "spaces": make_spaces,
     "multiagent": make_multiagent,
     "adaptive_driving_agent": "AdaptiveDrivingAgent",
