@@ -7,6 +7,7 @@ import pufferlib
 from pufferlib.ocean.drive import binding
 import torch
 
+
 class Drive(pufferlib.PufferEnv):
     def __init__(
         self,
@@ -129,13 +130,13 @@ class Drive(pufferlib.PufferEnv):
 
         if self.co_player_condition_type != "none" and self.condition_type != "none" and self.population_play:
             raise NotImplementedError("Simultaneous Ego and Co player conditioning not impelemented ")
-    
+
         self.num_agents = num_agents
         self.num_ego_agents = num_ego_agents
         self.init_steps = init_steps
         self.init_mode_str = init_mode
         self.control_mode_str = control_mode
-    
+
         if self.control_mode_str == "control_vehicles":
             self.control_mode = 0
         elif self.control_mode_str == "control_agents":
@@ -285,7 +286,6 @@ class Drive(pufferlib.PufferEnv):
             num_ego_agents=self.num_ego_agents,
         )
 
-
         if self.population_play:
             self.agent_offsets, self.map_ids, num_envs, ego_ids, co_player_ids = my_shared_tuple
 
@@ -305,7 +305,7 @@ class Drive(pufferlib.PufferEnv):
 
             if ego_set | co_player_set != all_agents:
                 raise ValueError("Missing agent ids")
-            
+
             if self.num_ego_agents + self.num_co_players != self.num_agents:
                 raise ValueError("Mismatch between number of ego/co players and number of agents")
 
@@ -356,7 +356,7 @@ class Drive(pufferlib.PufferEnv):
             co_player_action = co_player_action.cpu().numpy().reshape(self.co_player_actions.shape)
         return co_player_action
 
-    def _set_co_player_state(self): ## set in init (state doesnt get updated anywhere else)
+    def _set_co_player_state(self):  ## set in init (state doesnt get updated anywhere else)
         with torch.no_grad():
             self.state = dict(
                 lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
@@ -387,27 +387,28 @@ class Drive(pufferlib.PufferEnv):
 
             # Get the number of co-players per environment
             num_co_players_per_env = np.array([len(ids) for ids in self.local_co_player_ids])
-            
+
             # Early return if no co-players at all
             if num_co_players_per_env.sum() == 0:
                 return observations
-            
+
             # Create indices for which environment each co-player belongs to
             env_indices = np.repeat(np.arange(self.num_envs), num_co_players_per_env)
-            
+
             # self.env_conditioning is already a 2D array, just index directly
             conditioning_array = self.env_conditioning[env_indices]
 
             obs_with_conditioning = np.concatenate(
                 [
                     observations[:, :7],  # First 7 base observations
-                    conditioning_array,   # Conditioning variables
+                    conditioning_array,  # Conditioning variables
                     observations[:, 7:],  # Rest of observations
                 ],
                 axis=1,
             )
 
             return obs_with_conditioning
+
     def _set_co_player_conditioning(self):
         """Sample and store conditioning values for each environment"""
         with torch.no_grad():
@@ -437,14 +438,13 @@ class Drive(pufferlib.PufferEnv):
 
     def step(self, actions):
         self.terminals[:] = 0
-        
+
         self.actions[self.ego_ids] = actions
 
         if self.population_play:
-      
             co_player_actions = self.get_co_player_actions()
             self.actions[self.co_player_ids] = co_player_actions
-    
+
         binding.vec_step(self.c_envs)
 
         self.tick += 1
@@ -522,7 +522,6 @@ class Drive(pufferlib.PufferEnv):
         if self.population_play:
             info.append(self.ego_ids)  ## this is used to slice ego and co players correctly later on
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
-
 
     def get_global_agent_state(self):
         """Get current global state of all active agents.

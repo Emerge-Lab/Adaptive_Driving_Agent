@@ -33,7 +33,7 @@ def send_precheck(vecenv, actions):
     actions = np.asarray(actions)
     if not vecenv.initialized:
         vecenv.initialized = True
-        if getattr(vecenv ,"population_play", False):
+        if getattr(vecenv, "population_play", False):
             if not vecenv.ego_action_space.contains(actions):
                 raise pufferlib.APIUsageError("Ego Actions do not match action space")
         else:
@@ -845,7 +845,6 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
             ego_features = 7
         elif dynamics_model == "jerk":
             ego_features = 10
-        
 
         co_player_policy = env_k["co_player_policy"]
 
@@ -857,22 +856,22 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         reward_conditioned = condition_type in ("reward", "all")
         entropy_conditioned = condition_type in ("entropy", "all")
         discount_conditioned = condition_type in ("discount", "all")
-        print(f"DEBUG: condition type: {condition_type}", flush = True)
+        print(f"DEBUG: condition type: {condition_type}", flush=True)
         # Calculate conditioning dimensions
         conditioning_dims = (
             (3 if reward_conditioned else 0) + (1 if entropy_conditioned else 0) + (1 if discount_conditioned else 0)
         )
-        print(f"DEBUG: condition dims {conditioning_dims}", flush= True)
+        print(f"DEBUG: condition dims {conditioning_dims}", flush=True)
         # Base observations + conditioning observations
         num_obs = ego_features + conditioning_dims + 63 * 7 + 200 * 7
-        
+
         temp_env = SimpleNamespace(
             single_action_space=gymnasium.spaces.MultiDiscrete([7, 13]),
             single_observation_space=gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32),
             reward_conditioned=reward_conditioned,
             entropy_conditioned=entropy_conditioned,
             discount_conditioned=discount_conditioned,
-            dynamics_model = dynamics_model, ## keep these the same I think, multiple dynamics models could get weird
+            dynamics_model=dynamics_model,  ## keep these the same I think, multiple dynamics models could get weird
         )
 
         base_policy = Drive(temp_env, input_size=input_size, hidden_size=hidden_size)

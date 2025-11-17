@@ -131,7 +131,9 @@ class PuffeRL:
         self.ratio = torch.ones(segments, horizon, device=device)
         self.importance = torch.ones(segments, horizon, device=device)
         self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
-        self.ep_indices = torch.arange(total_ego_agents if self.population_play else total_agents, device=device, dtype=torch.int32)
+        self.ep_indices = torch.arange(
+            total_ego_agents if self.population_play else total_agents, device=device, dtype=torch.int32
+        )
 
         self.free_idx = total_agents
         self.render = config["render"]
@@ -162,8 +164,6 @@ class PuffeRL:
 
         max_minibatch_size = config["max_minibatch_size"]
         self.minibatch_size = min(minibatch_size, max_minibatch_size)
-
-        
 
         if minibatch_size > max_minibatch_size and minibatch_size % max_minibatch_size != 0:
             raise pufferlib.APIUsageError(
@@ -438,7 +438,6 @@ class PuffeRL:
                     and self.vecenv.driver_env.dynamics_model == "jerk"
                 ):
                     disc_idx = 7  # base ego obs
-                
 
                 if self.vecenv.driver_env.reward_conditioned:
                     disc_idx += 3

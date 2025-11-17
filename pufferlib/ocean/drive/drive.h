@@ -1829,7 +1829,7 @@ void init(Drive* env){
         }
     }
     if (env->population_play) {
-        
+
 
         if (env->co_player_logs) {
             free(env->co_player_logs);
