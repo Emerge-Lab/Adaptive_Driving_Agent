@@ -14,41 +14,51 @@ def run_training_test(env_name, config_overrides, target_steps=10000, test_name=
     try:
         args = load_config(env_name)
 
-        args["train"].update({
-            "device": "cpu",
-            "compile": False,
-            "total_timesteps": 100000,
-            "batch_size": 128,
-            "bptt_horizon": 8,
-            "minibatch_size": 128,
-            "max_minibatch_size": 128,
-            "update_epochs": 1,
-            "render": False,
-            "checkpoint_interval": 999999,
-            "learning_rate": 0.001,
-        })
+        args["train"].update(
+            {
+                "device": "cpu",
+                "compile": False,
+                "total_timesteps": 100000,
+                "batch_size": 128,
+                "bptt_horizon": 8,
+                "minibatch_size": 128,
+                "max_minibatch_size": 128,
+                "update_epochs": 1,
+                "render": False,
+                "checkpoint_interval": 999999,
+                "learning_rate": 0.001,
+            }
+        )
 
-        args["vec"].update({
-            "num_workers": 1,
-            "num_envs": 1,
-            "batch_size": 1,
-        })
+        args["vec"].update(
+            {
+                "num_workers": 1,
+                "num_envs": 1,
+                "batch_size": 1,
+            }
+        )
 
-        args["env"].update({
-            "num_agents": 8,
-            "action_type": "discrete",
-            "num_maps": 1,
-        })
+        args["env"].update(
+            {
+                "num_agents": 8,
+                "action_type": "discrete",
+                "num_maps": 1,
+            }
+        )
 
-        args["policy"].update({
-            "input_size": 64,
-            "hidden_size": 64,
-        })
+        args["policy"].update(
+            {
+                "input_size": 64,
+                "hidden_size": 64,
+            }
+        )
 
-        args["rnn"].update({
-            "input_size": 64,
-            "hidden_size": 64,
-        })
+        args["rnn"].update(
+            {
+                "input_size": 64,
+                "hidden_size": 64,
+            }
+        )
 
         args["wandb"] = False
         args["neptune"] = False
@@ -119,7 +129,7 @@ def test_scenario_1_normal_training():
             "co_player_policy": {"enabled": False},
             "policy.conditioning": {"type": "none"},
         },
-        test_name="Scenario 1: Normal Training (Baseline)"
+        test_name="Scenario 1: Normal Training (Baseline)",
     )
 
 
@@ -138,7 +148,7 @@ def test_scenario_2_conditioned_self_play():
                 "goal_weight_ub": 1.0,
             },
         },
-        test_name="Scenario 2: Conditioned Self-Play"
+        test_name="Scenario 2: Conditioned Self-Play",
     )
 
 
@@ -149,9 +159,9 @@ def test_scenario_3_adaptive_self_play():
             "env": {"k_scenarios": 2, "scenario_length": 4},
             "co_player_policy": {"enabled": False},
             "policy.conditioning": {"type": "none"},
-            "train": {"minibatch_multiplier": 1}
+            "train": {"minibatch_multiplier": 1},
         },
-        test_name="Scenario 3: Adaptive Agent Self-Play"
+        test_name="Scenario 3: Adaptive Agent Self-Play",
     )
 
 
@@ -188,7 +198,7 @@ def test_scenario_4_population_play_normal():
                 "discount_weight_ub": 0.80,
             },
         },
-        test_name="Scenario 4: Population Play (Normal + Conditioned Co-players)"
+        test_name="Scenario 4: Population Play (Normal + Conditioned Co-players)",
     )
 
 
@@ -225,7 +235,7 @@ def test_scenario_5_population_play_adaptive():
                 "discount_weight_ub": 0.80,
             },
         },
-        test_name="Scenario 5: Population Play (Adaptive + Conditioned Co-players)"
+        test_name="Scenario 5: Population Play (Adaptive + Conditioned Co-players)",
     )
 
 
