@@ -57,7 +57,7 @@ class Drive(pufferlib.PufferEnv):
         init_steps=0,
         init_mode="create_all_valid",
         control_mode="control_vehicles",
-        k_scenarios=0,
+        k_scenarios=1,
         adaptive_driving_agent=False,
         ini_file="pufferlib/config/ocean/drive.ini",
     ):
