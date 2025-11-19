@@ -477,7 +477,6 @@ void add_log(Drive* env) {
     }    
 }
 
-
 struct AdjListNode {
     int dest;
     struct AdjListNode* next;
@@ -1643,6 +1642,24 @@ void init(Drive* env){
             env->co_player_logs = NULL;
         }
 
+        if (env->active_agent_count > 0) {
+            env->co_player_logs = (Co_Player_Log*)calloc(env->active_agent_count, sizeof(Co_Player_Log));
+        } else {
+            env->co_player_logs = NULL;
+        }
+
+        memset(&env->co_player_log, 0, sizeof(Co_Player_Log));
+    }
+    if (env->population_play) {
+
+
+        if (env->co_player_logs) {
+            free(env->co_player_logs);
+            env->co_player_logs = NULL;
+        }
+
+        // Always allocate for all active agents, not just co-players
+        // because we index by x which goes from 0 to active_agent_count-1
         if (env->active_agent_count > 0) {
             env->co_player_logs = (Co_Player_Log*)calloc(env->active_agent_count, sizeof(Co_Player_Log));
         } else {
