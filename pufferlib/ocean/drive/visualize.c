@@ -98,32 +98,32 @@ void renderTopDownView(Drive* env, Client* client, int map_height, int obs, int 
 
     // Draw human replay trajectories if enabled
     if(log_trajectories){
-    for(int i=0; i<env->active_agent_count; i++){
-        int idx = env->active_agent_indices[i];
-        Vector3 prev_point = {0};
-        bool has_prev = false;
+        for(int i=0; i<env->active_agent_count; i++){
+            int idx = env->active_agent_indices[i];
+            Vector3 prev_point = {0};
+            bool has_prev = false;
 
-        for(int j = 0; j < env->entities[idx].array_size; j++){
-            float x = env->entities[idx].traj_x[j];
-            float y = env->entities[idx].traj_y[j];
-            float valid = env->entities[idx].traj_valid[j];
+            for(int j = 0; j < env->entities[idx].array_size; j++){
+                float x = env->entities[idx].traj_x[j];
+                float y = env->entities[idx].traj_y[j];
+                float valid = env->entities[idx].traj_valid[j];
 
-            if(!valid) {
-                has_prev = false;
-                continue;
+                if(!valid) {
+                    has_prev = false;
+                    continue;
+                }
+
+                Vector3 curr_point = {x, y, 0.5f};
+
+                if(has_prev) {
+                    DrawLine3D(prev_point, curr_point, Fade(LIGHTGREEN, 0.6f));
+                }
+
+                prev_point = curr_point;
+                has_prev = true;
             }
-
-            Vector3 curr_point = {x, y, 0.5f};
-
-            if(has_prev) {
-                DrawLine3D(prev_point, curr_point, Fade(LIGHTGREEN, 0.6f));
-            }
-
-            prev_point = curr_point;
-            has_prev = true;
         }
     }
-}
 
     // Draw agent trajs
     if(trajectories){
@@ -542,6 +542,7 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--use-dc") == 0) {
             if (i + 1 < argc) {
                 use_dc = atoi(argv[i + 1]);
+            }
         } else if (strcmp(argv[i], "--goal-behavior") == 0) {
             if (i + 1 < argc) {
                 goal_behavior = atoi(argv[i + 1]);
