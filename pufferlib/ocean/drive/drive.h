@@ -436,8 +436,8 @@ void add_log(Drive* env) {
             env->log.active_agent_count += env->active_agent_count;
             env->log.expert_static_agent_count += env->expert_static_agent_count;
             env->log.static_agent_count += env->static_agent_count;
-            env->log.n += 1.0f;         
-            
+            env->log.n += 1.0f;
+
         }
         // Process co-player agents (separate if, not else-if!)
         if (e->is_co_player && env->co_player_logs != NULL) {
@@ -474,7 +474,7 @@ void add_log(Drive* env) {
 
             env->co_player_log.co_player_n += 1.0f;
         }
-    }    
+    }
 }
 
 struct AdjListNode {
