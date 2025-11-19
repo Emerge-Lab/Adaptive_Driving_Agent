@@ -221,12 +221,12 @@ def render_videos(config, vecenv, logger, global_step, bin_path):
         if vecenv.driver_env.control_mode is not None:
             cmd.extend(["--control-mode", str(vecenv.driver_env.control_mode)])
 
-        if hasattr(self.vecenv.driver_env, "reward_conditioned"):
-            cmd.extend(["--use-rc", "1" if self.vecenv.driver_env.reward_conditioned else "0"])
-        if hasattr(self.vecenv.driver_env, "entropy_conditioned"):
-            cmd.extend(["--use-ec", "1" if self.vecenv.driver_env.entropy_conditioned else "0"])
-        if hasattr(self.vecenv.driver_env, "discount_conditioned"):
-            cmd.extend(["--use-dc", "1" if self.vecenv.driver_env.discount_conditioned else "0"])
+        if hasattr(vecenv.driver_env, "reward_conditioned"):
+            cmd.extend(["--use-rc", "1" if vecenv.driver_env.reward_conditioned else "0"])
+        if hasattr(vecenv.driver_env, "entropy_conditioned"):
+            cmd.extend(["--use-ec", "1" if vecenv.driver_env.entropy_conditioned else "0"])
+        if hasattr(vecenv.driver_env, "discount_conditioned"):
+            cmd.extend(["--use-dc", "1" if vecenv.driver_env.discount_conditioned else "0"])
 
         # Specify output paths for videos
         cmd.extend(["--output-topdown", "resources/drive/output_topdown.mp4"])
