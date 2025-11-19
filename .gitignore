@@ -183,4 +183,4 @@ pufferlib/resources/drive/output_agent.gif pufferlib/resources/drive/output.gif 
 # Local artifacts and outputs
 artifacts/
 # Local drive renders
-pufferlib/resources/drive/output*.gif
+pufferlib/resources/drive/output*.mp4
