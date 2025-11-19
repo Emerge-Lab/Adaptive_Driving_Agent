@@ -243,6 +243,7 @@ def test_scenario_5_population_play_adaptive():
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         scenario = sys.argv[1]
+        sys.argv = sys.argv[:1]
         if scenario == "1" or scenario == "normal":
             test_scenario_1_normal_training()
         elif scenario == "2" or scenario == "conditioned":
@@ -258,8 +259,8 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         print("Running all scenarios...")
-        # test_scenario_1_normal_training()
-        # test_scenario_2_conditioned_self_play()
-        # test_scenario_3_adaptive_self_play()
-        # test_scenario_4_population_play_normal()
+        test_scenario_1_normal_training()
+        test_scenario_2_conditioned_self_play()
+        test_scenario_3_adaptive_self_play()
+        test_scenario_4_population_play_normal()
         test_scenario_5_population_play_adaptive()
