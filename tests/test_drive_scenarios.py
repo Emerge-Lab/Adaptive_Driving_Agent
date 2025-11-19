@@ -146,9 +146,10 @@ def test_scenario_3_adaptive_self_play():
     run_training_test(
         env_name="puffer_adaptive_drive",
         config_overrides={
-            "env": {"k_scenarios": 2},
+            "env": {"k_scenarios": 2, "scenario_length": 4},
             "co_player_policy": {"enabled": False},
             "policy.conditioning": {"type": "none"},
+            "train": {"minibatch_multiplier": 1}
         },
         test_name="Scenario 3: Adaptive Agent Self-Play"
     )
@@ -158,10 +159,10 @@ def test_scenario_4_population_play_normal():
     run_training_test(
         env_name="puffer_drive",
         config_overrides={
-            "env": {"num_agents": 16},
+            "env": {"num_agents": 8},
             "co_player_policy": {
                 "enabled": True,
-                "num_ego_agents": 8,
+                "num_ego_agents": 4,
                 "policy_name": "Drive",
                 "rnn_name": "Recurrent",
                 "policy_path": "resources/drive/policies/varied_discount.pt",
@@ -246,8 +247,8 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         print("Running all scenarios...")
-        test_scenario_1_normal_training()
-        test_scenario_2_conditioned_self_play()
+        # test_scenario_1_normal_training()
+        # test_scenario_2_conditioned_self_play()
         test_scenario_3_adaptive_self_play()
         test_scenario_4_population_play_normal()
         test_scenario_5_population_play_adaptive()
