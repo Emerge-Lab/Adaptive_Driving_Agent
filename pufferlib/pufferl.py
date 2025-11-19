@@ -438,7 +438,9 @@ class PuffeRL:
                     hasattr(self.vecenv.driver_env, "dynamics_model")
                     and self.vecenv.driver_env.dynamics_model == "jerk"
                 ):
-                    disc_idx = 7  # base ego obs
+                    disc_idx = 10  # base ego obs
+                else:
+                    disc_idx = 7
 
                 if self.vecenv.driver_env.reward_conditioned:
                     disc_idx += 3
@@ -539,7 +541,9 @@ class PuffeRL:
                     hasattr(self.vecenv.driver_env, "dynamics_model")
                     and self.vecenv.driver_env.dynamics_model == "jerk"
                 ):
-                    ent_idx = 7  # base ego obs
+                    ent_idx = 10  # base ego obs
+                else:
+                    ent_idx = 7
 
                 if self.vecenv.driver_env.reward_conditioned:
                     ent_idx += 3
@@ -1354,8 +1358,10 @@ def ensure_drive_binary():
     """
     if os.path.exists("./visualize"):
         print("Removing existing visualize binary...")
-        os.remove("./visualize")
-
+        try:
+            os.remove("./visualize")
+        except FileNotFoundError:
+            print("Binary not found")
     print("Building visualize binary...")
     try:
         result = subprocess.run(
