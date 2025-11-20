@@ -41,19 +41,8 @@ class Drive(pufferlib.PufferEnv):
         k_scenarios=1,
         adaptive_driving_agent=False,
         ini_file="pufferlib/config/ocean/drive.ini",
-        policy=None,
+        conditioning=None,  ## ego conditioning
         # Main policy conditioning (from [policy.conditioning])
-        policy_cond_type="none",
-        policy_cond_collision_lb=-0.5,
-        policy_cond_collision_ub=-0.5,
-        policy_cond_offroad_lb=-0.2,
-        policy_cond_offroad_ub=-0.2,
-        policy_cond_goal_lb=1.0,
-        policy_cond_goal_ub=1.0,
-        policy_cond_entropy_lb=0.001,
-        policy_cond_entropy_ub=0.001,
-        policy_cond_discount_lb=0.98,
-        policy_cond_discount_ub=0.98,
         # Co-player policy settings (from [co_player_policy])
         co_player_enabled=False,
         co_player_num_ego=512,
@@ -87,21 +76,40 @@ class Drive(pufferlib.PufferEnv):
         self.current_scenario_infos = []  # Accumulate infos for current scenario
 
         # Main policy conditioning setup
-        self.condition_type = policy_cond_type
+
+        self.conditioning = conditioning
+
+        self.condition_type = self.conditioning.get("type", "none")
         self.reward_conditioned = self.condition_type in ("reward", "all")
         self.entropy_conditioned = self.condition_type in ("entropy", "all")
         self.discount_conditioned = self.condition_type in ("discount", "all")
 
-        self.collision_weight_lb = policy_cond_collision_lb if self.reward_conditioned else reward_vehicle_collision
-        self.collision_weight_ub = policy_cond_collision_ub if self.reward_conditioned else reward_vehicle_collision
-        self.offroad_weight_lb = policy_cond_offroad_lb if self.reward_conditioned else reward_offroad_collision
-        self.offroad_weight_ub = policy_cond_offroad_ub if self.reward_conditioned else reward_offroad_collision
-        self.goal_weight_lb = policy_cond_goal_lb if self.reward_conditioned else 1.0
-        self.goal_weight_ub = policy_cond_goal_ub if self.reward_conditioned else 1.0
-        self.entropy_weight_lb = policy_cond_entropy_lb
-        self.entropy_weight_ub = policy_cond_entropy_ub
-        self.discount_weight_lb = policy_cond_discount_lb
-        self.discount_weight_ub = policy_cond_discount_ub
+        self.collision_weight_lb = (
+            self.conditioning.get("collision_weight_lb", reward_vehicle_collision)
+            if self.reward_conditioned
+            else reward_vehicle_collision
+        )
+        self.collision_weight_ub = (
+            self.conditioning.get("collision_weight_ub", reward_vehicle_collision)
+            if self.reward_conditioned
+            else reward_vehicle_collision
+        )
+        self.offroad_weight_lb = (
+            self.conditioning.get("offroad_weight_lb", reward_offroad_collision)
+            if self.reward_conditioned
+            else reward_offroad_collision
+        )
+        self.offroad_weight_ub = (
+            self.conditioning.get("offroad_weight_ub", reward_offroad_collision)
+            if self.reward_conditioned
+            else reward_offroad_collision
+        )
+        self.goal_weight_lb = self.conditioning.get("goal_weight_lb", 1.0) if self.reward_conditioned else 1.0
+        self.goal_weight_ub = self.conditioning.get("goal_weight_ub", 1.0) if self.reward_conditioned else 1.0
+        self.entropy_weight_lb = self.conditioning.get("entropy_weight_lb", 0.001)
+        self.entropy_weight_ub = self.conditioning.get("entropy_weight_ub", 0.001)
+        self.discount_weight_lb = self.conditioning.get("discount_weight_lb", 0.98)
+        self.discount_weight_ub = self.conditioning.get("discount_weight_ub", 0.98)
 
         conditioning_dims = (
             (3 if self.reward_conditioned else 0)
@@ -206,6 +214,8 @@ class Drive(pufferlib.PufferEnv):
                 raise ValueError(
                     f"num ego agents ({self.num_ego_agents}) exceeds the number of total agents ({num_agents}))"
                 )
+            if self.condition_type != "none" and self.co_player_condition_type != "none":
+                raise NotImplementedError("Only one agent can be conditioned at once")
 
         self.max_controlled_agents = int(max_controlled_agents)
 

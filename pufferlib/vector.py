@@ -883,6 +883,8 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
                 input_size=co_player_rnn.get("input_size"),
                 hidden_size=co_player_rnn.get("hidden_size"),
             )
+        else:
+            policy = base_policy
 
         checkpoint_path = co_player_policy.get("policy_path")
 
