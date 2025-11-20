@@ -41,7 +41,7 @@ class Drive(pufferlib.PufferEnv):
         k_scenarios=1,
         adaptive_driving_agent=False,
         ini_file="pufferlib/config/ocean/drive.ini",
-        conditioning=None,  ## ego conditioning
+        conditioning={},# ego conditioning
         # Main policy conditioning (from [policy.conditioning])
         # Co-player policy settings (from [co_player_policy])
         co_player_enabled=False,
@@ -76,34 +76,18 @@ class Drive(pufferlib.PufferEnv):
         self.current_scenario_infos = []  # Accumulate infos for current scenario
 
         # Main policy conditioning setup
-
         self.conditioning = conditioning
-
+        
         self.condition_type = self.conditioning.get("type", "none")
         self.reward_conditioned = self.condition_type in ("reward", "all")
         self.entropy_conditioned = self.condition_type in ("entropy", "all")
         self.discount_conditioned = self.condition_type in ("discount", "all")
 
-        self.collision_weight_lb = (
-            self.conditioning.get("collision_weight_lb", reward_vehicle_collision)
-            if self.reward_conditioned
-            else reward_vehicle_collision
-        )
-        self.collision_weight_ub = (
-            self.conditioning.get("collision_weight_ub", reward_vehicle_collision)
-            if self.reward_conditioned
-            else reward_vehicle_collision
-        )
-        self.offroad_weight_lb = (
-            self.conditioning.get("offroad_weight_lb", reward_offroad_collision)
-            if self.reward_conditioned
-            else reward_offroad_collision
-        )
-        self.offroad_weight_ub = (
-            self.conditioning.get("offroad_weight_ub", reward_offroad_collision)
-            if self.reward_conditioned
-            else reward_offroad_collision
-        )
+        
+        self.collision_weight_lb = self.conditioning.get("collision_weight_lb", reward_vehicle_collision) if self.reward_conditioned else reward_vehicle_collision
+        self.collision_weight_ub = self.conditioning.get("collision_weight_ub", reward_vehicle_collision) if self.reward_conditioned else reward_vehicle_collision
+        self.offroad_weight_lb = self.conditioning.get("offroad_weight_lb", reward_offroad_collision) if self.reward_conditioned else reward_offroad_collision
+        self.offroad_weight_ub = self.conditioning.get("offroad_weight_ub", reward_offroad_collision) if self.reward_conditioned else reward_offroad_collision
         self.goal_weight_lb = self.conditioning.get("goal_weight_lb", 1.0) if self.reward_conditioned else 1.0
         self.goal_weight_ub = self.conditioning.get("goal_weight_ub", 1.0) if self.reward_conditioned else 1.0
         self.entropy_weight_lb = self.conditioning.get("entropy_weight_lb", 0.001)
