@@ -851,8 +851,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         input_size = co_player_policy.get("input_size", 256)
         hidden_size = co_player_policy.get("hidden_size", 256)
 
-        co_player_rnn = co_player_policy.get("rnn",None)
-
+        co_player_rnn = co_player_policy.get("rnn", None)
 
         # Get conditioning type from env_k
         co_player_conditioning = co_player_policy.get("conditioning")
@@ -870,7 +869,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         num_obs = ego_features + conditioning_dims + 63 * 7 + 200 * 7
 
         temp_env = SimpleNamespace(
-            single_action_space= gymnasium.spaces.MultiDiscrete([7 * 13]),
+            single_action_space=gymnasium.spaces.MultiDiscrete([7 * 13]),
             single_observation_space=gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32),
             reward_conditioned=reward_conditioned,
             entropy_conditioned=entropy_conditioned,
@@ -905,7 +904,6 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         # Store policy and conditioning info in env_k
         env_k["co_player_policy"]["co_player_policy_func"] = policy
 
-
         torch.set_num_threads(
             1
         )  # NOTE this is the only way I could get co-player policies to work inside environment evaluation
@@ -923,7 +921,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
             pass
 
         for i in range(len(env_kwargs)):
-            env_kwargs[i]["co_player_policy"]["co_player_policy_func"] =  policy
+            env_kwargs[i]["co_player_policy"]["co_player_policy_func"] = policy
 
     return backend(env_creators, env_args, env_kwargs, num_envs, **kwargs)
 

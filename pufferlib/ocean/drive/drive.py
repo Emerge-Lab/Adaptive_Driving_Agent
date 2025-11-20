@@ -41,7 +41,7 @@ class Drive(pufferlib.PufferEnv):
         k_scenarios=1,
         adaptive_driving_agent=False,
         ini_file="pufferlib/config/ocean/drive.ini",
-        policy= None,
+        policy=None,
         # Main policy conditioning (from [policy.conditioning])
         policy_cond_type="none",
         policy_cond_collision_lb=-0.5,
@@ -135,7 +135,6 @@ class Drive(pufferlib.PufferEnv):
         self.co_player_reward_conditioned = self.co_player_condition_type in ("reward", "all")
         self.co_player_entropy_conditioned = self.co_player_condition_type in ("entropy", "all")
         self.co_player_discount_conditioned = self.co_player_condition_type in ("discount", "all")
-
 
         self.co_player_collision_weight_lb = self.co_player_conditioning.get("collision_weight_lb", -0.5)
         self.co_player_collision_weight_ub = self.co_player_conditioning.get("collision_weight_ub", -0.5)
@@ -318,7 +317,6 @@ class Drive(pufferlib.PufferEnv):
             self.num_ego_agents = len(self.ego_ids)
             self.num_co_players = len(self.co_player_ids)
 
-
             if ego_set & co_player_set:
                 raise ValueError("Overlap between ego ids and co player ids")
 
@@ -384,7 +382,7 @@ class Drive(pufferlib.PufferEnv):
             co_player_action = co_player_action.cpu().numpy().reshape(self.co_player_actions.shape)
         return co_player_action
 
-    def _set_co_player_state(self):  
+    def _set_co_player_state(self):
         with torch.no_grad():
             self.state = dict(
                 lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
