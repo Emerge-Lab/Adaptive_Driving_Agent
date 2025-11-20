@@ -850,7 +850,6 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
         input_size = co_player_policy.get("input_size", 256)
         hidden_size = co_player_policy.get("hidden_size", 256)
-
         co_player_rnn = co_player_policy.get("rnn", None)
 
         # Get conditioning type from env_k
@@ -859,12 +858,10 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         reward_conditioned = condition_type in ("reward", "all")
         entropy_conditioned = condition_type in ("entropy", "all")
         discount_conditioned = condition_type in ("discount", "all")
-        print(f"DEBUG: Co player condition type: {condition_type}", flush=True)
         # Calculate conditioning dimensions
         conditioning_dims = (
             (3 if reward_conditioned else 0) + (1 if entropy_conditioned else 0) + (1 if discount_conditioned else 0)
         )
-        print(f"DEBUG: condition dims {conditioning_dims}", flush=True)
         # Base observations + conditioning observations
         num_obs = ego_features + conditioning_dims + 63 * 7 + 200 * 7
 
@@ -900,7 +897,6 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
             f"Co player policy loaded with {conditioning_dims} conditioning dims (condition_type={condition_type})",
             flush=True,
         )
-
         # Store policy and conditioning info in env_k
         env_k["co_player_policy"]["co_player_policy_func"] = policy
 
