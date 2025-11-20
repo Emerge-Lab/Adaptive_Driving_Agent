@@ -41,6 +41,7 @@ class Drive(pufferlib.PufferEnv):
         k_scenarios=1,
         adaptive_driving_agent=False,
         ini_file="pufferlib/config/ocean/drive.ini",
+        policy= None,
         # Main policy conditioning (from [policy.conditioning])
         policy_cond_type="none",
         policy_cond_collision_lb=-0.5,
@@ -56,28 +57,8 @@ class Drive(pufferlib.PufferEnv):
         # Co-player policy settings (from [co_player_policy])
         co_player_enabled=False,
         co_player_num_ego=512,
-        co_player_policy_name=None,
-        co_player_rnn_name=None,
-        co_player_policy_path=None,
-        co_player_input_size=64,
-        co_player_hidden_size=256,
         co_player_policy=None,
         # Co-player RNN settings (from [co_player_rnn])
-        co_player_rnn_input_size=256,
-        co_player_rnn_hidden_size=256,
-        co_player_rnn=None,
-        # Co-player conditioning (from [co_player_policy.conditioning])
-        co_player_cond_type="none",
-        co_player_cond_collision_lb=-0.5,
-        co_player_cond_collision_ub=-0.5,
-        co_player_cond_offroad_lb=-0.2,
-        co_player_cond_offroad_ub=-0.2,
-        co_player_cond_goal_lb=1.0,
-        co_player_cond_goal_ub=1.0,
-        co_player_cond_entropy_lb=0.001,
-        co_player_cond_entropy_ub=0.001,
-        co_player_cond_discount_lb=0.98,
-        co_player_cond_discount_ub=0.98,
     ):
         # env
         self.dt = dt
@@ -148,22 +129,24 @@ class Drive(pufferlib.PufferEnv):
         self.num_ego_agents = co_player_num_ego if self.population_play else num_agents
 
         # Co-player conditioning setup
-        self.co_player_condition_type = co_player_cond_type
+        self.co_player_conditioning = co_player_policy.get("conditioning")
+        self.co_player_condition_type = self.co_player_conditioning.get("type")
+
         self.co_player_reward_conditioned = self.co_player_condition_type in ("reward", "all")
         self.co_player_entropy_conditioned = self.co_player_condition_type in ("entropy", "all")
         self.co_player_discount_conditioned = self.co_player_condition_type in ("discount", "all")
 
-        # Co-player conditioning weights
-        self.co_player_collision_weight_lb = co_player_cond_collision_lb
-        self.co_player_collision_weight_ub = co_player_cond_collision_ub
-        self.co_player_offroad_weight_lb = co_player_cond_offroad_lb
-        self.co_player_offroad_weight_ub = co_player_cond_offroad_ub
-        self.co_player_goal_weight_lb = co_player_cond_goal_lb
-        self.co_player_goal_weight_ub = co_player_cond_goal_ub
-        self.co_player_entropy_weight_lb = co_player_cond_entropy_lb
-        self.co_player_entropy_weight_ub = co_player_cond_entropy_ub
-        self.co_player_discount_weight_lb = co_player_cond_discount_lb
-        self.co_player_discount_weight_ub = co_player_cond_discount_ub
+
+        self.co_player_collision_weight_lb = self.co_player_conditioning.get("collision_weight_lb", -0.5)
+        self.co_player_collision_weight_ub = self.co_player_conditioning.get("collision_weight_ub", -0.5)
+        self.co_player_offroad_weight_lb = self.co_player_conditioning.get("offroad_weight_lb", -0.2)
+        self.co_player_offroad_weight_ub = self.co_player_conditioning.get("offroad_weight_ub", -0.2)
+        self.co_player_goal_weight_lb = self.co_player_conditioning.get("goal_weight_lb", 1.0)
+        self.co_player_goal_weight_ub = self.co_player_conditioning.get("goal_weight_ub", 1.0)
+        self.co_player_entropy_weight_lb = self.co_player_conditioning.get("entropy_weight_lb", 0.001)
+        self.co_player_entropy_weight_ub = self.co_player_conditioning.get("entropy_weight_ub", 0.001)
+        self.co_player_discount_weight_lb = self.co_player_conditioning.get("discount_weight_lb", 0.98)
+        self.co_player_discount_weight_ub = self.co_player_conditioning.get("discount_weight_ub", 0.98)
         self.init_steps = init_steps
         self.init_mode_str = init_mode
         self.control_mode_str = control_mode
@@ -230,9 +213,9 @@ class Drive(pufferlib.PufferEnv):
         self._set_env_variables()
 
         if self.population_play:
-            self.co_player_policy_name = co_player_policy_name
-            self.co_player_rnn_name = co_player_rnn_name
-            self.co_player_policy = co_player_policy
+            self.co_player_policy_name = co_player_policy.get("policy_name")
+            self.co_player_rnn_name = co_player_policy.get("rnn_name")
+            self.co_player_policy = co_player_policy.get("co_player_policy_func")
             self._set_co_player_state()
 
         super().__init__(buf=buf)
@@ -335,7 +318,6 @@ class Drive(pufferlib.PufferEnv):
             self.num_ego_agents = len(self.ego_ids)
             self.num_co_players = len(self.co_player_ids)
 
-            print(self.num_co_players, self.num_ego_agents)
 
             if ego_set & co_player_set:
                 raise ValueError("Overlap between ego ids and co player ids")
@@ -402,7 +384,7 @@ class Drive(pufferlib.PufferEnv):
             co_player_action = co_player_action.cpu().numpy().reshape(self.co_player_actions.shape)
         return co_player_action
 
-    def _set_co_player_state(self):  ## set in init (state doesnt get updated anywhere else)
+    def _set_co_player_state(self):  
         with torch.no_grad():
             self.state = dict(
                 lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
