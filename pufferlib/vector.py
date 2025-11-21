@@ -831,7 +831,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
     # TODO: First step action space check
     env_k = env_kwargs[0]
-    if env_k.get("population_play", False):
+    if env_k.get("co_player_enabled", False):
         import torch
         import os
         from types import SimpleNamespace
@@ -850,23 +850,23 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
         input_size = co_player_policy.get("input_size", 256)
         hidden_size = co_player_policy.get("hidden_size", 256)
+        co_player_rnn = co_player_policy.get("rnn", None)
 
         # Get conditioning type from env_k
-        condition_type = env_k.get("co_player_condition_type", "none")
+        co_player_conditioning = co_player_policy.get("conditioning")
+        condition_type = co_player_conditioning.get("type", "none")
         reward_conditioned = condition_type in ("reward", "all")
         entropy_conditioned = condition_type in ("entropy", "all")
         discount_conditioned = condition_type in ("discount", "all")
-        print(f"DEBUG: condition type: {condition_type}", flush=True)
         # Calculate conditioning dimensions
         conditioning_dims = (
             (3 if reward_conditioned else 0) + (1 if entropy_conditioned else 0) + (1 if discount_conditioned else 0)
         )
-        print(f"DEBUG: condition dims {conditioning_dims}", flush=True)
         # Base observations + conditioning observations
         num_obs = ego_features + conditioning_dims + 63 * 7 + 200 * 7
 
         temp_env = SimpleNamespace(
-            single_action_space=gymnasium.spaces.MultiDiscrete([7, 13]),
+            single_action_space=gymnasium.spaces.MultiDiscrete([7 * 13]),
             single_observation_space=gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32),
             reward_conditioned=reward_conditioned,
             entropy_conditioned=entropy_conditioned,
@@ -876,14 +876,17 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
         base_policy = Drive(temp_env, input_size=input_size, hidden_size=hidden_size)
 
-        policy = pufferlib.models.LSTMWrapper(
-            temp_env,
-            base_policy,
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-        )
+        if co_player_rnn:
+            policy = pufferlib.models.LSTMWrapper(
+                temp_env,
+                base_policy,
+                input_size=co_player_rnn.get("input_size"),
+                hidden_size=co_player_rnn.get("hidden_size"),
+            )
+        else:
+            policy = base_policy
 
-        checkpoint_path = env_k["co_player_policy_path"]
+        checkpoint_path = co_player_policy.get("policy_path")
 
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -896,10 +899,9 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
             f"Co player policy loaded with {conditioning_dims} conditioning dims (condition_type={condition_type})",
             flush=True,
         )
-
         # Store policy and conditioning info in env_k
-        env_k["co_player_policy"] = policy
-        env_k["co_player_condition_type"] = condition_type
+        env_k["co_player_policy"]["co_player_policy_func"] = policy
+
         torch.set_num_threads(
             1
         )  # NOTE this is the only way I could get co-player policies to work inside environment evaluation
@@ -917,7 +919,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
             pass
 
         for i in range(len(env_kwargs)):
-            env_kwargs[i]["co_player_policy"] = policy
+            env_kwargs[i]["co_player_policy"]["co_player_policy_func"] = policy
 
     return backend(env_creators, env_args, env_kwargs, num_envs, **kwargs)
 
