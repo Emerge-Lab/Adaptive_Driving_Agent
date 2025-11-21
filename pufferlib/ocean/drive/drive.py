@@ -42,12 +42,9 @@ class Drive(pufferlib.PufferEnv):
         adaptive_driving_agent=False,
         ini_file="pufferlib/config/ocean/drive.ini",
         conditioning={},  # ego conditioning
-        # Main policy conditioning (from [policy.conditioning])
-        # Co-player policy settings (from [co_player_policy])
         co_player_enabled=False,
         co_player_num_ego=512,
-        co_player_policy=None,
-        # Co-player RNN settings (from [co_player_rnn])
+        co_player_policy={},
     ):
         # env
         self.dt = dt
