@@ -134,22 +134,24 @@ class Drive(pufferlib.PufferEnv):
 
         # Co-player conditioning setup
         self.co_player_conditioning = co_player_policy.get("conditioning")
-        self.co_player_condition_type = self.co_player_conditioning.get("type")
+        if self.co_player_conditioning:
+            self.co_player_condition_type = self.co_player_conditioning.get("type")
 
-        self.co_player_reward_conditioned = self.co_player_condition_type in ("reward", "all")
-        self.co_player_entropy_conditioned = self.co_player_condition_type in ("entropy", "all")
-        self.co_player_discount_conditioned = self.co_player_condition_type in ("discount", "all")
+            self.co_player_reward_conditioned = self.co_player_condition_type in ("reward", "all")
+            self.co_player_entropy_conditioned = self.co_player_condition_type in ("entropy", "all")
+            self.co_player_discount_conditioned = self.co_player_condition_type in ("discount", "all")
 
-        self.co_player_collision_weight_lb = self.co_player_conditioning.get("collision_weight_lb", -0.5)
-        self.co_player_collision_weight_ub = self.co_player_conditioning.get("collision_weight_ub", -0.5)
-        self.co_player_offroad_weight_lb = self.co_player_conditioning.get("offroad_weight_lb", -0.2)
-        self.co_player_offroad_weight_ub = self.co_player_conditioning.get("offroad_weight_ub", -0.2)
-        self.co_player_goal_weight_lb = self.co_player_conditioning.get("goal_weight_lb", 1.0)
-        self.co_player_goal_weight_ub = self.co_player_conditioning.get("goal_weight_ub", 1.0)
-        self.co_player_entropy_weight_lb = self.co_player_conditioning.get("entropy_weight_lb", 0.001)
-        self.co_player_entropy_weight_ub = self.co_player_conditioning.get("entropy_weight_ub", 0.001)
-        self.co_player_discount_weight_lb = self.co_player_conditioning.get("discount_weight_lb", 0.98)
-        self.co_player_discount_weight_ub = self.co_player_conditioning.get("discount_weight_ub", 0.98)
+            self.co_player_collision_weight_lb = self.co_player_conditioning.get("collision_weight_lb", -0.5)
+            self.co_player_collision_weight_ub = self.co_player_conditioning.get("collision_weight_ub", -0.5)
+            self.co_player_offroad_weight_lb = self.co_player_conditioning.get("offroad_weight_lb", -0.2)
+            self.co_player_offroad_weight_ub = self.co_player_conditioning.get("offroad_weight_ub", -0.2)
+            self.co_player_goal_weight_lb = self.co_player_conditioning.get("goal_weight_lb", 1.0)
+            self.co_player_goal_weight_ub = self.co_player_conditioning.get("goal_weight_ub", 1.0)
+            self.co_player_entropy_weight_lb = self.co_player_conditioning.get("entropy_weight_lb", 0.001)
+            self.co_player_entropy_weight_ub = self.co_player_conditioning.get("entropy_weight_ub", 0.001)
+            self.co_player_discount_weight_lb = self.co_player_conditioning.get("discount_weight_lb", 0.98)
+            self.co_player_discount_weight_ub = self.co_player_conditioning.get("discount_weight_ub", 0.98)
+            
         self.init_steps = init_steps
         self.init_mode_str = init_mode
         self.control_mode_str = control_mode
