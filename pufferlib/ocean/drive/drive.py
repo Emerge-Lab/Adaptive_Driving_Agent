@@ -487,16 +487,9 @@ class Drive(pufferlib.PufferEnv):
                 if isinstance(value, (int, float)):
                     aggregated[key] = aggregated.get(key, 0.0) + value
 
-        # Average by number of logs (note: 'n' is already a count, don't average it)
-        if "n" in aggregated:
-            n = aggregated["n"]
-            for key in aggregated:
-                if key != "n":
-                    aggregated[key] = aggregated[key] / n if n > 0 else 0.0
-        else:
-            # If no 'n', just average by count of infos
-            for key in aggregated:
-                aggregated[key] = aggregated[key] / count if count > 0 else 0.0
+        # Average by number of logs (metrics are already per-episode averages from vec_log)
+        for key in aggregated:
+            aggregated[key] = aggregated[key] / count if count > 0 else 0.0
 
         return aggregated
 
@@ -507,11 +500,6 @@ class Drive(pufferlib.PufferEnv):
 
         first_metrics = self.scenario_metrics[0]
         last_metrics = self.scenario_metrics[-1]
-
-        def compute_delta_percent(first_val, last_val):
-            if abs(first_val) < 0.0001:
-                return 0.0
-            return (last_val - first_val) / first_val * 100.0
 
         delta_metrics = {}
 
@@ -532,7 +520,7 @@ class Drive(pufferlib.PufferEnv):
         for metric in metrics_to_track:
             if metric in first_metrics and metric in last_metrics:
                 delta_key = f"ada_delta_{metric}"
-                delta_metrics[delta_key] = compute_delta_percent(first_metrics[metric], last_metrics[metric])
+                delta_metrics[delta_key] = last_metrics[metric] - first_metrics[metric]
 
         # Add a count of how many agents this represents
         if "n" in last_metrics:
@@ -560,7 +548,14 @@ class Drive(pufferlib.PufferEnv):
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
 
-                info.append(log)
+                    # Only append to info if we're in the 0th scenario
+                    if self.current_scenario == 0:
+                        info.append(log)
+                        print("0th scenario metrics are ", log, flush=True)
+                else:
+                    # Non-adaptive mode: always append
+                    info.append(log)
+                    print("Regular metrics are ", log, flush=True)
 
         if self.tick % self.scenario_length == 0:
             if self.adaptive_driving_agent and self.current_scenario_infos:
@@ -570,10 +565,9 @@ class Drive(pufferlib.PufferEnv):
 
                 if self.current_scenario == self.k_scenarios - 1:
                     delta_metrics = self._compute_delta_metrics()
-                    if delta_metrics and info:
-                        info[-1].update(delta_metrics)
-                    elif delta_metrics:
+                    if delta_metrics:
                         info.append(delta_metrics)
+                        print("delta metrics are ", delta_metrics, flush=True)
 
                     self.scenario_metrics = []
 
@@ -590,6 +584,7 @@ class Drive(pufferlib.PufferEnv):
                     delta_metrics = self._compute_delta_metrics()
                     if delta_metrics:
                         info.append(delta_metrics)
+                        print("delta metrics 2, are ", delta_metrics, flush=True)
                     self.scenario_metrics = []
                     self.current_scenario_infos = []
                     self.current_scenario = 0
