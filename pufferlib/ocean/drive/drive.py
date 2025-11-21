@@ -151,7 +151,7 @@ class Drive(pufferlib.PufferEnv):
             self.co_player_entropy_weight_ub = self.co_player_conditioning.get("entropy_weight_ub", 0.001)
             self.co_player_discount_weight_lb = self.co_player_conditioning.get("discount_weight_lb", 0.98)
             self.co_player_discount_weight_ub = self.co_player_conditioning.get("discount_weight_ub", 0.98)
-            
+
         self.init_steps = init_steps
         self.init_mode_str = init_mode
         self.control_mode_str = control_mode
