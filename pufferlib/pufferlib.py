@@ -38,7 +38,7 @@ def set_buffers(env, buf=None):
         env.truncations = buf["truncations"]
         env.masks = buf["masks"]
         env.actions = buf["actions"]
-
+    
 
 class PufferEnv:
     def __init__(self, buf=None):

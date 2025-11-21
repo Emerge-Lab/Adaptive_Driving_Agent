@@ -167,15 +167,42 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
             env->ego_agent_ids = NULL;
             env->num_ego_agents = 0;
         }
+
+        // Handle placeholder agents
+        env->num_place_holders = unpack(kwargs, "num_place_holders");
+        if (env->num_place_holders > 0) {
+            double* place_holder_ids_d = unpack_float_array(kwargs, "place_holder_ids", &env->num_place_holders);
+            if (place_holder_ids_d != NULL) {
+                env->place_holder_ids = (int*)malloc(env->num_place_holders * sizeof(int));
+                if (env->place_holder_ids == NULL) {
+                    fprintf(stderr, "Error: Failed to allocate memory for place_holder_ids\n");
+                    free(place_holder_ids_d);
+                    env->num_place_holders = 0;
+                } else {
+                    for (int i = 0; i < env->num_place_holders; i++) {
+                        env->place_holder_ids[i] = (int)place_holder_ids_d[i];
+                    }
+                    free(place_holder_ids_d);
+                }
+            } else {
+                env->place_holder_ids = NULL;
+                env->num_place_holders = 0;
+            }
+        } else {
+            env->place_holder_ids = NULL;
+            env->num_place_holders = 0;
+        }
     } else {
         // Non-population play mode - set defaults
         env->num_ego_agents = 0;
         env->ego_agent_ids = NULL;
+        env->num_place_holders = 0;
+        env->place_holder_ids = NULL;
     }
-
 
     env->init_mode = (int)unpack(kwargs, "init_mode");
     env->control_mode = (int)unpack(kwargs, "control_mode");
+    env->create_expert_overflow = (int)unpack(kwargs, "create_expert_overflow");
     env->goal_behavior = (int)unpack(kwargs, "goal_behavior");
     env->goal_radius = (float)unpack(kwargs, "goal_radius");
     int map_id = unpack(kwargs, "map_id");

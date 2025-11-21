@@ -38,13 +38,15 @@ class Drive(pufferlib.PufferEnv):
         init_steps=0,
         init_mode="create_all_valid",
         control_mode="control_vehicles",
+        create_expert_overflow = True,
         k_scenarios=1,
         adaptive_driving_agent=False,
         ini_file="pufferlib/config/ocean/drive.ini",
         conditioning={},  # ego conditioning
         co_player_enabled=False,
-        co_player_num_ego=512,
+        num_ego_agents=512,
         co_player_policy={},
+        one_ego_per_scene = False,
     ):
         # env
         self.dt = dt
@@ -64,6 +66,7 @@ class Drive(pufferlib.PufferEnv):
         self.scenario_length = scenario_length
         self.resample_frequency = resample_frequency
         self.ini_file = ini_file
+        self.one_ego_per_scene = one_ego_per_scene
 
         # Adaptive driving agent setup
         self.adaptive_driving_agent = int(adaptive_driving_agent)
@@ -130,10 +133,11 @@ class Drive(pufferlib.PufferEnv):
         # Co-player policy setup
         self.population_play = co_player_enabled
         self.num_agents = num_agents
-        self.num_ego_agents = co_player_num_ego if self.population_play else num_agents
+        self.num_ego_agents = num_ego_agents if self.population_play else num_agents
 
         # Co-player conditioning setup
         self.co_player_conditioning = co_player_policy.get("conditioning")
+        self.co_player_policy_info = co_player_policy
         if self.co_player_conditioning:
             self.co_player_condition_type = self.co_player_conditioning.get("type")
 
@@ -155,6 +159,7 @@ class Drive(pufferlib.PufferEnv):
         self.init_steps = init_steps
         self.init_mode_str = init_mode
         self.control_mode_str = control_mode
+        self.create_expert_overflow = create_expert_overflow
 
         if self.control_mode_str == "control_vehicles":
             self.control_mode = 0
@@ -214,25 +219,22 @@ class Drive(pufferlib.PufferEnv):
                 )
             if self.condition_type != "none" and self.co_player_condition_type != "none":
                 raise NotImplementedError("Only one agent can be conditioned at once")
+            
+            if self.one_ego_per_scene:
+                assert (max_controlled_agents * self.num_ego_agents == self.num_agents)
+            
+        if not self.population_play and self.one_ego_per_scene:
+            raise NotImplementedError("Must be population play if only one ego per scene")
+            
+
 
         self.max_controlled_agents = int(max_controlled_agents)
 
         self._set_env_variables()
 
-        if self.population_play:
-            self.co_player_policy_name = co_player_policy.get("policy_name")
-            self.co_player_rnn_name = co_player_policy.get("rnn_name")
-            self.co_player_policy = co_player_policy.get("co_player_policy_func")
-            self._set_co_player_state()
-
         super().__init__(buf=buf)
         if self.population_play:
             self.action_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_ego_agents)
-            co_player_atn_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_co_players)
-            if isinstance(self.single_action_space, pufferlib.spaces.Box):
-                self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=co_player_atn_space.dtype)
-            else:
-                self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=np.int32)
 
         env_ids = []
         for i in range(self.num_envs):
@@ -268,6 +270,8 @@ class Drive(pufferlib.PufferEnv):
                 co_player_ids=self.local_co_player_ids[i],
                 ego_agent_ids=self.local_ego_ids[i],
                 num_ego_agents=len(self.local_ego_ids[i]),
+                place_holder_ids = self.local_place_holder_ids[i],
+                num_place_holders = len(self.local_place_holder_ids[i]),
                 init_steps=init_steps,
                 use_rc=self.reward_conditioned,
                 use_ec=self.entropy_conditioned,
@@ -284,6 +288,7 @@ class Drive(pufferlib.PufferEnv):
                 discount_weight_ub=self.discount_weight_ub,
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
+                create_expert_overflow = self.create_expert_overflow
             )
             env_ids.append(env_id)
 
@@ -294,9 +299,9 @@ class Drive(pufferlib.PufferEnv):
         info = []
         if self.population_play:
             info.append(self.ego_ids)
-            self._reset_co_player_state()
         self.tick = 0
         return self.observations, info
+
 
     def _set_env_variables(self):
         my_shared_tuple = binding.shared(
@@ -309,33 +314,59 @@ class Drive(pufferlib.PufferEnv):
             goal_behavior=self.goal_behavior,
             population_play=self.population_play,
             num_ego_agents=self.num_ego_agents,
+            one_ego_per_scene=self.one_ego_per_scene,
         )
 
         if self.population_play:
+            # Both return 5 elements now
             self.agent_offsets, self.map_ids, num_envs, ego_ids, co_player_ids = my_shared_tuple
-
+            
             self.num_envs = num_envs
 
+            # Flatten the lists
             self.ego_ids = [item for sublist in ego_ids for item in sublist]
             self.co_player_ids = [item for sublist in co_player_ids for item in sublist]
-
+            
+            # Compute placeholders on Python side
             all_agents = set(range(self.num_agents))
             ego_set = set(self.ego_ids)
             co_player_set = set(self.co_player_ids)
+            self.place_holder_ids = sorted(list(all_agents - ego_set - co_player_set))
+            
+            # print(f"DEBUG: Ego Ids: {self.ego_ids}", flush=True)
+            # print(f"DEBUG: co player ids {self.co_player_ids}", flush=True)
+            # print(f"DEBUG: placeholder ids {self.place_holder_ids}", flush=True)
+            
+            # Store counts
             self.num_ego_agents = len(self.ego_ids)
             self.num_co_players = len(self.co_player_ids)
+            self.num_place_holders = len(self.place_holder_ids)
 
+            # Validation checks
             if ego_set & co_player_set:
                 raise ValueError("Overlap between ego ids and co player ids")
 
-            if ego_set | co_player_set != all_agents:
-                raise ValueError("Missing agent ids")
+            # Check total count matches
+            if self.num_ego_agents + self.num_co_players + self.num_place_holders != self.num_agents:
+                raise ValueError(
+                    f"Agent count mismatch: {self.num_ego_agents} egos + {self.num_co_players} co-players + "
+                    f"{self.num_place_holders} placeholders = "
+                    f"{self.num_ego_agents + self.num_co_players + self.num_place_holders}, expected {self.num_agents}"
+                )
 
-            if self.num_ego_agents + self.num_co_players != self.num_agents:
-                raise ValueError("Mismatch between number of ego/co players and number of agents")
+            # For one_ego_per_scene mode, verify we have the expected number of egos
+            if self.one_ego_per_scene:
+                expected_egos = self.num_envs
+                if self.num_ego_agents != expected_egos:
+                    raise ValueError(
+                        f"one_ego_per_scene mode: expected {expected_egos} egos (1 per env), got {self.num_ego_agents}"
+                    )
 
-            self.total_agents = self.num_co_players + self.num_ego_agents
-            self.num_agents = self.total_agents
+            # total_agents includes ALL agent slots (ego + co-player + placeholder)
+            self.total_agents = self.num_agents  # This includes placeholders
+            
+            print(f"DEBUG: Total agents (all slots): {self.total_agents}", flush=True)
+            print(f"DEBUG: Breakdown - Egos: {self.num_ego_agents}, Co-players: {self.num_co_players}, Placeholders: {self.num_place_holders}", flush=True)
 
             # Build per-environment ID lists
             local_ego_ids = []
@@ -364,11 +395,48 @@ class Drive(pufferlib.PufferEnv):
 
                 local_co_player_ids.append([cid - min_id_in_world for cid in co_player_ids[i]])
 
-            self.local_co_player_ids = local_co_player_ids
+            local_place_holder_ids = []
+            for i in range(num_envs):
+                if len(ego_ids[i]) > 0 and len(co_player_ids[i]) > 0:
+                    min_id_in_world = min(ego_ids[i] + co_player_ids[i])
+                elif len(ego_ids[i]) > 0:
+                    min_id_in_world = min(ego_ids[i])
+                elif len(co_player_ids[i]) > 0:
+                    min_id_in_world = min(co_player_ids[i])
+                else:
+                    min_id_in_world = 0
+                
+                # Compute placeholder IDs for this environment
+                env_start = self.agent_offsets[i]
+                env_end = self.agent_offsets[i + 1]
+                env_agent_ids = set(range(env_start, env_end))
+                env_ego_set = set(ego_ids[i])
+                env_co_player_set = set(co_player_ids[i])
+                env_placeholder_ids = sorted(list(env_agent_ids - env_ego_set - env_co_player_set))
+                
+                # Convert to local IDs
+                local_place_holder_ids.append([pid - min_id_in_world for pid in env_placeholder_ids])
+
+            
             self.local_ego_ids = local_ego_ids
+            self.local_co_player_ids = local_co_player_ids
+            self.local_place_holder_ids = local_place_holder_ids
+            
             if self.co_player_condition_type is not None and self.co_player_condition_type != "none":
                 self._set_co_player_conditioning()
 
+            if self.population_play:
+                self.co_player_policy_name = self.co_player_policy_info.get("policy_name")
+                self.co_player_rnn_name = self.co_player_policy_info.get("rnn_name")
+                self.co_player_policy = self.co_player_policy_info.get("co_player_policy_func")
+                self._set_co_player_state()
+
+            
+            co_player_atn_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_co_players)
+            if isinstance(self.single_action_space, pufferlib.spaces.Box):
+                self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=co_player_atn_space.dtype)
+            else:
+                self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=np.int32)
         else:
             self.agent_offsets, self.map_ids, self.num_envs = my_shared_tuple
             self.ego_ids = [i for i in range(self.agent_offsets[-1])]
@@ -397,17 +465,6 @@ class Drive(pufferlib.PufferEnv):
                 lstm_c=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
             )
 
-    def _reset_co_player_state(self, done_indices=None):
-        """Reset LSTM state for co-players whose episodes ended"""
-        with torch.no_grad():
-            if done_indices is None:
-                # Reset all
-                self._set_co_player_state()
-            else:
-                # Reset only specific co-players
-                device = self.state["lstm_h"].device
-                self.state["lstm_h"][done_indices] = 0
-                self.state["lstm_c"][done_indices] = 0
 
     def _add_co_player_conditioning(self, observations):
         """Add pre-sampled conditioning variables to co-player observations"""
@@ -501,21 +558,16 @@ class Drive(pufferlib.PufferEnv):
         return aggregated
 
     def _compute_delta_metrics(self):
-        """Compute delta metrics between first and last scenario."""
+        """Compute absolute delta metrics between first and last scenario."""
         if len(self.scenario_metrics) < 2:
             return {}
 
         first_metrics = self.scenario_metrics[0]
         last_metrics = self.scenario_metrics[-1]
 
-        def compute_delta_percent(first_val, last_val):
-            if abs(first_val) < 0.0001:
-                return 0.0
-            return (last_val - first_val) / first_val * 100.0
-
         delta_metrics = {}
 
-        # Compute deltas for key metrics
+        # Compute absolute deltas for key metrics (last - first)
         metrics_to_track = [
             "score",
             "collision_rate",
@@ -532,7 +584,7 @@ class Drive(pufferlib.PufferEnv):
         for metric in metrics_to_track:
             if metric in first_metrics and metric in last_metrics:
                 delta_key = f"ada_delta_{metric}"
-                delta_metrics[delta_key] = compute_delta_percent(first_metrics[metric], last_metrics[metric])
+                delta_metrics[delta_key] = last_metrics[metric] - first_metrics[metric]
 
         # Add a count of how many agents this represents
         if "n" in last_metrics:
@@ -557,28 +609,38 @@ class Drive(pufferlib.PufferEnv):
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs)
             if log:
+                print(f"log is {log}", flush=True)
+                # Accumulate infos for adaptive agent tracking
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
+                
+                # Only append log to info if it's the 0th scenario
+                if self.current_scenario == 0:
+                    info.append(log)
 
-                info.append(log)
-
+        # Check if we've completed a scenario
         if self.tick % self.scenario_length == 0:
+            # Before incrementing scenario, process the completed scenario
             if self.adaptive_driving_agent and self.current_scenario_infos:
+                # Aggregate metrics for the completed scenario
                 scenario_log = self._aggregate_scenario_metrics(self.current_scenario_infos)
-                scenario_log["scenario_id"] = self.current_scenario
+                scenario_log['scenario_id'] = self.current_scenario
                 self.scenario_metrics.append(scenario_log)
-
+                
+                # Check if this is the last scenario
                 if self.current_scenario == self.k_scenarios - 1:
+                    # Compute and append delta metrics
                     delta_metrics = self._compute_delta_metrics()
-                    if delta_metrics and info:
-                        info[-1].update(delta_metrics)
-                    elif delta_metrics:
+                    if delta_metrics:
                         info.append(delta_metrics)
-
+                    
+                    # Reset for next cycle
                     self.scenario_metrics = []
-
+                
+                # Clear accumulated infos for next scenario
                 self.current_scenario_infos = []
-
+            
+            # Increment scenario counter
             self.current_scenario = (self.current_scenario + 1) % self.k_scenarios
 
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
@@ -593,7 +655,7 @@ class Drive(pufferlib.PufferEnv):
                     self.scenario_metrics = []
                     self.current_scenario_infos = []
                     self.current_scenario = 0
-
+                
                 binding.vec_close(self.c_envs)
                 self._set_env_variables()
                 env_ids = []
@@ -644,9 +706,12 @@ class Drive(pufferlib.PufferEnv):
                         co_player_ids=self.local_co_player_ids[i],
                         ego_agent_ids=self.local_ego_ids[i],
                         num_ego_agents=len(self.local_ego_ids[i]),
+                        place_holder_ids = self.local_place_holder_ids[i],
+                        num_place_holders = len(self.local_place_holder_ids[i]),
                         init_steps=self.init_steps,
                         init_mode=self.init_mode,
                         control_mode=self.control_mode,
+                        create_expert_overflow = self.create_expert_overflow                        
                     )
                     env_ids.append(env_id)
                 self.c_envs = binding.vectorize(*env_ids)
@@ -658,7 +723,6 @@ class Drive(pufferlib.PufferEnv):
             info.append(self.ego_ids)
 
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
-
     def get_global_agent_state(self):
         """Get current global state of all active agents.
 
