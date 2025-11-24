@@ -1485,7 +1485,7 @@ void set_active_agents(Drive* env){
                 // Skip non-controlled vehicles
                 skipped_noncontrolled_count++;
                 continue;
-            } else if (env->control_mode != CONTROL_VEHICLES && 
+            } else if (env->control_mode != CONTROL_VEHICLES &&
                        (entity->type == VEHICLE || entity->type == PEDESTRIAN || entity->type == CYCLIST)) {
                 // Skip all non-controlled agents when controlling all
                 skipped_noncontrolled_count++;
@@ -1494,11 +1494,11 @@ void set_active_agents(Drive* env){
         }
 
         // Check if we should skip overflow agents when create_expert_overflow is disabled
-        if (is_controlled && 
-            env->active_agent_count >= env->max_controlled_agents && 
+        if (is_controlled &&
+            env->active_agent_count >= env->max_controlled_agents &&
             env->max_controlled_agents != -1 &&
             !env->create_expert_overflow) {
-            
+
             // Determine what to skip based on control mode
             bool should_skip = false;
             if (env->control_mode == CONTROL_VEHICLES) {
@@ -1508,7 +1508,7 @@ void set_active_agents(Drive* env){
                 // Skip all overflow controllable agents
                 should_skip = true;
             }
-            
+
             if (should_skip) {
                 skipped_overflow_count++;
                 continue;  // Don't create this agent at all
@@ -1518,8 +1518,8 @@ void set_active_agents(Drive* env){
         env->num_actors++;
 
         // NEW: Handle max_controlled_agents (creates experts ONLY if create_expert_overflow is enabled)
-        if (is_controlled && 
-            env->active_agent_count >= env->max_controlled_agents && 
+        if (is_controlled &&
+            env->active_agent_count >= env->max_controlled_agents &&
             env->max_controlled_agents != -1 &&
             env->create_expert_overflow) {
             is_controlled = false;
@@ -1547,7 +1547,7 @@ void set_active_agents(Drive* env){
     env->active_agent_indices = (int*)malloc(env->active_agent_count * sizeof(int));
     env->static_agent_indices = (int*)malloc(env->static_agent_count * sizeof(int));
     env->expert_static_agent_indices = (int*)malloc(env->expert_static_agent_count * sizeof(int));
-    
+
     for(int i=0; i<env->active_agent_count; i++){
         env->active_agent_indices[i] = active_agent_indices[i];
     }

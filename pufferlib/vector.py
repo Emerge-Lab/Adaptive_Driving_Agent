@@ -408,7 +408,7 @@ class Multiprocessing:
             notify=np.ndarray(num_workers, dtype=bool, buffer=self.shm["notify"]),
         )
         self.buf["semaphores"][:] = MAIN
-        print(f"observation shape after buffer created {self.buf["observations"].shape}", flush = True)
+        print(f"observation shape after buffer created {self.buf['observations'].shape}", flush=True)
         from multiprocessing import Pipe, Process
 
         self.send_pipes, w_recv_pipes = zip(*[Pipe() for _ in range(num_workers)])
