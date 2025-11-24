@@ -217,7 +217,7 @@ class Drive(pufferlib.PufferEnv):
                 raise ValueError(
                     f"num ego agents ({self.num_ego_agents}) exceeds the number of total agents ({num_agents}))"
                 )
-            if self.condition_type != "none" and self.co_player_condition_type != "none":
+            if self.condition_type != "none" and hasattr(self, 'co_player_condition_type') and self.co_player_condition_type != "none":
                 raise NotImplementedError("Only one agent can be conditioned at once")
 
             if self.one_ego_per_scene:
