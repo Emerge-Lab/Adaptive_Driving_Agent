@@ -41,43 +41,10 @@ class Drive(pufferlib.PufferEnv):
         k_scenarios=1,
         adaptive_driving_agent=False,
         ini_file="pufferlib/config/ocean/drive.ini",
-        # Main policy conditioning (from [policy.conditioning])
-        policy_cond_type="none",
-        policy_cond_collision_lb=-0.5,
-        policy_cond_collision_ub=-0.5,
-        policy_cond_offroad_lb=-0.2,
-        policy_cond_offroad_ub=-0.2,
-        policy_cond_goal_lb=1.0,
-        policy_cond_goal_ub=1.0,
-        policy_cond_entropy_lb=0.001,
-        policy_cond_entropy_ub=0.001,
-        policy_cond_discount_lb=0.98,
-        policy_cond_discount_ub=0.98,
-        # Co-player policy settings (from [co_player_policy])
+        conditioning={},  # ego conditioning
         co_player_enabled=False,
         co_player_num_ego=512,
-        co_player_policy_name=None,
-        co_player_rnn_name=None,
-        co_player_policy_path=None,
-        co_player_input_size=64,
-        co_player_hidden_size=256,
-        co_player_policy=None,
-        # Co-player RNN settings (from [co_player_rnn])
-        co_player_rnn_input_size=256,
-        co_player_rnn_hidden_size=256,
-        co_player_rnn=None,
-        # Co-player conditioning (from [co_player_policy.conditioning])
-        co_player_cond_type="none",
-        co_player_cond_collision_lb=-0.5,
-        co_player_cond_collision_ub=-0.5,
-        co_player_cond_offroad_lb=-0.2,
-        co_player_cond_offroad_ub=-0.2,
-        co_player_cond_goal_lb=1.0,
-        co_player_cond_goal_ub=1.0,
-        co_player_cond_entropy_lb=0.001,
-        co_player_cond_entropy_ub=0.001,
-        co_player_cond_discount_lb=0.98,
-        co_player_cond_discount_ub=0.98,
+        co_player_policy={},
     ):
         # env
         self.dt = dt
@@ -106,21 +73,39 @@ class Drive(pufferlib.PufferEnv):
         self.current_scenario_infos = []  # Accumulate infos for current scenario
 
         # Main policy conditioning setup
-        self.condition_type = policy_cond_type
+        self.conditioning = conditioning
+
+        self.condition_type = self.conditioning.get("type", "none")
         self.reward_conditioned = self.condition_type in ("reward", "all")
         self.entropy_conditioned = self.condition_type in ("entropy", "all")
         self.discount_conditioned = self.condition_type in ("discount", "all")
 
-        self.collision_weight_lb = policy_cond_collision_lb if self.reward_conditioned else reward_vehicle_collision
-        self.collision_weight_ub = policy_cond_collision_ub if self.reward_conditioned else reward_vehicle_collision
-        self.offroad_weight_lb = policy_cond_offroad_lb if self.reward_conditioned else reward_offroad_collision
-        self.offroad_weight_ub = policy_cond_offroad_ub if self.reward_conditioned else reward_offroad_collision
-        self.goal_weight_lb = policy_cond_goal_lb if self.reward_conditioned else 1.0
-        self.goal_weight_ub = policy_cond_goal_ub if self.reward_conditioned else 1.0
-        self.entropy_weight_lb = policy_cond_entropy_lb
-        self.entropy_weight_ub = policy_cond_entropy_ub
-        self.discount_weight_lb = policy_cond_discount_lb
-        self.discount_weight_ub = policy_cond_discount_ub
+        self.collision_weight_lb = (
+            self.conditioning.get("collision_weight_lb", reward_vehicle_collision)
+            if self.reward_conditioned
+            else reward_vehicle_collision
+        )
+        self.collision_weight_ub = (
+            self.conditioning.get("collision_weight_ub", reward_vehicle_collision)
+            if self.reward_conditioned
+            else reward_vehicle_collision
+        )
+        self.offroad_weight_lb = (
+            self.conditioning.get("offroad_weight_lb", reward_offroad_collision)
+            if self.reward_conditioned
+            else reward_offroad_collision
+        )
+        self.offroad_weight_ub = (
+            self.conditioning.get("offroad_weight_ub", reward_offroad_collision)
+            if self.reward_conditioned
+            else reward_offroad_collision
+        )
+        self.goal_weight_lb = self.conditioning.get("goal_weight_lb", 1.0) if self.reward_conditioned else 1.0
+        self.goal_weight_ub = self.conditioning.get("goal_weight_ub", 1.0) if self.reward_conditioned else 1.0
+        self.entropy_weight_lb = self.conditioning.get("entropy_weight_lb", 0.001)
+        self.entropy_weight_ub = self.conditioning.get("entropy_weight_ub", 0.001)
+        self.discount_weight_lb = self.conditioning.get("discount_weight_lb", 0.98)
+        self.discount_weight_ub = self.conditioning.get("discount_weight_ub", 0.98)
 
         conditioning_dims = (
             (3 if self.reward_conditioned else 0)
@@ -148,22 +133,25 @@ class Drive(pufferlib.PufferEnv):
         self.num_ego_agents = co_player_num_ego if self.population_play else num_agents
 
         # Co-player conditioning setup
-        self.co_player_condition_type = co_player_cond_type
-        self.co_player_reward_conditioned = self.co_player_condition_type in ("reward", "all")
-        self.co_player_entropy_conditioned = self.co_player_condition_type in ("entropy", "all")
-        self.co_player_discount_conditioned = self.co_player_condition_type in ("discount", "all")
+        self.co_player_conditioning = co_player_policy.get("conditioning")
+        if self.co_player_conditioning:
+            self.co_player_condition_type = self.co_player_conditioning.get("type")
 
-        # Co-player conditioning weights
-        self.co_player_collision_weight_lb = co_player_cond_collision_lb
-        self.co_player_collision_weight_ub = co_player_cond_collision_ub
-        self.co_player_offroad_weight_lb = co_player_cond_offroad_lb
-        self.co_player_offroad_weight_ub = co_player_cond_offroad_ub
-        self.co_player_goal_weight_lb = co_player_cond_goal_lb
-        self.co_player_goal_weight_ub = co_player_cond_goal_ub
-        self.co_player_entropy_weight_lb = co_player_cond_entropy_lb
-        self.co_player_entropy_weight_ub = co_player_cond_entropy_ub
-        self.co_player_discount_weight_lb = co_player_cond_discount_lb
-        self.co_player_discount_weight_ub = co_player_cond_discount_ub
+            self.co_player_reward_conditioned = self.co_player_condition_type in ("reward", "all")
+            self.co_player_entropy_conditioned = self.co_player_condition_type in ("entropy", "all")
+            self.co_player_discount_conditioned = self.co_player_condition_type in ("discount", "all")
+
+            self.co_player_collision_weight_lb = self.co_player_conditioning.get("collision_weight_lb", -0.5)
+            self.co_player_collision_weight_ub = self.co_player_conditioning.get("collision_weight_ub", -0.5)
+            self.co_player_offroad_weight_lb = self.co_player_conditioning.get("offroad_weight_lb", -0.2)
+            self.co_player_offroad_weight_ub = self.co_player_conditioning.get("offroad_weight_ub", -0.2)
+            self.co_player_goal_weight_lb = self.co_player_conditioning.get("goal_weight_lb", 1.0)
+            self.co_player_goal_weight_ub = self.co_player_conditioning.get("goal_weight_ub", 1.0)
+            self.co_player_entropy_weight_lb = self.co_player_conditioning.get("entropy_weight_lb", 0.001)
+            self.co_player_entropy_weight_ub = self.co_player_conditioning.get("entropy_weight_ub", 0.001)
+            self.co_player_discount_weight_lb = self.co_player_conditioning.get("discount_weight_lb", 0.98)
+            self.co_player_discount_weight_ub = self.co_player_conditioning.get("discount_weight_ub", 0.98)
+
         self.init_steps = init_steps
         self.init_mode_str = init_mode
         self.control_mode_str = control_mode
@@ -224,15 +212,17 @@ class Drive(pufferlib.PufferEnv):
                 raise ValueError(
                     f"num ego agents ({self.num_ego_agents}) exceeds the number of total agents ({num_agents}))"
                 )
+            if self.condition_type != "none" and self.co_player_condition_type != "none":
+                raise NotImplementedError("Only one agent can be conditioned at once")
 
         self.max_controlled_agents = int(max_controlled_agents)
 
         self._set_env_variables()
 
         if self.population_play:
-            self.co_player_policy_name = co_player_policy_name
-            self.co_player_rnn_name = co_player_rnn_name
-            self.co_player_policy = co_player_policy
+            self.co_player_policy_name = co_player_policy.get("policy_name")
+            self.co_player_rnn_name = co_player_policy.get("rnn_name")
+            self.co_player_policy = co_player_policy.get("co_player_policy_func")
             self._set_co_player_state()
 
         super().__init__(buf=buf)
@@ -335,8 +325,6 @@ class Drive(pufferlib.PufferEnv):
             self.num_ego_agents = len(self.ego_ids)
             self.num_co_players = len(self.co_player_ids)
 
-            print(self.num_co_players, self.num_ego_agents)
-
             if ego_set & co_player_set:
                 raise ValueError("Overlap between ego ids and co player ids")
 
@@ -402,7 +390,7 @@ class Drive(pufferlib.PufferEnv):
             co_player_action = co_player_action.cpu().numpy().reshape(self.co_player_actions.shape)
         return co_player_action
 
-    def _set_co_player_state(self):  ## set in init (state doesnt get updated anywhere else)
+    def _set_co_player_state(self):
         with torch.no_grad():
             self.state = dict(
                 lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
@@ -499,16 +487,9 @@ class Drive(pufferlib.PufferEnv):
                 if isinstance(value, (int, float)):
                     aggregated[key] = aggregated.get(key, 0.0) + value
 
-        # Average by number of logs (note: 'n' is already a count, don't average it)
-        if "n" in aggregated:
-            n = aggregated["n"]
-            for key in aggregated:
-                if key != "n":
-                    aggregated[key] = aggregated[key] / n if n > 0 else 0.0
-        else:
-            # If no 'n', just average by count of infos
-            for key in aggregated:
-                aggregated[key] = aggregated[key] / count if count > 0 else 0.0
+        # Average by number of logs (metrics are already per-episode averages from vec_log)
+        for key in aggregated:
+            aggregated[key] = aggregated[key] / count if count > 0 else 0.0
 
         return aggregated
 
@@ -519,11 +500,6 @@ class Drive(pufferlib.PufferEnv):
 
         first_metrics = self.scenario_metrics[0]
         last_metrics = self.scenario_metrics[-1]
-
-        def compute_delta_percent(first_val, last_val):
-            if abs(first_val) < 0.0001:
-                return 0.0
-            return (last_val - first_val) / first_val * 100.0
 
         delta_metrics = {}
 
@@ -544,7 +520,7 @@ class Drive(pufferlib.PufferEnv):
         for metric in metrics_to_track:
             if metric in first_metrics and metric in last_metrics:
                 delta_key = f"ada_delta_{metric}"
-                delta_metrics[delta_key] = compute_delta_percent(first_metrics[metric], last_metrics[metric])
+                delta_metrics[delta_key] = last_metrics[metric] - first_metrics[metric]
 
         # Add a count of how many agents this represents
         if "n" in last_metrics:
@@ -572,7 +548,14 @@ class Drive(pufferlib.PufferEnv):
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
 
-                info.append(log)
+                    # Only append to info if we're in the 0th scenario
+                    if self.current_scenario == 0:
+                        info.append(log)
+                        print("0th scenario metrics are ", log, flush=True)
+                else:
+                    # Non-adaptive mode: always append
+                    info.append(log)
+                    print("Regular metrics are ", log, flush=True)
 
         if self.tick % self.scenario_length == 0:
             if self.adaptive_driving_agent and self.current_scenario_infos:
@@ -582,10 +565,9 @@ class Drive(pufferlib.PufferEnv):
 
                 if self.current_scenario == self.k_scenarios - 1:
                     delta_metrics = self._compute_delta_metrics()
-                    if delta_metrics and info:
-                        info[-1].update(delta_metrics)
-                    elif delta_metrics:
+                    if delta_metrics:
                         info.append(delta_metrics)
+                        print("delta metrics are ", delta_metrics, flush=True)
 
                     self.scenario_metrics = []
 
@@ -602,6 +584,7 @@ class Drive(pufferlib.PufferEnv):
                     delta_metrics = self._compute_delta_metrics()
                     if delta_metrics:
                         info.append(delta_metrics)
+                        print("delta metrics 2, are ", delta_metrics, flush=True)
                     self.scenario_metrics = []
                     self.current_scenario_infos = []
                     self.current_scenario = 0
