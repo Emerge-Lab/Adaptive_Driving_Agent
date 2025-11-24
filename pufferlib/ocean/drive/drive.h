@@ -368,6 +368,7 @@ struct Drive {
     int* tracks_to_predict_indices;
     int init_mode;
     int control_mode;
+    int create_expert_overflow ;
 
     // Reward conditioning
     bool use_rc;
@@ -397,6 +398,8 @@ struct Drive {
     int num_ego_agents;
     int* co_player_ids;
     int* ego_agent_ids;
+    int num_place_holders;
+    int* place_holder_ids;
     bool population_play;
 
 
@@ -1446,6 +1449,8 @@ void set_active_agents(Drive* env){
     if(env->num_agents == 0){
         env->num_agents = MAX_AGENTS;
     }
+    int skipped_overflow_count = 0; // Track agents skipped due to overflow
+    int skipped_noncontrolled_count = 0; // Track non-controlled agents skipped
 
     // Iterate through entities to find agents to create and/or control
     for(int i = 0; i < env->num_objects && env->num_actors < MAX_AGENTS; i++){
@@ -1457,10 +1462,12 @@ void set_active_agents(Drive* env){
             continue;
         }
 
-        // Determine if entity should be created
+        // Determine if entity should be created based on init_mode and control_mode
         bool should_create = false;
         if (env->init_mode == INIT_ALL_VALID) {
             should_create = true;  // All valid entities
+        } else if (env->init_mode == INIT_ONLY_CONTROLLABLE_AGENTS) {
+            should_create = should_control_agent(env, i);
         } else if (env->control_mode == CONTROL_VEHICLES) {
             should_create = (entity->type == VEHICLE);
         } else {  // Control all agents
@@ -1469,17 +1476,57 @@ void set_active_agents(Drive* env){
 
         if (!should_create) continue;
 
+        // Determine if this agent should be policy-controlled
+        bool is_controlled = should_control_agent(env, i);
+
+        // NEW: When create_expert_overflow is disabled, skip vehicles/agents that won't be controlled
+        if (!env->create_expert_overflow && !is_controlled) {
+            if (env->control_mode == CONTROL_VEHICLES && entity->type == VEHICLE) {
+                // Skip non-controlled vehicles
+                skipped_noncontrolled_count++;
+                continue;
+            } else if (env->control_mode != CONTROL_VEHICLES &&
+                       (entity->type == VEHICLE || entity->type == PEDESTRIAN || entity->type == CYCLIST)) {
+                // Skip all non-controlled agents when controlling all
+                skipped_noncontrolled_count++;
+                continue;
+            }
+        }
+
+        // Check if we should skip overflow agents when create_expert_overflow is disabled
+        if (is_controlled &&
+            env->active_agent_count >= env->max_controlled_agents &&
+            env->max_controlled_agents != -1 &&
+            !env->create_expert_overflow) {
+
+            // Determine what to skip based on control mode
+            bool should_skip = false;
+            if (env->control_mode == CONTROL_VEHICLES) {
+                // Only skip overflow vehicles
+                should_skip = (entity->type == VEHICLE);
+            } else {
+                // Skip all overflow controllable agents
+                should_skip = true;
+            }
+
+            if (should_skip) {
+                skipped_overflow_count++;
+                continue;  // Don't create this agent at all
+            }
+        }
+
         env->num_actors++;
 
-        // Determine if this agent should be policy-controlled
-        bool is_controlled = false;
-        is_controlled = should_control_agent(env, i);
-
-        if (is_controlled && env->active_agent_count >= env->max_controlled_agents && env->max_controlled_agents != -1) {
+        // NEW: Handle max_controlled_agents (creates experts ONLY if create_expert_overflow is enabled)
+        if (is_controlled &&
+            env->active_agent_count >= env->max_controlled_agents &&
+            env->max_controlled_agents != -1 &&
+            env->create_expert_overflow) {
             is_controlled = false;
             entity->mark_as_expert = 1;
         }
 
+        // Assign agent to appropriate category
         if(is_controlled){
             active_agent_indices[env->active_agent_count] = i;
             env->active_agent_count++;
@@ -1500,13 +1547,14 @@ void set_active_agents(Drive* env){
     env->active_agent_indices = (int*)malloc(env->active_agent_count * sizeof(int));
     env->static_agent_indices = (int*)malloc(env->static_agent_count * sizeof(int));
     env->expert_static_agent_indices = (int*)malloc(env->expert_static_agent_count * sizeof(int));
-    for(int i=0;i<env->active_agent_count;i++){
+
+    for(int i=0; i<env->active_agent_count; i++){
         env->active_agent_indices[i] = active_agent_indices[i];
     }
-    for(int i=0;i<env->static_agent_count;i++){
+    for(int i=0; i<env->static_agent_count; i++){
         env->static_agent_indices[i] = static_agent_indices[i];
     }
-    for(int i=0;i<env->expert_static_agent_count;i++){
+    for(int i=0; i<env->expert_static_agent_count; i++){
         env->expert_static_agent_indices[i] = expert_static_agent_indices[i];
     }
     return;
@@ -1708,6 +1756,10 @@ void c_close(Drive* env){
     freeTopologyGraph(env->topology_graph);
     // free(env->map_name);
     free(env->ini_file);
+    if (env->place_holder_ids != NULL) {
+        free(env->place_holder_ids);
+        env->place_holder_ids = NULL;
+        }
 
 }
 

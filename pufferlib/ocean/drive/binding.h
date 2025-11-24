@@ -168,8 +168,259 @@ static double* unpack_float_array(PyObject* kwargs, char* key, Py_ssize_t* out_s
 
     return array;
 }
+static PyObject* my_shared_one_ego_per_scene(PyObject* self, PyObject* args, PyObject* kwargs){
+    // Extract parameters
+    int num_agents = unpack(kwargs, "num_agents"); // total agents across all environments
+    int num_environments = unpack(kwargs, "num_ego_agents"); // number of environments to create
+    int num_maps = unpack(kwargs, "num_maps");
+    int init_mode = unpack(kwargs, "init_mode");
+    int population_play = unpack(kwargs, "population_play");
+    int control_mode = unpack(kwargs, "control_mode");
+    int init_steps = unpack(kwargs, "init_steps");
+    int max_controlled_agents = unpack(kwargs, "max_controlled_agents");
 
-static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObject* kwargs) {
+    // Verify that num_agents is divisible by num_environments
+    if (num_agents % num_environments != 0) {
+        PyErr_Format(PyExc_ValueError,
+                     "num_agents (%d) must be divisible by num_ego_agents (%d)",
+                     num_agents, num_environments);
+        return NULL;
+    }
+
+    int agents_per_env = num_agents / num_environments;
+
+    printf("Creating %d worlds with 1 ego + up to %d co-players per world (max_controlled: %d)\n",
+           num_environments, agents_per_env - 1, max_controlled_agents);
+
+    // Use current time for randomness
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    srand(ts.tv_nsec);
+
+    // Prepare return lists
+    PyObject* agent_offsets = PyList_New(num_environments + 1);
+    PyObject* map_ids = PyList_New(num_environments);
+    PyObject* ego_agent_ids = PyList_New(num_environments);
+    PyObject* coplayer_ids = PyList_New(num_environments);
+
+    if (!agent_offsets || !map_ids || !ego_agent_ids || !coplayer_ids) {
+        Py_XDECREF(agent_offsets);
+        Py_XDECREF(map_ids);
+        Py_XDECREF(ego_agent_ids);
+        Py_XDECREF(coplayer_ids);
+        return PyErr_NoMemory();
+    }
+
+    int total_agent_count = 0;
+    int env_count = 0;
+    int max_retries = num_maps * 3; // Prevent infinite loops
+    int retry_count = 0;
+    int total_egos_assigned = 0;
+    int total_coplayers_assigned = 0;
+
+    // Create exactly num_environments worlds
+    while (env_count < num_environments && retry_count < max_retries) {
+        char map_file[100];
+        int map_id = rand() % num_maps;
+        Drive* env = calloc(1, sizeof(Drive));
+        if (!env) {
+            Py_DECREF(agent_offsets);
+            Py_DECREF(map_ids);
+            Py_DECREF(ego_agent_ids);
+            Py_DECREF(coplayer_ids);
+            return PyErr_NoMemory();
+        }
+
+        sprintf(map_file, "resources/drive/binaries/map_%03d.bin", map_id);
+        env->entities = load_map_binary(map_file, env);
+
+        env->num_agents = agents_per_env;
+        env->population_play = population_play;
+        env->init_mode = init_mode;
+        env->control_mode = control_mode;
+        env->init_steps = init_steps;
+        env->max_controlled_agents = max_controlled_agents;
+
+        set_active_agents(env);
+
+        // Check if this map has at least one active agent (for the ego)
+        if (env->active_agent_count == 0) {
+            fprintf(stderr,
+                    "[one_ego_per_scene] WARNING: Map %d has no active agents. Skipping.\n",
+                    map_id);
+
+            for(int j=0; j<env->num_entities; j++) {
+                free_entity(&env->entities[j]);
+            }
+            free(env->entities);
+            free(env->active_agent_indices);
+            free(env->static_agent_indices);
+            free(env->expert_static_agent_indices);
+            free(env);
+            retry_count++;
+            continue; // Try another map
+        }
+
+        // Store map_id
+        PyObject* map_id_obj = PyLong_FromLong(map_id);
+        PyList_SetItem(map_ids, env_count, map_id_obj);
+
+        // Store agent offset
+        PyObject* offset = PyLong_FromLong(total_agent_count);
+        PyList_SetItem(agent_offsets, env_count, offset);
+
+        // Calculate number of co-players based on active_agent_count
+        // We want 1 ego + as many co-players as the map supports (up to agents_per_env - 1)
+        int num_coplayers = (env->active_agent_count < agents_per_env)
+                            ? (env->active_agent_count - 1)
+                            : (agents_per_env - 1);
+
+        int actual_agents = 1 + num_coplayers; // 1 ego + co-players
+
+        // Create agent role array for this world (0 = coplayer, 1 = ego)
+        // Only for the actual agents (not placeholders)
+        int* agent_roles = malloc(actual_agents * sizeof(int));
+        if (!agent_roles) {
+            for(int j=0; j<env->num_entities; j++) {
+                free_entity(&env->entities[j]);
+            }
+            free(env->entities);
+            free(env->active_agent_indices);
+            free(env->static_agent_indices);
+            free(env->expert_static_agent_indices);
+            free(env);
+            Py_DECREF(agent_offsets);
+            Py_DECREF(map_ids);
+            Py_DECREF(ego_agent_ids);
+            Py_DECREF(coplayer_ids);
+            return PyErr_NoMemory();
+        }
+
+        // Initialize all as co-players
+        for (int i = 0; i < actual_agents; i++) {
+            agent_roles[i] = 0;
+        }
+
+        // Randomly select one agent to be the ego
+        int ego_idx = rand() % actual_agents;
+        agent_roles[ego_idx] = 1;
+
+        // Fisher-Yates shuffle to randomize ego and co-player positions
+        for (int i = actual_agents - 1; i > 0; i--) {
+            int j = rand() % (i + 1);
+            int temp = agent_roles[i];
+            agent_roles[i] = agent_roles[j];
+            agent_roles[j] = temp;
+        }
+
+        // Create ego and coplayer lists for this world
+        PyObject* ego_list = PyList_New(0);
+        PyObject* coplayer_list = PyList_New(0);
+
+        if (!ego_list || !coplayer_list) {
+            Py_XDECREF(ego_list);
+            Py_XDECREF(coplayer_list);
+            free(agent_roles);
+            for(int j=0; j<env->num_entities; j++) {
+                free_entity(&env->entities[j]);
+            }
+            free(env->entities);
+            free(env->active_agent_indices);
+            free(env->static_agent_indices);
+            free(env->expert_static_agent_indices);
+            free(env);
+            Py_DECREF(agent_offsets);
+            Py_DECREF(map_ids);
+            Py_DECREF(ego_agent_ids);
+            Py_DECREF(coplayer_ids);
+            return PyErr_NoMemory();
+        }
+
+        // Assign agents based on shuffled roles
+        for (int a = 0; a < actual_agents; a++) {
+            PyObject* agent_id = PyLong_FromLong(total_agent_count);
+
+            if (agent_roles[a] == 1) {
+                // This agent is the ego
+                PyList_Append(ego_list, agent_id);
+                total_egos_assigned++;
+            } else {
+                // This agent is a co-player
+                PyList_Append(coplayer_list, agent_id);
+                total_coplayers_assigned++;
+            }
+
+            Py_DECREF(agent_id);
+            total_agent_count++;
+        }
+
+        // Skip ahead for placeholder slots (not assigned to any agent)
+        int num_placeholders = agents_per_env - actual_agents;
+        total_agent_count += num_placeholders;
+
+        PyList_SetItem(ego_agent_ids, env_count, ego_list);
+        PyList_SetItem(coplayer_ids, env_count, coplayer_list);
+
+        printf("World %d (map %d): 1 ego, %d co-players, %d placeholder slots (active_agent_count: %d)\n",
+               env_count, map_id, num_coplayers, num_placeholders, env->active_agent_count);
+
+        // Free the agent roles array
+        free(agent_roles);
+
+        env_count++;
+
+        // Free environment resources
+        for(int j=0; j<env->num_entities; j++) {
+            free_entity(&env->entities[j]);
+        }
+        free(env->entities);
+        free(env->active_agent_indices);
+        free(env->static_agent_indices);
+        free(env->expert_static_agent_indices);
+        free(env);
+    }
+
+    // Check if we successfully created all environments
+    if (env_count < num_environments) {
+        Py_DECREF(agent_offsets);
+        Py_DECREF(map_ids);
+        Py_DECREF(ego_agent_ids);
+        Py_DECREF(coplayer_ids);
+        PyErr_Format(PyExc_RuntimeError,
+                     "Could not create %d environments (only created %d). Not enough valid maps.",
+                     num_environments, env_count);
+        return NULL;
+    }
+
+    // Store final agent offset
+    PyObject* final_total_agent_count = PyLong_FromLong(total_agent_count);
+    PyList_SetItem(agent_offsets, num_environments, final_total_agent_count);
+    PyObject* final_env_count = PyLong_FromLong(env_count);
+
+    // Create return tuple with 5 elements (same as my_shared_split_numerically)
+    PyObject* tuple = PyTuple_New(5);
+    if (!tuple) {
+        Py_DECREF(agent_offsets);
+        Py_DECREF(map_ids);
+        Py_DECREF(final_env_count);
+        Py_DECREF(ego_agent_ids);
+        Py_DECREF(coplayer_ids);
+        return PyErr_NoMemory();
+    }
+
+    PyTuple_SetItem(tuple, 0, agent_offsets);
+    PyTuple_SetItem(tuple, 1, map_ids);
+    PyTuple_SetItem(tuple, 2, final_env_count);
+    PyTuple_SetItem(tuple, 3, ego_agent_ids);
+    PyTuple_SetItem(tuple, 4, coplayer_ids);
+
+    int total_placeholders = total_agent_count - total_egos_assigned - total_coplayers_assigned;
+    printf("Total: %d agents across %d worlds (%d egos, %d co-players, %d placeholders)\n",
+           total_agent_count, env_count, total_egos_assigned, total_coplayers_assigned, total_placeholders);
+
+    return tuple;
+}
+static PyObject* my_shared_split_numerically(PyObject* self, PyObject* args, PyObject* kwargs) {
     int num_agents = unpack(kwargs, "num_agents");
     int num_maps = unpack(kwargs, "num_maps");
     int num_ego_agents = unpack(kwargs, "num_ego_agents");
@@ -343,8 +594,8 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
         PyList_SetItem(ego_agent_ids, env_count, ego_list);
         PyList_SetItem(coplayer_ids, env_count, coplayer_list);
 
-        printf("World %d (map %d): %d agents (%d egos, %d co-players)\n",
-               env_count, map_id, env->active_agent_count, world_egos, world_coplayers);
+        // printf("World %d (map %d): %d agents (%d egos, %d co-players)\n",
+        //        env_count, map_id, env->active_agent_count, world_egos, world_coplayers);
 
         env_count++;
 
@@ -392,4 +643,14 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
            total_agent_count, env_count, total_egos_assigned, total_coplayers_assigned);
 
     return tuple;
+}
+
+static  PyObject*  my_shared_population_play(PyObject* self, PyObject* args, PyObject* kwargs){
+    int one_ego_per_scene = unpack(kwargs, "one_ego_per_scene");
+    if (one_ego_per_scene){
+        return my_shared_one_ego_per_scene(self, args,  kwargs);
+    }
+    else{
+        return my_shared_split_numerically(self, args, kwargs);
+    }
 }

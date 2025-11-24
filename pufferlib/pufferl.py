@@ -293,7 +293,6 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
-            # print(f"o shape is {o.shape}", flush = True)
             if self.population_play:
                 batch_size = self.vecenv.batch_size
                 ego_ids = info[-1]
