@@ -417,7 +417,7 @@ class Drive(pufferlib.PufferEnv):
             self.local_co_player_ids = local_co_player_ids
             self.local_place_holder_ids = local_place_holder_ids
 
-            if self.co_player_condition_type is not None and self.co_player_condition_type != "none":
+            if hasattr(self, 'co_player_condition_type') and self.co_player_condition_type is not None and self.co_player_condition_type != "none":
                 self._set_co_player_conditioning()
 
             if self.population_play:
