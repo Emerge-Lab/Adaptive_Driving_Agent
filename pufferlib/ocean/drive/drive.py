@@ -100,8 +100,12 @@ class Drive(pufferlib.PufferEnv):
             if self.reward_conditioned
             else reward_offroad_collision
         )
-        self.goal_weight_lb = self.conditioning.get("goal_weight_lb", reward_goal) if self.reward_conditioned else reward_goal
-        self.goal_weight_ub = self.conditioning.get("goal_weight_ub", reward_goal) if self.reward_conditioned else reward_goal
+        self.goal_weight_lb = (
+            self.conditioning.get("goal_weight_lb", reward_goal) if self.reward_conditioned else reward_goal
+        )
+        self.goal_weight_ub = (
+            self.conditioning.get("goal_weight_ub", reward_goal) if self.reward_conditioned else reward_goal
+        )
         self.entropy_weight_lb = self.conditioning.get("entropy_weight_lb", 0.001)
         self.entropy_weight_ub = self.conditioning.get("entropy_weight_ub", 0.001)
         self.discount_weight_lb = self.conditioning.get("discount_weight_lb", 0.98)
