@@ -2403,25 +2403,25 @@ void c_step(Drive* env){
         // Handle collisions - SAME REWARD for both ego and co-players
         if(collision_state > 0){
             if(collision_state == VEHICLE_COLLISION){
-                env->rewards[i] = env->reward_vehicle_collision;
+                env->rewards[i] = env->collision_weights[i];
 
                 if(is_ego){
-                    env->logs[i].episode_return += env->reward_vehicle_collision;
+                    env->logs[i].episode_return += env->collision_weights[i];
                     env->logs[i].collision_rate = 1.0f;
                     env->logs[i].avg_collisions_per_agent += 1.0f;
                 } else if(is_co_player){
-                    env->co_player_logs[i].co_player_episode_return += env->reward_vehicle_collision;
+                    env->co_player_logs[i].co_player_episode_return += env->collision_weights[i];
                     env->co_player_logs[i].co_player_collision_rate = 1.0f;
                 }
             } else if(collision_state == OFFROAD){
-                env->rewards[i] = env->reward_offroad_collision;
+                env->rewards[i] = env->offroad_weights[i];
 
                 if(is_ego){
-                    env->logs[i].episode_return += env->reward_offroad_collision;
+                    env->logs[i].episode_return += env->offroad_weights[i];
                     env->logs[i].offroad_rate = 1.0f;
                     env->logs[i].avg_offroad_per_agent += 1.0f;  // ADD THIS
                 } else if(is_co_player){
-                    env->co_player_logs[i].co_player_episode_return += env->reward_offroad_collision;
+                    env->co_player_logs[i].co_player_episode_return += env->offroad_weights[i];
                     env->co_player_logs[i].co_player_offroad_rate = 1.0f;
                     env->logs[i].avg_offroad_per_agent += 1.0f;
             }
@@ -2443,29 +2443,30 @@ void c_step(Drive* env){
 
         if(distance_to_goal < env->goal_radius){
             if (env->goal_behavior == GOAL_RESPAWN && env->entities[agent_idx].respawn_timestep != -1){
-                env->rewards[i] += env->reward_goal_post_respawn;
+                float scaled_post_respawn_reward = env->reward_goal_post_respawn * env->goal_weights[i];
+                env->rewards[i] += scaled_post_respawn_reward;
                 if(is_ego){
-                    env->logs[i].episode_return += env->reward_goal_post_respawn;
+                    env->logs[i].episode_return += scaled_post_respawn_reward;
                 } else if(is_co_player){
-                    env->co_player_logs[i].co_player_episode_return += env->reward_goal_post_respawn;
+                    env->co_player_logs[i].co_player_episode_return += scaled_post_respawn_reward;
                 }
             } else if (env->goal_behavior == GOAL_GENERATE_NEW) {
-                env->rewards[i] += env->reward_goal;
+                env->rewards[i] += env->goal_weights[i];
                 env->entities[agent_idx].sampled_new_goal = 1;
                 if(is_ego){
-                    env->logs[i].episode_return += env->reward_goal;
+                    env->logs[i].episode_return += env->goal_weights[i];
                     env->logs[i].num_goals_reached += 1;
                 } else if(is_co_player){
-                    env->co_player_logs[i].co_player_episode_return += env->reward_goal;
+                    env->co_player_logs[i].co_player_episode_return += env->goal_weights[i];
                     env->co_player_logs[i].co_player_num_goals_reached += 1;
                 }
             } else { // Zero out the velocity so that the agent stops at the goal
-                env->rewards[i] = env->reward_goal;
+                env->rewards[i] = env->goal_weights[i];
                 if(is_ego){
-                    env->logs[i].episode_return = env->reward_goal;
+                    env->logs[i].episode_return = env->goal_weights[i];
                     env->logs[i].num_goals_reached = 1;
                 } else if(is_co_player){
-                    env->co_player_logs[i].co_player_episode_return = env->reward_goal;
+                    env->co_player_logs[i].co_player_episode_return = env->goal_weights[i];
                     env->co_player_logs[i].co_player_num_goals_reached = 1;
                 }
                 env->entities[agent_idx].stopped = 1;

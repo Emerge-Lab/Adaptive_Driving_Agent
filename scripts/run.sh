@@ -10,7 +10,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 #SBATCH --constraint='h100|a100'
-#SBATCH --array=1-2
+#SBATCH --array=0-4
 
 # Define condition types array
 CONDITION_TYPES=("none" "reward" "entropy" "discount" "all")
