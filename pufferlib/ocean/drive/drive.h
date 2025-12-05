@@ -1733,7 +1733,7 @@ void free_allocated(Drive* env){
     free(env->rewards);
     free(env->terminals);
 
-    // Always free weight arrays 
+    // Always free weight arrays
     free(env->collision_weights);
     free(env->offroad_weights);
     free(env->goal_weights);

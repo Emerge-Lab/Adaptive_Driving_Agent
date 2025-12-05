@@ -11,76 +11,91 @@ from pufferlib.ocean.torch import Drive, Recurrent
 import matplotlib.pyplot as plt
 import numpy as np
 
+
 def plot_adaptive_metrics(first_metrics, last_metrics, delta_metrics, output_path):
     """
     Plot adaptive metrics showing first scenario (0-shot), last scenario, and delta improvement.
     """
     # Metrics to plot
     metrics_to_plot = {
-        'score': 'Score',
-        'collision_rate': 'Collision Rate',
-        'offroad_rate': 'Offroad Rate',
-        'episode_return': 'Episode Return'
+        "score": "Score",
+        "collision_rate": "Collision Rate",
+        "offroad_rate": "Offroad Rate",
+        "episode_return": "Episode Return",
     }
-    
+
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     axes = axes.flatten()
-    
+
     for idx, (metric_key, metric_name) in enumerate(metrics_to_plot.items()):
         ax = axes[idx]
-        
+
         first_val = first_metrics[metric_key]
         last_val = last_metrics[metric_key]
-        delta_key = f'ada_delta_{metric_key}'
+        delta_key = f"ada_delta_{metric_key}"
         delta_pct = delta_metrics[delta_key]
-        
+
         # Create bar chart
         x = np.arange(2)
         bars = ax.bar(x, [first_val, last_val], width=0.6, alpha=0.8)
-        
+
         # Color bars based on improvement
         # For collision/offroad, decrease is good (green), increase is bad (red)
         # For score/return, increase is good (green), decrease is bad (red)
-        if metric_key in ['collision_rate', 'offroad_rate']:
-            bars[0].set_color('gray')
-            bars[1].set_color('green' if delta_pct < 0 else 'red')
+        if metric_key in ["collision_rate", "offroad_rate"]:
+            bars[0].set_color("gray")
+            bars[1].set_color("green" if delta_pct < 0 else "red")
         else:
-            bars[0].set_color('gray')
-            bars[1].set_color('green' if delta_pct > 0 else 'red')
-        
+            bars[0].set_color("gray")
+            bars[1].set_color("green" if delta_pct > 0 else "red")
+
         # Add value labels on bars
         for i, (bar, val) in enumerate(zip(bars, [first_val, last_val])):
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{val:.3f}',
-                   ha='center', va='bottom', fontsize=10, fontweight='bold')
-        
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height,
+                f"{val:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                fontweight="bold",
+            )
+
         # Add delta percentage annotation
         mid_x = 0.5
         mid_y = max(first_val, last_val) * 0.5
-        arrow_props = dict(arrowstyle='->', lw=2, 
-                          color='green' if (delta_pct > 0 and metric_key in ['score', 'episode_return']) or 
-                                          (delta_pct < 0 and metric_key in ['collision_rate', 'offroad_rate'])
-                          else 'red')
-        
-        ax.annotate(f'{delta_pct:+.1f}%', 
-                   xy=(1, last_val), xytext=(mid_x, mid_y),
-                   fontsize=14, fontweight='bold',
-                   ha='center',
-                   bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
-                   arrowprops=arrow_props)
-        
+        arrow_props = dict(
+            arrowstyle="->",
+            lw=2,
+            color="green"
+            if (delta_pct > 0 and metric_key in ["score", "episode_return"])
+            or (delta_pct < 0 and metric_key in ["collision_rate", "offroad_rate"])
+            else "red",
+        )
+
+        ax.annotate(
+            f"{delta_pct:+.1f}%",
+            xy=(1, last_val),
+            xytext=(mid_x, mid_y),
+            fontsize=14,
+            fontweight="bold",
+            ha="center",
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="yellow", alpha=0.7),
+            arrowprops=arrow_props,
+        )
+
         # Formatting
         ax.set_xticks(x)
-        ax.set_xticklabels(['First Scenario\n(0-shot)', 'Last Scenario\n(Adapted)'], fontsize=11)
-        ax.set_ylabel(metric_name, fontsize=12, fontweight='bold')
-        ax.set_title(f'{metric_name}', fontsize=13, fontweight='bold')
-        ax.grid(axis='y', alpha=0.3, linestyle='--')
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-    
+        ax.set_xticklabels(["First Scenario\n(0-shot)", "Last Scenario\n(Adapted)"], fontsize=11)
+        ax.set_ylabel(metric_name, fontsize=12, fontweight="bold")
+        ax.set_title(f"{metric_name}", fontsize=13, fontweight="bold")
+        ax.grid(axis="y", alpha=0.3, linestyle="--")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
     plt.tight_layout()
-    plt.savefig(output_path.replace('.json', '_adaptive_metrics.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(output_path.replace(".json", "_adaptive_metrics.png"), dpi=300, bbox_inches="tight")
     print(f"\nAdaptive metrics plot saved to {output_path.replace('.json', '_adaptive_metrics.png')}")
     plt.close()
 
@@ -93,15 +108,21 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32, help="Max parallel rollouts per batch")
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--num-agents", type=int, default=64)
-    parser.add_argument("--condition-type", type=str, default="none",
-                        choices=["none", "reward", "entropy", "discount", "all"],
-                        help="Conditioning type (none, reward, entropy, discount, all)")
+    parser.add_argument(
+        "--condition-type",
+        type=str,
+        default="none",
+        choices=["none", "reward", "entropy", "discount", "all"],
+        help="Conditioning type (none, reward, entropy, discount, all)",
+    )
     parser.add_argument("--output", type=str, default="eval_human_logs.json")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--max-controlled-agents", type=int, default=-1) ## needs to be 1 if you want human logs, -1 if you want Self Play 
+    parser.add_argument(
+        "--max-controlled-agents", type=int, default=-1
+    )  ## needs to be 1 if you want human logs, -1 if you want Self Play
     parser.add_argument("--adaptive-driving-agent", type=int, default=0, help="Enable adaptive driving agent")
     parser.add_argument("--k-scenarios", type=int, default=1, help="Number of scenarios (default 1 for non-adaptive)")
-    parser.add_argument("--dynamics-model",  type=str, default="classic")
+    parser.add_argument("--dynamics-model", type=str, default="classic")
     args = parser.parse_args()
 
     num_batches = (args.num_rollouts + args.batch_size - 1) // args.batch_size
@@ -124,13 +145,13 @@ def main():
     env_name = "puffer_adaptive_drive" if args.adaptive_driving_agent else "puffer_drive"
     make_env = env_creator(env_name)
     temp_env = make_env(
-        num_agents=64, 
-        num_maps=args.num_maps, 
-        scenario_length=91, 
+        num_agents=64,
+        num_maps=args.num_maps,
+        scenario_length=91,
         co_player_cond_type=args.condition_type,
         adaptive_driving_agent=args.adaptive_driving_agent,
         k_scenarios=args.k_scenarios,
-        dynamics_model = args.dynamics_model,
+        dynamics_model=args.dynamics_model,
     )
 
     base_policy = Drive(temp_env, input_size=64, hidden_size=256)
@@ -155,7 +176,7 @@ def main():
         "scenario_length": 91,
         "adaptive_driving_agent": args.adaptive_driving_agent,
         "k_scenarios": args.k_scenarios,
-        "dynamics_model" : args.dynamics_model,
+        "dynamics_model": args.dynamics_model,
         "co_player_cond_type": args.condition_type,
         "co_player_cond_entropy_ub": 0.05,
         "co_player_cond_discount_lb": 0.40,
@@ -196,7 +217,7 @@ def main():
             # Run through all scenarios (1 for non-adaptive, k for adaptive)
             for scenario in range(args.k_scenarios):
                 scenario_info_list = []
-                desc = f"  Scenario {scenario+1}/{args.k_scenarios}" if args.k_scenarios > 1 else "  Steps"
+                desc = f"  Scenario {scenario + 1}/{args.k_scenarios}" if args.k_scenarios > 1 else "  Steps"
                 for t in tqdm(range(91), desc=desc, ncols=80, leave=False):
                     obs_t = torch.as_tensor(obs, device=args.device)
                     logits, _ = policy.forward_eval(obs_t, state)
@@ -206,10 +227,10 @@ def main():
                     total_reward += reward
 
                     if info:
-                        valid_infos = [inf for inf in info if 'score' in inf]
+                        valid_infos = [inf for inf in info if "score" in inf]
                         batch_infos.extend(valid_infos)
                         scenario_info_list.extend(valid_infos)
-                
+
                 # Store per-scenario infos
                 if args.adaptive_driving_agent:
                     scenario_infos.append(scenario_info_list)
@@ -224,7 +245,8 @@ def main():
             "offroad_rate": sum(info.get("offroad_rate", 0) for info in batch_infos) / num_infos,
             "completion_rate": sum(info.get("completion_rate", 0) for info in batch_infos) / num_infos,
             "dnf_rate": sum(info.get("dnf_rate", 0) for info in batch_infos) / num_infos,
-            "avg_collisions_per_agent": sum(info.get("avg_collisions_per_agent", 0) for info in batch_infos) / num_infos,
+            "avg_collisions_per_agent": sum(info.get("avg_collisions_per_agent", 0) for info in batch_infos)
+            / num_infos,
             "avg_offroad_per_agent": sum(info.get("avg_offroad_per_agent", 0) for info in batch_infos) / num_infos,
         }
 
@@ -233,7 +255,7 @@ def main():
 
         all_returns.extend(rollout_returns.tolist())
         all_metrics.append(batch_metrics)
-        
+
         # Store scenario-specific metrics for adaptive agents
         if args.adaptive_driving_agent:
             batch_scenario_metrics = []
@@ -241,19 +263,26 @@ def main():
                 num_scenario_infos = len(scenario_info_list) or 1
                 scenario_metrics = {
                     "score": sum(info.get("score", 0) for info in scenario_info_list) / num_scenario_infos,
-                    "collision_rate": sum(info.get("collision_rate", 0) for info in scenario_info_list) / num_scenario_infos,
-                    "offroad_rate": sum(info.get("offroad_rate", 0) for info in scenario_info_list) / num_scenario_infos,
-                    "completion_rate": sum(info.get("completion_rate", 0) for info in scenario_info_list) / num_scenario_infos,
+                    "collision_rate": sum(info.get("collision_rate", 0) for info in scenario_info_list)
+                    / num_scenario_infos,
+                    "offroad_rate": sum(info.get("offroad_rate", 0) for info in scenario_info_list)
+                    / num_scenario_infos,
+                    "completion_rate": sum(info.get("completion_rate", 0) for info in scenario_info_list)
+                    / num_scenario_infos,
                     "dnf_rate": sum(info.get("dnf_rate", 0) for info in scenario_info_list) / num_scenario_infos,
-                    "num_goals_reached": sum(info.get("num_goals_reached", 0) for info in scenario_info_list) / num_scenario_infos,
-                    "lane_alignment_rate": sum(info.get("lane_alignment_rate", 0) for info in scenario_info_list) / num_scenario_infos,
-                    "avg_displacement_error": sum(info.get("avg_displacement_error", 0) for info in scenario_info_list) / num_scenario_infos,
-                    "episode_return": sum(info.get("episode_return", 0) for info in scenario_info_list) / num_scenario_infos,
+                    "num_goals_reached": sum(info.get("num_goals_reached", 0) for info in scenario_info_list)
+                    / num_scenario_infos,
+                    "lane_alignment_rate": sum(info.get("lane_alignment_rate", 0) for info in scenario_info_list)
+                    / num_scenario_infos,
+                    "avg_displacement_error": sum(info.get("avg_displacement_error", 0) for info in scenario_info_list)
+                    / num_scenario_infos,
+                    "episode_return": sum(info.get("episode_return", 0) for info in scenario_info_list)
+                    / num_scenario_infos,
                 }
                 # Compute perf (score without collision before goal)
                 scenario_metrics["perf"] = scenario_metrics["score"]
                 batch_scenario_metrics.append(scenario_metrics)
-            
+
             all_scenario_metrics.append(batch_scenario_metrics)
 
     # Aggregate across all batches
@@ -268,67 +297,75 @@ def main():
         "avg_return": float(np.mean(all_returns)),
         "std_return": float(np.std(all_returns)),
         "se_return": float(np.std(all_returns) / np.sqrt(len(all_returns))),  # Standard error
-        **{k: float(v) for k, v in metrics.items()}
+        **{k: float(v) for k, v in metrics.items()},
     }
 
     # Compute adaptive delta metrics from scenario metrics
     first_scenario_metrics = None
     last_scenario_metrics = None
-    
+
     if args.adaptive_driving_agent and len(all_scenario_metrics) > 0:
         # Aggregate scenario metrics across all batches
         # all_scenario_metrics is a list of [batch][scenario] metrics
         # We need to compute average for each scenario across all batches
-        
+
         aggregated_scenario_metrics = []
         for scenario_idx in range(args.k_scenarios):
             scenario_metrics_list = [batch[scenario_idx] for batch in all_scenario_metrics]
-            
+
             # Average each metric across batches for this scenario
             avg_scenario_metrics = {}
             for key in scenario_metrics_list[0].keys():
                 avg_scenario_metrics[key] = np.mean([m[key] for m in scenario_metrics_list])
-            
+
             aggregated_scenario_metrics.append(avg_scenario_metrics)
-        
+
         # Get first and last scenario metrics
         first_scenario_metrics = aggregated_scenario_metrics[0]
         last_scenario_metrics = aggregated_scenario_metrics[-1]
-        
+
         # Helper function to compute delta percentage
         def compute_delta_percent(first_val, last_val):
             if abs(first_val) < 0.0001:
                 return 0.0
             return (last_val - first_val) / first_val * 100.0
-        
+
         # Compute all delta metrics
         results["ada_delta_completion_rate"] = compute_delta_percent(
-            first_scenario_metrics["completion_rate"], last_scenario_metrics["completion_rate"])
+            first_scenario_metrics["completion_rate"], last_scenario_metrics["completion_rate"]
+        )
         results["ada_delta_score"] = compute_delta_percent(
-            first_scenario_metrics["score"], last_scenario_metrics["score"])
-        results["ada_delta_perf"] = compute_delta_percent(
-            first_scenario_metrics["perf"], last_scenario_metrics["perf"])
+            first_scenario_metrics["score"], last_scenario_metrics["score"]
+        )
+        results["ada_delta_perf"] = compute_delta_percent(first_scenario_metrics["perf"], last_scenario_metrics["perf"])
         results["ada_delta_collision_rate"] = compute_delta_percent(
-            first_scenario_metrics["collision_rate"], last_scenario_metrics["collision_rate"])
+            first_scenario_metrics["collision_rate"], last_scenario_metrics["collision_rate"]
+        )
         results["ada_delta_offroad_rate"] = compute_delta_percent(
-            first_scenario_metrics["offroad_rate"], last_scenario_metrics["offroad_rate"])
+            first_scenario_metrics["offroad_rate"], last_scenario_metrics["offroad_rate"]
+        )
         results["ada_delta_num_goals_reached"] = compute_delta_percent(
-            first_scenario_metrics["num_goals_reached"], last_scenario_metrics["num_goals_reached"])
+            first_scenario_metrics["num_goals_reached"], last_scenario_metrics["num_goals_reached"]
+        )
         results["ada_delta_dnf_rate"] = compute_delta_percent(
-            first_scenario_metrics["dnf_rate"], last_scenario_metrics["dnf_rate"])
+            first_scenario_metrics["dnf_rate"], last_scenario_metrics["dnf_rate"]
+        )
         results["ada_delta_lane_alignment_rate"] = compute_delta_percent(
-            first_scenario_metrics["lane_alignment_rate"], last_scenario_metrics["lane_alignment_rate"])
+            first_scenario_metrics["lane_alignment_rate"], last_scenario_metrics["lane_alignment_rate"]
+        )
         results["ada_delta_avg_displacement_error"] = compute_delta_percent(
-            first_scenario_metrics["avg_displacement_error"], last_scenario_metrics["avg_displacement_error"])
+            first_scenario_metrics["avg_displacement_error"], last_scenario_metrics["avg_displacement_error"]
+        )
         results["ada_delta_episode_return"] = compute_delta_percent(
-            first_scenario_metrics["episode_return"], last_scenario_metrics["episode_return"])
-        
+            first_scenario_metrics["episode_return"], last_scenario_metrics["episode_return"]
+        )
+
         # Store first and last scenario values for reporting
         results["first_scenario_score"] = float(first_scenario_metrics["score"])
         results["first_scenario_collision_rate"] = float(first_scenario_metrics["collision_rate"])
         results["first_scenario_offroad_rate"] = float(first_scenario_metrics["offroad_rate"])
         results["first_scenario_episode_return"] = float(first_scenario_metrics["episode_return"])
-        
+
         results["last_scenario_score"] = float(last_scenario_metrics["score"])
         results["last_scenario_collision_rate"] = float(last_scenario_metrics["collision_rate"])
         results["last_scenario_offroad_rate"] = float(last_scenario_metrics["offroad_rate"])
@@ -344,29 +381,29 @@ def main():
     print(f"  Collision: {results['collision_rate']:.3f}")
     print(f"  Collision per agent: {results['avg_collisions_per_agent']:.3f}")
     print(f"  Offroad: {results['offroad_rate']:.3f}")
-    
+
     if args.adaptive_driving_agent:
         print(f"\n0-Shot Performance (First Scenario):")
         print(f"  Score: {results['first_scenario_score']:.3f}")
         print(f"  Collision: {results['first_scenario_collision_rate']:.3f}")
         print(f"  Offroad: {results['first_scenario_offroad_rate']:.3f}")
         print(f"  Return: {results['first_scenario_episode_return']:.2f}")
-        
+
         print(f"\nAdapted Performance (Last Scenario):")
         print(f"  Score: {results['last_scenario_score']:.3f}")
         print(f"  Collision: {results['last_scenario_collision_rate']:.3f}")
         print(f"  Offroad: {results['last_scenario_offroad_rate']:.3f}")
         print(f"  Return: {results['last_scenario_episode_return']:.2f}")
-        
+
         print(f"\nAdaptive Metrics (Delta %):")
         print(f"  Score: {results['ada_delta_score']:.2f}%")
         print(f"  Collision rate: {results['ada_delta_collision_rate']:.2f}%")
         print(f"  Offroad rate: {results['ada_delta_offroad_rate']:.2f}%")
         print(f"  Episode return: {results['ada_delta_episode_return']:.2f}%")
-        
+
         # Generate visualization
         plot_adaptive_metrics(first_scenario_metrics, last_scenario_metrics, results, args.output)
-    
+
     print(f"\nSaved to {args.output}")
 
 

@@ -205,7 +205,13 @@ def test_scenario_5_population_play_adaptive():
     run_training_test(
         env_name="puffer_adaptive_drive",
         config_overrides={
-            "env": {"num_agents": 16, "num_ego_agents": 8, "co_player_enabled": True, "k_scenarios": 2, "scenario_length": 4},
+            "env": {
+                "num_agents": 16,
+                "num_ego_agents": 8,
+                "co_player_enabled": True,
+                "k_scenarios": 2,
+                "scenario_length": 4,
+            },
             "train": {"minibatch_multiplier": 1},
             "co_player_policy": {
                 "enabled": True,
