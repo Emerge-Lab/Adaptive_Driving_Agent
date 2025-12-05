@@ -10,11 +10,11 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 #SBATCH --constraint='h100|a100'
-#SBATCH --array=0-4
+#SBATCH --array=0-1
 
 # Define condition types array
-CONDITION_TYPES=("none" "reward" "entropy" "discount" "all")
-CONDITION_TYPE=${CONDITION_TYPES[$SLURM_ARRAY_TASK_ID]}
+# CONDITION_TYPES=("none" "reward" "entropy" "discount" "all")
+# CONDITION_TYPE=${CONDITION_TYPES[$SLURM_ARRAY_TASK_ID]}
 
 singularity exec --nv \
  --overlay "$OVERLAY_FILE:ro" \
@@ -26,9 +26,10 @@ singularity exec --nv \
    cd /scratch/mmk9418/projects/Adaptive_Driving_Agent
    source .venv/bin/activate
 
-   puffer train puffer_drive --wandb --env.num-maps 1000 --env.condition-type $CONDITION_TYPE
+   puffer train puffer_adaptive_drive --wandb --env.co-player-policy.conditioning.type all --env.num-maps 1000
  "
 
 
+# puffer train puffer_drive --wandb --env.num-maps 1000 --env.conditioning.type $CONDITION_TYPE
 # puffer train puffer_adaptive_drive --wandb --env.condition-type $CONDITION_TYPE --env.num-maps 100
 # puffer train puffer_drive --wandb --env.num-maps 1000

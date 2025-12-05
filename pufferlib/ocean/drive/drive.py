@@ -43,7 +43,7 @@ class Drive(pufferlib.PufferEnv):
         ini_file="pufferlib/config/ocean/drive.ini",
         conditioning={},  # ego conditioning
         co_player_enabled=False,
-        co_player_num_ego=512,
+        num_ego_agents=512,
         co_player_policy={},
     ):
         # env
@@ -134,7 +134,7 @@ class Drive(pufferlib.PufferEnv):
         # Co-player policy setup
         self.population_play = co_player_enabled
         self.num_agents = num_agents
-        self.num_ego_agents = co_player_num_ego if self.population_play else num_agents
+        self.num_ego_agents = num_ego_agents if self.population_play else num_agents
 
         # Co-player conditioning setup
         self.co_player_conditioning = co_player_policy.get("conditioning")
