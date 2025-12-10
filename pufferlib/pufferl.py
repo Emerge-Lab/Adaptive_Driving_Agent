@@ -93,12 +93,12 @@ class PuffeRL:
         self.total_agents = total_agents
 
         # Experience
-        if config["batch_size"] == "auto" and config["bptt_horizon"] == "auto":
-            raise pufferlib.APIUsageError("Must specify batch_size or bptt_horizon")
-        elif config["batch_size"] == "auto":
-            config["batch_size"] = agents_for_calc * config["bptt_horizon"]
-        elif config["bptt_horizon"] == "auto":
-            config["bptt_horizon"] = config["batch_size"] // agents_for_calc
+        # if config["batch_size"] == "auto" and config["bptt_horizon"] == "auto":
+        #     raise pufferlib.APIUsageError("Must specify batch_size or bptt_horizon")
+        # elif config["batch_size"] == "auto":
+        #     config["batch_size"] = agents_for_calc * config["bptt_horizon"]
+        # elif config["bptt_horizon"] == "auto":
+        #     config["bptt_horizon"] = config["batch_size"] // agents_for_calc
 
         batch_size = config["batch_size"]
         horizon = config["bptt_horizon"]
