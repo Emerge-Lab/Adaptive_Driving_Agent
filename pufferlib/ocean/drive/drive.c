@@ -16,9 +16,9 @@ void test_drivenet() {
 
     int *actions = calloc(num_agents * num_actions, sizeof(int));
 
-    //Weights* weights = load_weights("resources/drive/puffer_drive_weights.bin");
-    Weights* weights = load_weights("puffer_drive_weights.bin");
-    DriveNet* net = init_drivenet(weights, num_agents, CLASSIC, false, false, false);
+    // Weights* weights = load_weights("resources/drive/puffer_drive_weights.bin");
+    Weights *weights = load_weights("puffer_drive_weights.bin");
+    DriveNet *net = init_drivenet(weights, num_agents, CLASSIC, false, false, false);
 
     forward(net, observations, actions);
     for (int i = 0; i < num_agents * num_actions; i++) {
@@ -57,9 +57,9 @@ void demo() {
     allocate(&env);
     c_reset(&env);
     c_render(&env);
-    Weights* weights = load_weights("resources/drive/puffer_drive_weights.bin");
-    DriveNet* net = init_drivenet(weights, env.active_agent_count, env.dynamics_model, false, false, false);
-    //Client* client = make_client(&env);
+    Weights *weights = load_weights("resources/drive/puffer_drive_weights.bin");
+    DriveNet *net = init_drivenet(weights, env.active_agent_count, env.dynamics_model, false, false, false);
+    // Client* client = make_client(&env);
     int accel_delta = 2;
     int steer_delta = 4;
     while (!WindowShouldClose()) {

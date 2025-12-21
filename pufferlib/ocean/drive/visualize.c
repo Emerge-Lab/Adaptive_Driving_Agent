@@ -190,9 +190,10 @@ static int make_gif_from_frames(const char *pattern, int fps, const char *palett
 }
 
 int eval_gif(const char *map_name, const char *policy_name, int show_grid, int obs_only, int lasers,
-             int log_trajectories, int frame_skip, float goal_radius, int init_steps, int use_rc, int use_ec, int use_dc, int max_controlled_agents,
-             const char *view_mode, const char *output_topdown, const char *output_agent, int num_maps,
-             int scenario_length_override, int init_mode, int control_mode, int goal_behavior, int zoom_in) {
+             int log_trajectories, int frame_skip, float goal_radius, int init_steps, int use_rc, int use_ec,
+             int use_dc, int max_controlled_agents, const char *view_mode, const char *output_topdown,
+             const char *output_agent, int num_maps, int scenario_length_override, int init_mode, int control_mode,
+             int goal_behavior, int zoom_in) {
 
     // Parse configuration from INI file
     env_init_config conf = {0}; // Initialize to zero
@@ -302,7 +303,7 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
 
     Weights *weights = load_weights(policy_name);
     printf("Active agents in map: %d\n", env.active_agent_count);
-    DriveNet* net = init_drivenet(weights, env.active_agent_count, env.dynamics_model, use_rc, use_ec, use_dc);
+    DriveNet *net = init_drivenet(weights, env.active_agent_count, env.dynamics_model, use_rc, use_ec, use_dc);
 
     int frame_count = env.scenario_length > 0 ? env.scenario_length : TRAJECTORY_LENGTH_DEFAULT;
     int log_trajectory = log_trajectories;
@@ -562,16 +563,19 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    eval_gif(map_name, policy_name, show_grid, obs_only, lasers, log_trajectories, frame_skip, goal_radius, init_steps, use_rc, use_ec, use_dc, max_controlled_agents, view_mode, output_topdown, output_agent, num_maps, scenario_length_cli, init_mode, control_mode, goal_behavior);
-=======
-        } else if (strcmp(argv[i], "--zoom-in") == 0) {
-            zoom_in = 1;
-        }
-    }
-
     eval_gif(map_name, policy_name, show_grid, obs_only, lasers, log_trajectories, frame_skip, goal_radius, init_steps,
-             max_controlled_agents, view_mode, output_topdown, output_agent, num_maps, scenario_length_cli, init_mode,
-             control_mode, goal_behavior, zoom_in);
+             use_rc, use_ec, use_dc, max_controlled_agents, view_mode, output_topdown, output_agent, num_maps,
+             scenario_length_cli, init_mode, control_mode, goal_behavior);
+=======
+}
+else if (strcmp(argv[i], "--zoom-in") == 0) {
+    zoom_in = 1;
+}
+}
+
+eval_gif(map_name, policy_name, show_grid, obs_only, lasers, log_trajectories, frame_skip, goal_radius, init_steps,
+         max_controlled_agents, view_mode, output_topdown, output_agent, num_maps, scenario_length_cli, init_mode,
+         control_mode, goal_behavior, zoom_in);
 >>>>>>> 61911a34fd50149eb02d7b1e6bc0366fdcbdc3a2
-    return 0;
+return 0;
 }

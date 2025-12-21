@@ -158,7 +158,7 @@ void forward(DriveNet *net, float *observations, int *actions) {
     memset(net->obs_road, 0, net->num_agents * max_road_obs * road_feat_onehot * sizeof(float));
 
     // Reshape observations into 2D boards and additional features
-    float* obs_self = net->obs_self;
+    float *obs_self = net->obs_self;
     float (*obs_partner)[63][7] = (float (*)[63][7])net->obs_partner;
     float (*obs_road)[200][13] = (float (*)[200][13])net->obs_road;
 

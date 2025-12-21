@@ -586,7 +586,7 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     float ada_delta_avg_displacement_error = 0.0f;
     float ada_delta_episode_return = 0.0f;
     int ada_agent_count = 0;
-    int has_co_players = 0;  // Flag to check if any env has co-players
+    int has_co_players = 0; // Flag to check if any env has co-players
     Co_Player_Log co_player_aggregate = {0};
     int num_co_player_keys = sizeof(Co_Player_Log) / sizeof(float);
 
@@ -601,20 +601,19 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
 
             // Aggregate co-player logs
             for (int j = 0; j < num_co_player_keys; j++) {
-                ((float*)&co_player_aggregate)[j] += ((float*)&env->co_player_log)[j];
-                ((float*)&env->co_player_log)[j] = 0.0f;  // Reset after aggregating
+                ((float *)&co_player_aggregate)[j] += ((float *)&env->co_player_log)[j];
+                ((float *)&env->co_player_log)[j] = 0.0f; // Reset after aggregating
             }
         }
-
     }
 
-    PyObject* dict = PyDict_New();
+    PyObject *dict = PyDict_New();
 
     // Average regular logs
     if (aggregate.n > 0.0f) {
         float n = aggregate.n;
         for (int i = 0; i < num_keys; i++) {
-            ((float*)&aggregate)[i] /= n;
+            ((float *)&aggregate)[i] /= n;
         }
 
         // User populates dict
@@ -626,8 +625,8 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         float co_player_n = co_player_aggregate.co_player_n;
         // Only divide non-zero values to avoid corruption
         for (int i = 0; i < num_co_player_keys; i++) {
-            if (((float*)&co_player_aggregate)[i] != 0.0f) {
-                ((float*)&co_player_aggregate)[i] /= co_player_n;
+            if (((float *)&co_player_aggregate)[i] != 0.0f) {
+                ((float *)&co_player_aggregate)[i] /= co_player_n;
             }
         }
 
@@ -647,7 +646,6 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         assign_to_dict(dict, "co_player_avg_displacement_error", co_player_aggregate.co_player_avg_displacement_error);
         assign_to_dict(dict, "co_player_n", co_player_n);
     }
-
 
     return dict;
 }

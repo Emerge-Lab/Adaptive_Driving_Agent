@@ -125,18 +125,17 @@ class Drive(pufferlib.PufferEnv):
         self.dynamics_model = dynamics_model
 
         # Observation space calculation
-        base_ego_dim = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
-            dynamics_model
-        )
+        base_ego_dim = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(dynamics_model)
 
         self.max_road_objects = binding.MAX_ROAD_SEGMENT_OBSERVATIONS
         self.max_partner_objects = binding.MAX_AGENTS - 1
         self.partner_features = binding.PARTNER_FEATURES
         self.road_features = binding.ROAD_FEATURES
         self.num_obs = (
-            base_ego_dim + conditioning_dims + 
-            self.max_partner_objects * self.partner_features + 
-            self.max_road_objects * self.road_features
+            base_ego_dim
+            + conditioning_dims
+            + self.max_partner_objects * self.partner_features
+            + self.max_road_objects * self.road_features
         )
 
         self.single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(self.num_obs,), dtype=np.float32)
