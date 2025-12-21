@@ -2,53 +2,60 @@
 #include "../env_binding.h"
 
 static PyObject* my_shared_self_play(PyObject* self, PyObject* args, PyObject* kwargs) {
+    char* map_dir = unpack_str(kwargs, "map_dir");
     int num_agents = unpack(kwargs, "num_agents");
     int num_maps = unpack(kwargs, "num_maps");
     int init_mode = unpack(kwargs, "init_mode");
     int control_mode = unpack(kwargs, "control_mode");
     int init_steps = unpack(kwargs, "init_steps");
+    int goal_behavior = unpack(kwargs, "goal_behavior");
+    int use_all_maps = unpack(kwargs, "use_all_maps");
     int max_controlled_agents = unpack(kwargs, "max_controlled_agents");
     clock_gettime(CLOCK_REALTIME, &ts);
     srand(ts.tv_nsec);
     int total_agent_count = 0;
     int env_count = 0;
-    int max_envs = num_agents;
+    int max_envs = use_all_maps ? num_maps : num_agents;
+    int map_idx = 0;
     int maps_checked = 0;
     PyObject* agent_offsets = PyList_New(max_envs+1);
     PyObject* map_ids = PyList_New(max_envs);
     // getting env count
-    while(total_agent_count < num_agents && env_count < max_envs){
-        char map_file[100];
-        int map_id = rand() % num_maps;
+    while(use_all_maps ? map_idx < max_envs : total_agent_count < num_agents && env_count < max_envs){
+        char map_file[512];
+        int map_id = use_all_maps ? map_idx++ : rand() % num_maps;
         Drive* env = calloc(1, sizeof(Drive));
         env->init_mode = init_mode;
         env->control_mode = control_mode;
         env->init_steps = init_steps;
+        env->goal_behavior = goal_behavior;
         env->max_controlled_agents = max_controlled_agents;
-        sprintf(map_file, "resources/drive/binaries/map_%03d.bin", map_id);
+        snprintf(map_file, sizeof(map_file), "%s/map_%03d.bin", map_dir, map_id);
         env->entities = load_map_binary(map_file, env);
         set_active_agents(env);
 
         // Skip map if it doesn't contain any controllable agents
         if(env->active_agent_count == 0) {
-            maps_checked++;
+            if (!use_all_maps) {
+                maps_checked++;
 
-            // Safeguard: if we've checked all available maps and found no active agents, raise an error
-            if(maps_checked >= num_maps) {
-                for(int j=0;j<env->num_entities;j++) {
-                    free_entity(&env->entities[j]);
+                // Safeguard: if we've checked all available maps and found no active agents, raise an error
+                if(maps_checked >= num_maps) {
+                    for(int j=0;j<env->num_entities;j++) {
+                        free_entity(&env->entities[j]);
+                    }
+                    free(env->entities);
+                    free(env->active_agent_indices);
+                    free(env->static_agent_indices);
+                    free(env->expert_static_agent_indices);
+                    free(env);
+                    Py_DECREF(agent_offsets);
+                    Py_DECREF(map_ids);
+                    char error_msg[256];
+                    sprintf(error_msg, "No controllable agents found in any of the %d available maps", num_maps);
+                    PyErr_SetString(PyExc_ValueError, error_msg);
+                    return NULL;
                 }
-                free(env->entities);
-                free(env->active_agent_indices);
-                free(env->static_agent_indices);
-                free(env->expert_static_agent_indices);
-                free(env);
-                Py_DECREF(agent_offsets);
-                Py_DECREF(map_ids);
-                char error_msg[256];
-                sprintf(error_msg, "No controllable agents found in any of the %d available maps", num_maps);
-                PyErr_SetString(PyExc_ValueError, error_msg);
-                return NULL;
             }
 
             for(int j=0;j<env->num_entities;j++) {
@@ -60,7 +67,7 @@ static PyObject* my_shared_self_play(PyObject* self, PyObject* args, PyObject* k
             free(env->expert_static_agent_indices);
             free(env);
             continue;
-          }
+        }
 
         // Store map_id
         PyObject* map_id_obj = PyLong_FromLong(map_id);
@@ -80,7 +87,7 @@ static PyObject* my_shared_self_play(PyObject* self, PyObject* args, PyObject* k
         free(env);
     }
     //printf("Generated %d environments to cover %d agents (requested %d agents)\n", env_count, total_agent_count, num_agents);
-    if(total_agent_count >= num_agents){
+    if(!use_all_maps && total_agent_count >= num_agents){
         total_agent_count = num_agents;
     }
     PyObject* final_total_agent_count = PyLong_FromLong(total_agent_count);
@@ -89,6 +96,10 @@ static PyObject* my_shared_self_play(PyObject* self, PyObject* args, PyObject* k
     // resize lists
     PyObject* resized_agent_offsets = PyList_GetSlice(agent_offsets, 0, env_count + 1);
     PyObject* resized_map_ids = PyList_GetSlice(map_ids, 0, env_count);
+
+    Py_DECREF(agent_offsets);
+    Py_DECREF(map_ids);
+
     PyObject* tuple = PyTuple_New(3);
     PyTuple_SetItem(tuple, 0, resized_agent_offsets);
     PyTuple_SetItem(tuple, 1, resized_map_ids);
@@ -170,13 +181,15 @@ static double* unpack_float_array(PyObject* kwargs, char* key, Py_ssize_t* out_s
 }
 
 static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObject* kwargs) {
+    char* map_dir = unpack_str(kwargs, "map_dir");
     int num_agents = unpack(kwargs, "num_agents");
     int num_maps = unpack(kwargs, "num_maps");
     int num_ego_agents = unpack(kwargs, "num_ego_agents");
-     int init_mode = unpack(kwargs, "init_mode");
+    int init_mode = unpack(kwargs, "init_mode");
     int population_play = unpack(kwargs, "population_play");
     int control_mode = unpack(kwargs, "control_mode");
     int init_steps = unpack(kwargs, "init_steps");
+    int goal_behavior = unpack(kwargs, "goal_behavior");
     int max_controlled_agents = unpack(kwargs, "max_controlled_agents");
 
     int max_scenes_per_process = 0;
@@ -231,10 +244,10 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
 
     // Create worlds by randomly sampling maps
     while (total_agent_count < num_agents && env_count < max_envs) {
-        char map_file[100];
+        char map_file[512];
         int map_id = rand() % num_maps;
         Drive* env = calloc(1, sizeof(Drive));
-        sprintf(map_file, "resources/drive/binaries/map_%03d.bin", map_id);
+        snprintf(map_file, sizeof(map_file), "%s/map_%03d.bin", map_dir, map_id);
         env->entities = load_map_binary(map_file, env);
 
         int remaining_capacity = num_agents - total_agent_count;
@@ -246,6 +259,7 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
         env->init_mode = init_mode;
         env->control_mode = control_mode;
         env->init_steps = init_steps;
+        env->goal_behavior = goal_behavior;
         env->max_controlled_agents = max_controlled_agents;
 
         set_active_agents(env);
