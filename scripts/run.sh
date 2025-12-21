@@ -6,10 +6,9 @@
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --account=pr_100_tandon_priority
+#SBATCH --account=torch_pr_355_tandon_priority
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
-#SBATCH --constraint='h100|a100'
 #SBATCH --array=0-15
 
 # Define configurations for each array task ID
