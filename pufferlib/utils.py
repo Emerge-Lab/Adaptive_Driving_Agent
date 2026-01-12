@@ -257,8 +257,8 @@ def render_videos(config, vecenv, logger, global_step, bin_path):
         if result.returncode == 0 or (result.returncode == 1 and vids_exist):
             # Move both generated videos to the model directory
             videos = [
-                ("resources/drive/output_topdown.mp4", f"epoch_{epoch:06d}_topdown.mp4"),
-                ("resources/drive/output_agent.mp4", f"epoch_{epoch:06d}_agent.mp4"),
+                ("resources/drive/output_topdown.mp4", f"step_{global_step:09d}_topdown.mp4"),
+                ("resources/drive/output_agent.mp4", f"step_{global_step:09d}_agent.mp4"),
             ]
 
             for source_vid, target_filename in videos:
