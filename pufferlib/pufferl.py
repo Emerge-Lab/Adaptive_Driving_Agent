@@ -626,7 +626,7 @@ class PuffeRL:
                             path=bin_path,
                             silent=True,
                         )
-                        pufferlib.utils.render_videos(self.config, self.vecenv, self.logger, self.global_step, bin_path)
+                        pufferlib.utils.render_videos(self.config, self.vecenv, self.logger, self.global_step, bin_path, self.epoch)
 
                     except Exception as e:
                         print(f"Failed to export model weights: {e}")

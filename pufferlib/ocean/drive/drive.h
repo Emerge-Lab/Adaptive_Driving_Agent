@@ -401,7 +401,26 @@ struct Drive {
     int num_place_holders;
     int* place_holder_ids;
     bool population_play;
-
+    // co player conditioning (only used in the visualizer)
+    int co_use_rc;
+    float co_collision_weight_lb;
+    float co_collision_weight_ub;
+    float co_goal_weight_lb;
+    float co_goal_weight_ub;
+    float co_offroad_weight_lb;
+    float co_offroad_weight_ub;
+    float* co_collision_weights;
+    float* co_offroad_weights;
+    float* co_goal_weights;
+    
+    int co_use_ec;
+    float co_entropy_weight_lb;
+    float co_entropy_weight_ub;
+    float* co_entropy_weights;
+    int co_use_dc;
+    float co_discount_weight_lb;
+    float co_discount_weight_ub;
+    float* co_discount_weights;
 
 };
 
@@ -3129,8 +3148,17 @@ void draw_scene(Drive* env, Client* client, int mode, int obs_only, int lasers, 
 
                 Vector3 carPos = { position.x, position.y, position.z };
                 Color car_color = GRAY;              // default for static
-                if (is_expert) car_color = GOLD;      // expert replay
                 if (is_active_agent) car_color = BLUE; // policy-controlled
+                if (env->population_play){
+                    if (is_active_agent && env->entities[i].is_ego){
+                        car_color = BLUE;
+                    }
+                    else if (is_active_agent && env->entities[i].is_co_player){
+                        car_color = YELLOW;
+                    }
+
+                }
+                if (is_expert) car_color = GOLD;      // expert replay
                 if (is_active_agent && env->entities[i].collision_state > 0) car_color = RED;
                 rlSetLineWidth(3.0f);
                 for (int j = 0; j < 4; j++) {

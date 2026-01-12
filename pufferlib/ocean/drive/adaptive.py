@@ -1,4 +1,4 @@
-from pufferlib.ocean.drive import Drive
+from .drive import Drive
 import pufferlib
 
 

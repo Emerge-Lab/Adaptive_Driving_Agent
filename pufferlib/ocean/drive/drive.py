@@ -4,7 +4,7 @@ import json
 import struct
 import os
 import pufferlib
-from pufferlib.ocean.drive import binding
+from . import binding
 import torch
 
 
