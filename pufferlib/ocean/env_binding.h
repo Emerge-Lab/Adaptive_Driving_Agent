@@ -560,106 +560,85 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         PyErr_SetString(PyExc_TypeError, "vec_log requires 2 arguments");
         return NULL;
     }
-
     VecEnv *vec = unpack_vecenv(args);
     if (!vec) {
         return NULL;
     }
-
-    // Iterates over logs one float at a time. Will break
-    // horribly if Log has non-float data.
+    
     PyObject *num_agents_arg = PyTuple_GetItem(args, 1);
     float num_agents = (float)PyLong_AsLong(num_agents_arg);
-
+    
+    // Iterates over logs one float at a time. Will break
+    // horribly if Log has non-float data.
     Log aggregate = {0};
     int num_keys = sizeof(Log) / sizeof(float);
-
-    // Adaptive agent logging variables
-    float ada_delta_completion_rate = 0.0f;
-    float ada_delta_score = 0.0f;
-    float ada_delta_perf = 0.0f;
-    float ada_delta_collision_rate = 0.0f;
-    float ada_delta_offroad_rate = 0.0f;
-    float ada_delta_num_goals_reached = 0.0f;
-    float ada_delta_dnf_rate = 0.0f;
-    float ada_delta_lane_alignment_rate = 0.0f;
-    float ada_delta_avg_displacement_error = 0.0f;
-    float ada_delta_episode_return = 0.0f;
-    int ada_agent_count = 0;
+    
     int has_co_players = 0;  // Flag to check if any env has co-players
     Co_Player_Log co_player_aggregate = {0};
     int num_co_player_keys = sizeof(Co_Player_Log) / sizeof(float);
-
+    
     for (int i = 0; i < vec->num_envs; i++) {
         Env *env = vec->envs[i];
-
         for (int j = 0; j < num_keys; j++) {
             ((float *)&aggregate)[j] += ((float *)&env->log)[j];
         }
+        
+        if (env->population_play && env->num_co_players > 0 && env->co_player_ids != NULL) {
+            has_co_players = 1;
+            // Aggregate co-player logs
+            for (int j = 0; j < num_co_player_keys; j++) {
+                ((float *)&co_player_aggregate)[j] += ((float *)&env->co_player_log)[j];
+            }
+        }
     }
-
+    
     PyObject *dict = PyDict_New();
-
+    
     // Only log if we have at least num_agents worth of data
     if (aggregate.n < num_agents) {
         return dict;
     }
-
+    
     // Got enough data. Reset logs and return metrics
     for (int i = 0; i < vec->num_envs; i++) {
         Env *env = vec->envs[i];
         for (int j = 0; j < num_keys; j++) {
             ((float *)&env->log)[j] = 0.0f;
         }
+        
+        if (env->population_play && env->num_co_players > 0 && env->co_player_ids != NULL) {
+            for (int j = 0; j < num_co_player_keys; j++) {
+                ((float *)&env->co_player_log)[j] = 0.0f;
+            }
+        }
     }
-
+    
     float n = aggregate.n;
-
     // Average across agents
     for (int i = 0; i < num_keys; i++) {
         ((float *)&aggregate)[i] /= n;
     }
-
-    // Compute completion_rate from aggregated counts
+    
+    // Compute completion_rate from aggregated counts (incoming feature)
     aggregate.completion_rate = aggregate.goals_reached_this_episode / aggregate.goals_sampled_this_episode;
-
-        if (env->population_play && env->num_co_players > 0 && env->co_player_ids != NULL) {
-            has_co_players = 1;
-
-            // Aggregate co-player logs
-            for (int j = 0; j < num_co_player_keys; j++) {
-                ((float*)&co_player_aggregate)[j] += ((float*)&env->co_player_log)[j];
-                ((float*)&env->co_player_log)[j] = 0.0f;  // Reset after aggregating
-            }
-        }
-
-    }
-
-    PyObject* dict = PyDict_New();
-
-    // Average regular logs
-    if (aggregate.n > 0.0f) {
-        float n = aggregate.n;
-        for (int i = 0; i < num_keys; i++) {
-            ((float*)&aggregate)[i] /= n;
-        }
-
-        // User populates dict
-        my_log(dict, &aggregate);
-        assign_to_dict(dict, "n", n);
-    }
-
+    
+    // User populates dict
+    my_log(dict, &aggregate);
+    assign_to_dict(dict, "n", n);
+    
+    // Handle co-player metrics
     if (has_co_players && co_player_aggregate.co_player_n > 0.0f) {
         float co_player_n = co_player_aggregate.co_player_n;
-        // Only divide non-zero values to avoid corruption
+        
+        // Average co-player metrics
         for (int i = 0; i < num_co_player_keys; i++) {
-            if (((float*)&co_player_aggregate)[i] != 0.0f) {
-                ((float*)&co_player_aggregate)[i] /= co_player_n;
+            if (((float *)&co_player_aggregate)[i] != 0.0f) {
+                ((float *)&co_player_aggregate)[i] /= co_player_n;
             }
         }
-
-        // Add co-player metrics directly
-        assign_to_dict(dict, "ego_co_player_ratio", aggregate.n / co_player_n);
+        
+        // Add co-player metrics to dict
+        assign_to_dict(dict, "ego_co_player_ratio", n / co_player_n);
         assign_to_dict(dict, "co_player_completion_rate", co_player_aggregate.co_player_completion_rate);
         assign_to_dict(dict, "co_player_collision_rate", co_player_aggregate.co_player_collision_rate);
         assign_to_dict(dict, "co_player_offroad_rate", co_player_aggregate.co_player_offroad_rate);
@@ -674,11 +653,9 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         assign_to_dict(dict, "co_player_avg_displacement_error", co_player_aggregate.co_player_avg_displacement_error);
         assign_to_dict(dict, "co_player_n", co_player_n);
     }
-
-
+    
     return dict;
 }
-
 static PyObject *vec_close(PyObject *self, PyObject *args) {
     VecEnv *vec = unpack_vecenv(args);
     if (!vec) {

@@ -29,7 +29,7 @@ class Drive(pufferlib.PufferEnv):
         collision_behavior=0,
         offroad_behavior=0,
         dt=0.1,
-        episode_length=None,
+        scenario_length=None,
         termination_mode=None,
         resample_frequency=91,
         num_maps=100,
@@ -68,10 +68,11 @@ class Drive(pufferlib.PufferEnv):
         self.collision_behavior = collision_behavior
         self.offroad_behavior = offroad_behavior
         self.human_agent_idx = human_agent_idx
-        self.episode_length = episode_length
+        self.scenario_length = scenario_length
         self.termination_mode = termination_mode
         self.resample_frequency = resample_frequency
         self.ini_file = ini_file
+        self.use_all_maps = use_all_maps
 
         # Adaptive driving agent setup
         self.adaptive_driving_agent = int(adaptive_driving_agent)
@@ -130,6 +131,8 @@ class Drive(pufferlib.PufferEnv):
         self.ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
             dynamics_model
         )
+        
+        self.ego_features += conditioning_dims
 
         # Extract observation shapes from constants
         # These need to be defined in C, since they determine the shape of the arrays
@@ -274,12 +277,12 @@ class Drive(pufferlib.PufferEnv):
                 reward_goal_post_respawn=reward_goal_post_respawn,
                 goal_radius=goal_radius,
                 goal_speed=goal_speed,
-                goal_behavior=self.self.goal_behavior,
+                goal_behavior=self.goal_behavior,
                 goal_target_distance=self.goal_target_distance,
                 collision_behavior=self.collision_behavior,
                 offroad_behavior=self.offroad_behavior,
                 dt=dt,
-                episode_length=(int(episode_length) if episode_length is not None else None),
+                scenario_length=(int(scenario_length) if scenario_length is not None else None),
                 termination_mode=(int(self.termination_mode) if self.termination_mode is not None else 0),
                 max_controlled_agents=self.max_controlled_agents,
                 map_id=self.map_ids[i],
@@ -323,6 +326,7 @@ class Drive(pufferlib.PufferEnv):
 
     def _set_env_variables(self):
         my_shared_tuple = binding.shared(
+            map_dir = self.map_dir,
             num_agents=self.num_agents,
             num_maps=self.num_maps,
             init_mode=self.init_mode,
@@ -332,6 +336,8 @@ class Drive(pufferlib.PufferEnv):
             goal_behavior=self.goal_behavior,
             population_play=self.population_play,
             num_ego_agents=self.num_ego_agents,
+            goal_target_distance=self.goal_target_distance,
+            use_all_maps=self.use_all_maps,
         )
 
         if self.population_play:
@@ -631,13 +637,14 @@ class Drive(pufferlib.PufferEnv):
                         dynamics_model=self.dynamics_model,
                         reward_vehicle_collision=self.reward_vehicle_collision,
                         reward_offroad_collision=self.reward_offroad_collision,
-                        reward_goal=self.reward_goal,
-                        reward_goal_post_respawn=self.reward_goal_post_respawn,
-                        reward_ade=self.reward_ade,
                         goal_radius=self.goal_radius,
                         goal_behavior=self.goal_behavior,
                         collision_behavior=self.collision_behavior,
                         offroad_behavior=self.offroad_behavior,
+                        reward_goal=self.reward_goal,
+                        reward_goal_post_respawn = self.reward_goal_post_respawn,
+                        goal_speed = self.goal_speed,
+                        goal_target_distance=self.goal_target_distance,
                         dt=self.dt,
                         scenario_length=(int(self.scenario_length) if self.scenario_length is not None else None),
                         max_controlled_agents=self.max_controlled_agents,
@@ -665,6 +672,7 @@ class Drive(pufferlib.PufferEnv):
                         init_steps=self.init_steps,
                         init_mode=self.init_mode,
                         control_mode=self.control_mode,
+                        map_dir=self.map_dir,
                     )
                     env_ids.append(env_id)
                 self.c_envs = binding.vectorize(*env_ids)
@@ -718,11 +726,11 @@ class Drive(pufferlib.PufferEnv):
         num_agents = self.num_agents
 
         trajectories = {
-            "x": np.zeros((num_agents, self.episode_length - self.init_steps), dtype=np.float32),
-            "y": np.zeros((num_agents, self.episode_length - self.init_steps), dtype=np.float32),
-            "z": np.zeros((num_agents, self.episode_length - self.init_steps), dtype=np.float32),
-            "heading": np.zeros((num_agents, self.episode_length - self.init_steps), dtype=np.float32),
-            "valid": np.zeros((num_agents, self.episode_length - self.init_steps), dtype=np.int32),
+            "x": np.zeros((num_agents, self.scenario_length - self.init_steps), dtype=np.float32),
+            "y": np.zeros((num_agents, self.scenario_length - self.init_steps), dtype=np.float32),
+            "z": np.zeros((num_agents, self.scenario_length - self.init_steps), dtype=np.float32),
+            "heading": np.zeros((num_agents, self.scenario_length - self.init_steps), dtype=np.float32),
+            "valid": np.zeros((num_agents, self.scenario_length - self.init_steps), dtype=np.int32),
             "id": np.zeros(num_agents, dtype=np.int32),
             "scenario_id": np.zeros(num_agents, dtype=np.int32),
         }
@@ -1044,7 +1052,7 @@ def test_performance(timeout=10, atn_cache=1024, num_agents=1024):
         control_mode="control_vehicles",
         init_mode="create_all_valid",
         init_steps=0,
-        episode_length=91,
+        scenario_length=91,
     )
 
     env.reset()
@@ -1068,7 +1076,7 @@ def test_performance(timeout=10, atn_cache=1024, num_agents=1024):
 if __name__ == "__main__":
     # test_performance()
     # Process the train dataset
-    process_all_maps(data_folder="data/processed/training")
+    process_all_maps(data_folder="/scratch/cpm9831/Adaptive_Driving_Agent/training")
     # Process the validation/test dataset
     # process_all_maps(data_folder="data/processed/validation")
     # # Process the validation_interactive dataset

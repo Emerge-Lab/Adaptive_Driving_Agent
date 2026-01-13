@@ -66,16 +66,122 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
     return 0;
 }
 
-static PyObject* my_shared(PyObject* self, PyObject* args, PyObject* kwargs) {
+// static PyObject* my_shared(PyObject* self, PyObject* args, PyObject* kwargs) {
 
-    int population_play = unpack(kwargs, "population_play");
-    if (population_play){
-        return my_shared_population_play(self, args,  kwargs);
-    }
-    else{
-        return my_shared_self_play( self, args,  kwargs);
-    }
+//     int population_play = unpack(kwargs, "population_play");
+//     if (population_play){
+//         return my_shared_population_play(self, args,  kwargs);
+//     }
+//     else{
+//         return my_shared_self_play( self, args,  kwargs);
+//     }
 
+// }
+
+
+static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
+    char *map_dir = unpack_str(kwargs, "map_dir");
+    int num_agents = unpack(kwargs, "num_agents");
+    int num_maps = unpack(kwargs, "num_maps");
+    int init_mode = unpack(kwargs, "init_mode");
+    int control_mode = unpack(kwargs, "control_mode");
+    int init_steps = unpack(kwargs, "init_steps");
+    int goal_behavior = unpack(kwargs, "goal_behavior");
+    float goal_target_distance = unpack(kwargs, "goal_target_distance");
+    int use_all_maps = unpack(kwargs, "use_all_maps");
+    int max_controlled_agents = unpack(kwargs, "max_controlled_agents");
+    clock_gettime(CLOCK_REALTIME, &ts);
+    srand(ts.tv_nsec);
+    int total_agent_count = 0;
+    int env_count = 0;
+    int max_envs = use_all_maps ? num_maps : num_agents;
+    int map_idx = 0;
+    int maps_checked = 0;
+    PyObject *agent_offsets = PyList_New(max_envs + 1);
+    PyObject *map_ids = PyList_New(max_envs);
+    // getting env count
+    while (use_all_maps ? map_idx < max_envs : total_agent_count < num_agents && env_count < max_envs) {
+        char map_file[512];
+        int map_id = use_all_maps ? map_idx++ : rand() % num_maps;
+        Drive *env = calloc(1, sizeof(Drive));
+        env->init_mode = init_mode;
+        env->max_controlled_agents = max_controlled_agents;
+        env->control_mode = control_mode;
+        env->init_steps = init_steps;
+        env->goal_behavior = goal_behavior;
+        env->goal_target_distance = goal_target_distance;
+        snprintf(map_file, sizeof(map_file), "%s/map_%03d.bin", map_dir, map_id);
+        env->entities = load_map_binary(map_file, env);
+        set_active_agents(env);
+
+        // Skip map if it doesn't contain any controllable agents
+        if (env->active_agent_count == 0) {
+            if (!use_all_maps) {
+                maps_checked++;
+
+                // Safeguard: if we've checked all available maps and found no active agents, raise an error
+                if (maps_checked >= num_maps) {
+                    for (int j = 0; j < env->num_entities; j++) {
+                        free_entity(&env->entities[j]);
+                    }
+                    free(env->entities);
+                    free(env->active_agent_indices);
+                    free(env->static_agent_indices);
+                    free(env->expert_static_agent_indices);
+                    free(env);
+                    Py_DECREF(agent_offsets);
+                    Py_DECREF(map_ids);
+                    char error_msg[256];
+                    sprintf(error_msg, "No controllable agents found in any of the %d available maps", num_maps);
+                    PyErr_SetString(PyExc_ValueError, error_msg);
+                    return NULL;
+                }
+            }
+
+            for (int j = 0; j < env->num_entities; j++) {
+                free_entity(&env->entities[j]);
+            }
+            free(env->entities);
+            free(env->active_agent_indices);
+            free(env->static_agent_indices);
+            free(env->expert_static_agent_indices);
+            free(env);
+            continue;
+        }
+
+        // Store map_id
+        PyObject *map_id_obj = PyLong_FromLong(map_id);
+        PyList_SetItem(map_ids, env_count, map_id_obj);
+        // Store agent offset
+        PyObject *offset = PyLong_FromLong(total_agent_count);
+        PyList_SetItem(agent_offsets, env_count, offset);
+        total_agent_count += env->active_agent_count;
+        env_count++;
+        for (int j = 0; j < env->num_entities; j++) {
+            free_entity(&env->entities[j]);
+        }
+        free(env->entities);
+        free(env->active_agent_indices);
+        free(env->static_agent_indices);
+        free(env->expert_static_agent_indices);
+        free(env);
+    }
+    // printf("Generated %d environments to cover %d agents (requested %d agents)\n", env_count, total_agent_count,
+    // num_agents);
+    if (!use_all_maps && total_agent_count >= num_agents) {
+        total_agent_count = num_agents;
+    }
+    PyObject *final_total_agent_count = PyLong_FromLong(total_agent_count);
+    PyList_SetItem(agent_offsets, env_count, final_total_agent_count);
+    PyObject *final_env_count = PyLong_FromLong(env_count);
+    // resize lists
+    PyObject *resized_agent_offsets = PyList_GetSlice(agent_offsets, 0, env_count + 1);
+    PyObject *resized_map_ids = PyList_GetSlice(map_ids, 0, env_count);
+    PyObject *tuple = PyTuple_New(3);
+    PyTuple_SetItem(tuple, 0, resized_agent_offsets);
+    PyTuple_SetItem(tuple, 1, resized_map_ids);
+    PyTuple_SetItem(tuple, 2, final_env_count);
+    return tuple;
 }
 
 static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
@@ -85,11 +191,11 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     if (ini_parse(env->ini_file, handler, &conf) < 0) {
         printf("Error while loading %s", env->ini_file);
     }
-    if (kwargs && PyDict_GetItemString(kwargs, "episode_length")) {
-        conf.episode_length = (int)unpack(kwargs, "episode_length");
+    if (kwargs && PyDict_GetItemString(kwargs, "scenario_length")) {
+        conf.scenario_length = (int)unpack(kwargs, "scenario_length");
     }
-    if (conf.episode_length <= 0) {
-        PyErr_SetString(PyExc_ValueError, "episode_length must be > 0 (set in INI or kwargs)");
+    if (conf.scenario_length <= 0) {
+        PyErr_SetString(PyExc_ValueError, "scenario_length must be > 0 (set in INI or kwargs)");
         return -1;
     }
     env->action_type = conf.action_type;
@@ -102,9 +208,8 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->reward_offroad_collision = conf.reward_offroad_collision;
     env->reward_goal = conf.reward_goal;
     env->reward_goal_post_respawn = conf.reward_goal_post_respawn;
-    env->reward_ade = conf.reward_ade;
     env->scenario_length = conf.scenario_length;
-    env->episode_length = conf.episode_length;
+
     env->termination_mode = conf.termination_mode;
     env->collision_behavior = conf.collision_behavior;
     env->offroad_behavior = conf.offroad_behavior;

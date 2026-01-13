@@ -864,6 +864,10 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         )
         # Base observations + conditioning observations
         num_obs = ego_features + conditioning_dims + 63 * 7 + 200 * 7
+        partner_features = 7
+        max_partner_objects = 63
+        max_road_objects = 200
+        road_features = 7
 
         temp_env = SimpleNamespace(
             single_action_space=gymnasium.spaces.MultiDiscrete([7 * 13]),
@@ -872,6 +876,10 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
             entropy_conditioned=entropy_conditioned,
             discount_conditioned=discount_conditioned,
             dynamics_model=dynamics_model,  ## keep these the same I think, multiple dynamics models could get weird
+            max_partner_objects = 63,
+            partner_features = partner_features,
+            max_road_objects = max_road_objects,
+            road_features = road_features,
         )
 
         base_policy = Drive(temp_env, input_size=input_size, hidden_size=hidden_size)
