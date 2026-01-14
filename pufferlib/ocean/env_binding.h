@@ -574,8 +574,7 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     int num_keys = sizeof(Log) / sizeof(float);
     
     int has_co_players = 0;  // Flag to check if any env has co-players
-    Co_Player_Log co_player_aggregate = {0};
-    int num_co_player_keys = sizeof(Co_Player_Log) / sizeof(float);
+    Log co_player_aggregate = {0};  // Now using Log struct instead of Co_Player_Log
     
     for (int i = 0; i < vec->num_envs; i++) {
         Env *env = vec->envs[i];
@@ -585,8 +584,8 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         
         if (env->population_play && env->num_co_players > 0 && env->co_player_ids != NULL) {
             has_co_players = 1;
-            // Aggregate co-player logs
-            for (int j = 0; j < num_co_player_keys; j++) {
+            // Aggregate co-player logs (now same structure as ego logs)
+            for (int j = 0; j < num_keys; j++) {
                 ((float *)&co_player_aggregate)[j] += ((float *)&env->co_player_log)[j];
             }
         }
@@ -607,7 +606,7 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         }
         
         if (env->population_play && env->num_co_players > 0 && env->co_player_ids != NULL) {
-            for (int j = 0; j < num_co_player_keys; j++) {
+            for (int j = 0; j < num_keys; j++) {
                 ((float *)&env->co_player_log)[j] = 0.0f;
             }
         }
@@ -619,7 +618,7 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         ((float *)&aggregate)[i] /= n;
     }
     
-    // Compute completion_rate from aggregated counts (incoming feature)
+    // Compute completion_rate from aggregated counts
     aggregate.completion_rate = aggregate.goals_reached_this_episode / aggregate.goals_sampled_this_episode;
     
     // User populates dict
@@ -627,30 +626,34 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     assign_to_dict(dict, "n", n);
     
     // Handle co-player metrics
-    if (has_co_players && co_player_aggregate.co_player_n > 0.0f) {
-        float co_player_n = co_player_aggregate.co_player_n;
+    if (has_co_players && co_player_aggregate.n > 0.0f) {
+        float co_player_n = co_player_aggregate.n;
         
         // Average co-player metrics
-        for (int i = 0; i < num_co_player_keys; i++) {
+        for (int i = 0; i < num_keys; i++) {
             if (((float *)&co_player_aggregate)[i] != 0.0f) {
                 ((float *)&co_player_aggregate)[i] /= co_player_n;
             }
         }
         
-        // Add co-player metrics to dict
+        // Compute co-player completion rate
+        co_player_aggregate.completion_rate = co_player_aggregate.goals_reached_this_episode / co_player_aggregate.goals_sampled_this_episode;
+        
+        // Add co-player metrics to dict with co_player_ prefix
         assign_to_dict(dict, "ego_co_player_ratio", n / co_player_n);
-        assign_to_dict(dict, "co_player_completion_rate", co_player_aggregate.co_player_completion_rate);
-        assign_to_dict(dict, "co_player_collision_rate", co_player_aggregate.co_player_collision_rate);
-        assign_to_dict(dict, "co_player_offroad_rate", co_player_aggregate.co_player_offroad_rate);
-        assign_to_dict(dict, "co_player_clean_collision_rate", co_player_aggregate.co_player_clean_collision_rate);
-        assign_to_dict(dict, "co_player_num_goals_reached", co_player_aggregate.co_player_num_goals_reached);
-        assign_to_dict(dict, "co_player_score", co_player_aggregate.co_player_score);
-        assign_to_dict(dict, "co_player_perf", co_player_aggregate.co_player_perf);
-        assign_to_dict(dict, "co_player_dnf_rate", co_player_aggregate.co_player_dnf_rate);
-        assign_to_dict(dict, "co_player_episode_length", co_player_aggregate.co_player_episode_length);
-        assign_to_dict(dict, "co_player_episode_return", co_player_aggregate.co_player_episode_return);
-        assign_to_dict(dict, "co_player_lane_alignment_rate", co_player_aggregate.co_player_lane_alignment_rate);
-        assign_to_dict(dict, "co_player_avg_displacement_error", co_player_aggregate.co_player_avg_displacement_error);
+        assign_to_dict(dict, "co_player_completion_rate", co_player_aggregate.completion_rate);
+        assign_to_dict(dict, "co_player_collision_rate", co_player_aggregate.collision_rate);
+        assign_to_dict(dict, "co_player_collisions_per_agent", co_player_aggregate.collisions_per_agent);
+        assign_to_dict(dict, "co_player_offroad_rate", co_player_aggregate.offroad_rate);
+        assign_to_dict(dict, "co_player_offroad_per_agent", co_player_aggregate.offroad_per_agent);
+        assign_to_dict(dict, "co_player_score", co_player_aggregate.score);
+        assign_to_dict(dict, "co_player_dnf_rate", co_player_aggregate.dnf_rate);
+        assign_to_dict(dict, "co_player_episode_length", co_player_aggregate.episode_length);
+        assign_to_dict(dict, "co_player_episode_return", co_player_aggregate.episode_return);
+        assign_to_dict(dict, "co_player_lane_alignment_rate", co_player_aggregate.lane_alignment_rate);
+        assign_to_dict(dict, "co_player_speed_at_goal", co_player_aggregate.speed_at_goal);
+        assign_to_dict(dict, "co_player_goals_reached_this_episode", co_player_aggregate.goals_reached_this_episode);
+        assign_to_dict(dict, "co_player_goals_sampled_this_episode", co_player_aggregate.goals_sampled_this_episode);
         assign_to_dict(dict, "co_player_n", co_player_n);
     }
     

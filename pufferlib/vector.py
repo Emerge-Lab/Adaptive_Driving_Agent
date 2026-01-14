@@ -838,13 +838,10 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         import gymnasium
         from pufferlib.ocean.torch import Drive
         import pufferlib.models
+        from pufferlib.ocean.drive import binding 
 
-        dynamics_model = env_k.get("dynamics_model", "jerk")
-        # Observation space calculation
-        if dynamics_model == "classic":
-            ego_features = 7
-        elif dynamics_model == "jerk":
-            ego_features = 10
+        dynamics_model = env_k.get("dynamics_model", "classic")
+        action_type = env_k.get("action_type", "discrete")
 
         co_player_policy = env_k["co_player_policy"]
 
@@ -858,35 +855,67 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         reward_conditioned = condition_type in ("reward", "all")
         entropy_conditioned = condition_type in ("entropy", "all")
         discount_conditioned = condition_type in ("discount", "all")
-        # Calculate conditioning dimensions
+
+
+        if action_type == "discrete":
+            if dynamics_model == "classic":
+                # Joint action space (assume dependence)
+                single_action_space = gymnasium.spaces.MultiDiscrete([7 * 13])
+                # Multi discrete (assume independence)
+                # self.single_action_space = gymnasium.spaces.MultiDiscrete([7, 13])
+            elif dynamics_model == "jerk":
+                # Joint action space (assume dependence) - 4 longitudinal × 3 lateral = 12
+                single_action_space = gymnasium.spaces.MultiDiscrete([4 * 3])
+            else:
+                raise ValueError(f"dynamics_model must be 'classic' or 'jerk'. Got: {dynamics_model}")
+        elif action_type == "continuous":
+            single_action_space = gymnasium.spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        else:
+            raise ValueError(f"action_space must be 'discrete' or 'continuous'. Got: {action_type}")
+
+        # # Observation space calculation
+        ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
+        dynamics_model
+        )
+
         conditioning_dims = (
             (3 if reward_conditioned else 0) + (1 if entropy_conditioned else 0) + (1 if discount_conditioned else 0)
         )
-        # Base observations + conditioning observations
-        num_obs = ego_features + conditioning_dims + 63 * 7 + 200 * 7
-        partner_features = 7
-        max_partner_objects = 63
-        max_road_objects = 200
-        road_features = 7
+        
+        ego_features += conditioning_dims
 
-        temp_env = SimpleNamespace(
-            single_action_space=gymnasium.spaces.MultiDiscrete([7 * 13]),
-            single_observation_space=gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32),
+        # # Extract observation shapes from constants
+        # # These need to be defined in C, since they determine the shape of the arrays
+        max_road_objects = binding.MAX_ROAD_SEGMENT_OBSERVATIONS
+        max_partner_objects = binding.MAX_AGENTS - 1
+        partner_features = binding.PARTNER_FEATURES
+        road_features = binding.ROAD_FEATURES
+
+        num_obs = (
+            ego_features
+            + max_partner_objects * partner_features
+            + max_road_objects * road_features
+        )
+        single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32)
+
+        co_player_env = SimpleNamespace(
+            single_action_space=single_action_space,
+            single_observation_space= single_observation_space,
             reward_conditioned=reward_conditioned,
             entropy_conditioned=entropy_conditioned,
             discount_conditioned=discount_conditioned,
             dynamics_model=dynamics_model,  ## keep these the same I think, multiple dynamics models could get weird
-            max_partner_objects = 63,
+            max_partner_objects = max_partner_objects,
             partner_features = partner_features,
             max_road_objects = max_road_objects,
             road_features = road_features,
         )
 
-        base_policy = Drive(temp_env, input_size=input_size, hidden_size=hidden_size)
+        base_policy = Drive(co_player_env, input_size=input_size, hidden_size=hidden_size)
 
         if co_player_rnn:
             policy = pufferlib.models.LSTMWrapper(
-                temp_env,
+                co_player_env,
                 base_policy,
                 input_size=co_player_rnn.get("input_size"),
                 hidden_size=co_player_rnn.get("hidden_size"),
