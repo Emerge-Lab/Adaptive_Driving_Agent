@@ -131,7 +131,7 @@ class Drive(pufferlib.PufferEnv):
         self.ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
             dynamics_model
         )
-        
+
         self.ego_features += conditioning_dims
 
         # Extract observation shapes from constants
@@ -256,7 +256,6 @@ class Drive(pufferlib.PufferEnv):
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=co_player_atn_space.dtype)
             else:
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=np.int32)
-
         env_ids = []
         for i in range(self.num_envs):
             cur = self.agent_offsets[i]
@@ -326,7 +325,7 @@ class Drive(pufferlib.PufferEnv):
 
     def _set_env_variables(self):
         my_shared_tuple = binding.shared(
-            map_dir = self.map_dir,
+            map_dir=self.map_dir,
             num_agents=self.num_agents,
             num_maps=self.num_maps,
             init_mode=self.init_mode,
@@ -551,10 +550,6 @@ class Drive(pufferlib.PufferEnv):
                 delta_key = f"ada_delta_{metric}"
                 delta_metrics[delta_key] = last_metrics[metric] - first_metrics[metric]
 
-        # Add a count of how many agents this represents
-        if "n" in last_metrics:
-            delta_metrics["ada_agent_count"] = last_metrics["n"]
-
         return delta_metrics
 
     def step(self, actions):
@@ -574,6 +569,7 @@ class Drive(pufferlib.PufferEnv):
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
+                print(f"log is {log}", flush=True)
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
 
@@ -642,8 +638,8 @@ class Drive(pufferlib.PufferEnv):
                         collision_behavior=self.collision_behavior,
                         offroad_behavior=self.offroad_behavior,
                         reward_goal=self.reward_goal,
-                        reward_goal_post_respawn = self.reward_goal_post_respawn,
-                        goal_speed = self.goal_speed,
+                        reward_goal_post_respawn=self.reward_goal_post_respawn,
+                        goal_speed=self.goal_speed,
                         goal_target_distance=self.goal_target_distance,
                         dt=self.dt,
                         scenario_length=(int(self.scenario_length) if self.scenario_length is not None else None),

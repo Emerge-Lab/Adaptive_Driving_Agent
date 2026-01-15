@@ -6,8 +6,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-typedef struct{
-    char* type;
+typedef struct {
+    char *type;
     float reward_offroad_weight_lb;
     float reward_offroad_weight_ub;
     float reward_collision_weight_lb;
@@ -43,7 +43,7 @@ typedef struct {
     int init_mode;
     int control_mode;
     char map_dir[256];
-    conditioning_config* conditioning;
+    conditioning_config *conditioning;
 } env_init_config;
 
 // INI file parser handler - parses all environment configuration from drive.ini
@@ -113,12 +113,12 @@ static int handler(void *config, const char *section, const char *name, const ch
         // printf("Parsed map_dir: '%s'\n", env_config->map_dir);
     } else if (MATCH("env.conditioning", "type")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         // Remove quotes if present
         if (value[0] == '"') {
-            size_t len = strlen(value) - 2;  // -2 for both quotes
-            env_config->conditioning->type = (char*)malloc(len + 1);
+            size_t len = strlen(value) - 2; // -2 for both quotes
+            env_config->conditioning->type = (char *)malloc(len + 1);
             strncpy(env_config->conditioning->type, value + 1, len);
             env_config->conditioning->type[len] = '\0';
         } else {
@@ -126,57 +126,56 @@ static int handler(void *config, const char *section, const char *name, const ch
         }
     } else if (MATCH("env.conditioning", "collision_weight_lb")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->reward_collision_weight_lb = atof(value);
-    }
-    else if (MATCH("env.conditioning", "collision_weight_ub")) {
+    } else if (MATCH("env.conditioning", "collision_weight_ub")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->reward_collision_weight_ub = atof(value);
     } else if (MATCH("env.conditioning", "offroad_weight_lb")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->reward_offroad_weight_lb = atof(value);
     } else if (MATCH("env.conditioning", "offroad_weight_ub")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->reward_offroad_weight_ub = atof(value);
-    }else if (MATCH("env.conditioning", "goal_weight_lb")) {
+    } else if (MATCH("env.conditioning", "goal_weight_lb")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->reward_goal_weight_lb = atof(value);
-    }else if (MATCH("env.conditioning", "goal_weight_ub")) {
+    } else if (MATCH("env.conditioning", "goal_weight_ub")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->reward_goal_weight_ub = atof(value);
-    }else if (MATCH("env.conditioning", "entropy_weight_lb")) {
+    } else if (MATCH("env.conditioning", "entropy_weight_lb")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->entropy_weight_lb = atof(value);
-    }else if (MATCH("env.conditioning", "entropy_weight_ub")) {
+    } else if (MATCH("env.conditioning", "entropy_weight_ub")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->entropy_weight_ub = atof(value);
-    }else if (MATCH("env.conditioning", "discount_weight_lb")) {
+    } else if (MATCH("env.conditioning", "discount_weight_lb")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->discount_weight_lb = atof(value);
-    }else if (MATCH("env.conditioning", "discount_weight_ub")) {
+    } else if (MATCH("env.conditioning", "discount_weight_ub")) {
         if (env_config->conditioning == NULL) {
-            env_config->conditioning = (conditioning_config*)malloc(sizeof(conditioning_config));
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
         }
         env_config->conditioning->discount_weight_ub = atof(value);
     }
-    
+
     else {
         return 0; // Unknown section/name, indicate failure to handle
     }

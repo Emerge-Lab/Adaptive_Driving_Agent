@@ -104,6 +104,7 @@ class PuffeRL:
 
         batch_size = config["batch_size"]
         horizon = config["bptt_horizon"]
+        print(f"----   horizon is {horizon}   -----", flush=True)
         segments = batch_size // horizon
         self.segments = segments
         if not self.population_play:

@@ -1,8 +1,7 @@
 #include "drive.h"
 #include "../env_binding.h"
 
-
-static PyObject* my_shared_self_play(PyObject *self, PyObject *args, PyObject *kwargs) {
+static PyObject *my_shared_self_play(PyObject *self, PyObject *args, PyObject *kwargs) {
     char *map_dir = unpack_str(kwargs, "map_dir");
     int num_agents = unpack(kwargs, "num_agents");
     int num_maps = unpack(kwargs, "num_maps");
@@ -13,12 +12,9 @@ static PyObject* my_shared_self_play(PyObject *self, PyObject *args, PyObject *k
     float goal_target_distance = unpack(kwargs, "goal_target_distance");
     int use_all_maps = unpack(kwargs, "use_all_maps");
     int max_controlled_agents = unpack(kwargs, "max_controlled_agents");
-    printf("Generating environments for %d agents using %s maps from %s, num maps %d \n",
-           num_agents,
-           use_all_maps ? "all" : "random",
-           map_dir, 
-           num_maps);
-    fflush(stdout); 
+    printf("Generating environments for %d agents using %s maps from %s, num maps %d \n", num_agents,
+           use_all_maps ? "all" : "random", map_dir, num_maps);
+    fflush(stdout);
     // Use current time and pid for randomness
     clock_gettime(CLOCK_REALTIME, &ts);
     srand((unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ getpid()));
@@ -114,9 +110,8 @@ static PyObject* my_shared_self_play(PyObject *self, PyObject *args, PyObject *k
     return tuple;
 }
 
-
-static double* unpack_float_array(PyObject* kwargs, char* key, Py_ssize_t* out_size) {
-    PyObject* val = PyDict_GetItemString(kwargs, key);
+static double *unpack_float_array(PyObject *kwargs, char *key, Py_ssize_t *out_size) {
+    PyObject *val = PyDict_GetItemString(kwargs, key);
     if (val == NULL) {
         char error_msg[100];
         snprintf(error_msg, sizeof(error_msg), "Missing required keyword argument '%s'", key);
@@ -141,15 +136,14 @@ static double* unpack_float_array(PyObject* kwargs, char* key, Py_ssize_t* out_s
         return NULL;
     }
 
-    double* array = (double*)malloc(size * sizeof(double));
+    double *array = (double *)malloc(size * sizeof(double));
     if (array == NULL) {
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate memory for float array");
         return NULL;
     }
 
-
     for (Py_ssize_t i = 0; i < size; i++) {
-        PyObject* item = PySequence_GetItem(val, i);
+        PyObject *item = PySequence_GetItem(val, i);
         if (item == NULL) {
             free(array);
             return NULL;
@@ -186,7 +180,7 @@ static double* unpack_float_array(PyObject* kwargs, char* key, Py_ssize_t* out_s
 
     return array;
 }
-static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObject* kwargs) {
+static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObject *kwargs) {
     char *map_dir = unpack_str(kwargs, "map_dir");
     int num_agents = unpack(kwargs, "num_agents");
     int num_maps = unpack(kwargs, "num_maps");
@@ -198,7 +192,7 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
     int max_controlled_agents = unpack(kwargs, "max_controlled_agents");
 
     int max_scenes_per_process = 0;
-    PyObject* max_envs_obj = PyDict_GetItemString(kwargs, "max_scenes_per_process");
+    PyObject *max_envs_obj = PyDict_GetItemString(kwargs, "max_scenes_per_process");
     if (max_envs_obj && PyLong_Check(max_envs_obj)) {
         long v = PyLong_AsLong(max_envs_obj);
         if (v > 0 && v <= INT_MAX) {
@@ -212,11 +206,10 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
     srand((unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ getpid()));
 
     int num_coplayers = num_agents - num_ego_agents;
-    printf("Creating worlds for %d total agents (%d egos, %d co-players)\n",
-           num_agents, num_ego_agents, num_coplayers);
+    printf("Creating worlds for %d total agents (%d egos, %d co-players)\n", num_agents, num_ego_agents, num_coplayers);
 
     // Create shuffled agent role array (0 = coplayer, 1 = ego)
-    int* agent_roles = malloc(num_agents * sizeof(int));
+    int *agent_roles = malloc(num_agents * sizeof(int));
     for (int i = 0; i < num_ego_agents; i++) {
         agent_roles[i] = 1; // ego
     }
@@ -236,20 +229,20 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
     int env_count = 0;
     int total_egos_assigned = 0;
     int total_coplayers_assigned = 0;
-    int agent_role_index = 0;  // Track position in agent_roles array
+    int agent_role_index = 0; // Track position in agent_roles array
 
     int max_envs = num_agents;
     if (max_scenes_per_process > 0 && max_scenes_per_process < max_envs) {
         max_envs = max_scenes_per_process;
     }
 
-    PyObject* agent_offsets = PyList_New(max_envs + 1);
-    PyObject* map_ids = PyList_New(max_envs);
-    PyObject* ego_agent_ids = PyList_New(max_envs);
-    PyObject* coplayer_ids = PyList_New(max_envs);
+    PyObject *agent_offsets = PyList_New(max_envs + 1);
+    PyObject *map_ids = PyList_New(max_envs);
+    PyObject *ego_agent_ids = PyList_New(max_envs);
+    PyObject *coplayer_ids = PyList_New(max_envs);
 
-    int consecutive_skips = 0;  // Safety counter for infinite loop detection
-    int max_consecutive_skips = num_maps * 3;  // Allow trying each map multiple times
+    int consecutive_skips = 0;                // Safety counter for infinite loop detection
+    int max_consecutive_skips = num_maps * 3; // Allow trying each map multiple times
 
     // Create worlds by randomly sampling maps
     while (total_agent_count < num_agents && env_count < max_envs) {
@@ -259,7 +252,7 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
                     "[shared_population_play] ERROR: Too many consecutive skips (%d). "
                     "All maps may have 0 active agents. agent_role_index=%d, total_agent_count=%d\n",
                     consecutive_skips, agent_role_index, total_agent_count);
-            
+
             Py_DECREF(agent_offsets);
             Py_DECREF(map_ids);
             Py_DECREF(ego_agent_ids);
@@ -273,7 +266,7 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
 
         char map_file[100];
         int map_id = rand() % num_maps;
-        Drive* env = calloc(1, sizeof(Drive));
+        Drive *env = calloc(1, sizeof(Drive));
         snprintf(map_file, sizeof(map_file), "%s/map_%03d.bin", map_dir, map_id);
         env->entities = load_map_binary(map_file, env);
 
@@ -293,7 +286,7 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
         // CRITICAL FIX: Skip maps with 0 active agents
         if (env->active_agent_count == 0) {
             printf("Skipping map %d (0 active agents)\n", map_id);
-            for(int j=0; j<env->num_entities; j++) {
+            for (int j = 0; j < env->num_entities; j++) {
                 free_entity(&env->entities[j]);
             }
             free(env->entities);
@@ -308,12 +301,9 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
         int next_total = total_agent_count + env->active_agent_count;
         if (next_total > num_agents) {
             int remaining = num_agents - total_agent_count;
-            fprintf(stderr,
-                    "[shared_population_play] ERROR oversubscribed agents: requested=%d remaining=%d map=%d\n",
-                    env->active_agent_count,
-                    remaining,
-                    map_id);
-            for(int j=0; j<env->num_entities; j++) {
+            fprintf(stderr, "[shared_population_play] ERROR oversubscribed agents: requested=%d remaining=%d map=%d\n",
+                    env->active_agent_count, remaining, map_id);
+            for (int j = 0; j < env->num_entities; j++) {
                 free_entity(&env->entities[j]);
             }
             free(env->entities);
@@ -327,25 +317,22 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
             Py_DECREF(coplayer_ids);
             free(agent_roles);
             PyErr_Format(PyExc_RuntimeError,
-                         "shared_population_play oversubscribed: total=%d target=%d map=%d active=%d",
-                         next_total,
-                         num_agents,
-                         map_id,
-                         env->active_agent_count);
+                         "shared_population_play oversubscribed: total=%d target=%d map=%d active=%d", next_total,
+                         num_agents, map_id, env->active_agent_count);
             return NULL;
         }
 
         // Store map_id
-        PyObject* map_id_obj = PyLong_FromLong(map_id);
+        PyObject *map_id_obj = PyLong_FromLong(map_id);
         PyList_SetItem(map_ids, env_count, map_id_obj);
 
         // Store agent offset
-        PyObject* offset = PyLong_FromLong(total_agent_count);
+        PyObject *offset = PyLong_FromLong(total_agent_count);
         PyList_SetItem(agent_offsets, env_count, offset);
 
         // Create ego and coplayer lists for this world
-        PyObject* ego_list = PyList_New(0);
-        PyObject* coplayer_list = PyList_New(0);
+        PyObject *ego_list = PyList_New(0);
+        PyObject *coplayer_list = PyList_New(0);
 
         int world_egos = 0;
         int world_coplayers = 0;
@@ -353,7 +340,7 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
 
         // Assign agents from the shuffled roles
         for (int a = 0; a < env->active_agent_count; a++) {
-            PyObject* agent_id = PyLong_FromLong(total_agent_count);
+            PyObject *agent_id = PyLong_FromLong(total_agent_count);
 
             if (agent_roles[agent_role_index] == 1) {
                 // This agent is an ego
@@ -374,9 +361,10 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
 
         // Enforce constraint: must have at least 1 ego per world (if egos remain)
         if (world_egos == 0 && remaining_egos > 0) {
-            fprintf(stderr,
-                    "[shared_population_play] WARNING: World %d has no ego agents but %d egos remain. Skipping world.\n",
-                    env_count, remaining_egos);
+            fprintf(
+                stderr,
+                "[shared_population_play] WARNING: World %d has no ego agents but %d egos remain. Skipping world.\n",
+                env_count, remaining_egos);
 
             // Rollback the agent assignments for this world
             total_agent_count -= env->active_agent_count;
@@ -386,7 +374,7 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
             Py_DECREF(ego_list);
             Py_DECREF(coplayer_list);
 
-            for(int j=0; j<env->num_entities; j++) {
+            for (int j = 0; j < env->num_entities; j++) {
                 free_entity(&env->entities[j]);
             }
             free(env->entities);
@@ -394,7 +382,7 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
             free(env->static_agent_indices);
             free(env->expert_static_agent_indices);
             free(env);
-            
+
             consecutive_skips++;
             continue; // Try another map
         }
@@ -405,12 +393,12 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
         PyList_SetItem(ego_agent_ids, env_count, ego_list);
         PyList_SetItem(coplayer_ids, env_count, coplayer_list);
 
-        printf("World %d (map %d): %d agents (%d egos, %d co-players)\n",
-               env_count, map_id, env->active_agent_count, world_egos, world_coplayers);
+        printf("World %d (map %d): %d agents (%d egos, %d co-players)\n", env_count, map_id, env->active_agent_count,
+               world_egos, world_coplayers);
 
         env_count++;
 
-        for(int j=0; j<env->num_entities; j++) {
+        for (int j = 0; j < env->num_entities; j++) {
             free_entity(&env->entities[j]);
         }
         free(env->entities);
@@ -424,15 +412,15 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
         total_agent_count = num_agents;
     }
 
-    PyObject* final_total_agent_count = PyLong_FromLong(total_agent_count);
+    PyObject *final_total_agent_count = PyLong_FromLong(total_agent_count);
     PyList_SetItem(agent_offsets, env_count, final_total_agent_count);
-    PyObject* final_env_count = PyLong_FromLong(env_count);
+    PyObject *final_env_count = PyLong_FromLong(env_count);
 
     // Resize lists
-    PyObject* resized_agent_offsets = PyList_GetSlice(agent_offsets, 0, env_count + 1);
-    PyObject* resized_map_ids = PyList_GetSlice(map_ids, 0, env_count);
-    PyObject* resized_ego_ids = PyList_GetSlice(ego_agent_ids, 0, env_count);
-    PyObject* resized_coplayer_ids = PyList_GetSlice(coplayer_ids, 0, env_count);
+    PyObject *resized_agent_offsets = PyList_GetSlice(agent_offsets, 0, env_count + 1);
+    PyObject *resized_map_ids = PyList_GetSlice(map_ids, 0, env_count);
+    PyObject *resized_ego_ids = PyList_GetSlice(ego_agent_ids, 0, env_count);
+    PyObject *resized_coplayer_ids = PyList_GetSlice(coplayer_ids, 0, env_count);
 
     Py_DECREF(agent_offsets);
     Py_DECREF(map_ids);
@@ -443,15 +431,15 @@ static PyObject* my_shared_population_play(PyObject* self, PyObject* args, PyObj
     free(agent_roles);
 
     // Create a tuple
-    PyObject* tuple = PyTuple_New(5);
+    PyObject *tuple = PyTuple_New(5);
     PyTuple_SetItem(tuple, 0, resized_agent_offsets);
     PyTuple_SetItem(tuple, 1, resized_map_ids);
     PyTuple_SetItem(tuple, 2, final_env_count);
     PyTuple_SetItem(tuple, 3, resized_ego_ids);
     PyTuple_SetItem(tuple, 4, resized_coplayer_ids);
 
-    printf("Total: %d agents across %d worlds (egos: %d, co-players: %d)\n",
-           total_agent_count, env_count, total_egos_assigned, total_coplayers_assigned);
+    printf("Total: %d agents across %d worlds (egos: %d, co-players: %d)\n", total_agent_count, env_count,
+           total_egos_assigned, total_coplayers_assigned);
 
     return tuple;
 }

@@ -226,14 +226,15 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
     }
     fclose(policy_file);
 
-
-
-    int use_rc = (conf.conditioning != NULL) ? 
-        (strcmp(conf.conditioning->type, "reward") == 0 || strcmp(conf.conditioning->type, "all") == 0) : 0;
-    int use_ec = (conf.conditioning != NULL) ? 
-        (strcmp(conf.conditioning->type, "entropy") == 0 || strcmp(conf.conditioning->type, "all") == 0) : 0;
-    int use_dc = (conf.conditioning != NULL) ? 
-        (strcmp(conf.conditioning->type, "discount") == 0 || strcmp(conf.conditioning->type, "all") == 0) : 0;
+    int use_rc = (conf.conditioning != NULL)
+                     ? (strcmp(conf.conditioning->type, "reward") == 0 || strcmp(conf.conditioning->type, "all") == 0)
+                     : 0;
+    int use_ec = (conf.conditioning != NULL)
+                     ? (strcmp(conf.conditioning->type, "entropy") == 0 || strcmp(conf.conditioning->type, "all") == 0)
+                     : 0;
+    int use_dc = (conf.conditioning != NULL)
+                     ? (strcmp(conf.conditioning->type, "discount") == 0 || strcmp(conf.conditioning->type, "all") == 0)
+                     : 0;
     // Initialize environment with all config values from INI [env] section
     Drive env = {
         .action_type = conf.action_type,
@@ -449,7 +450,6 @@ int main(int argc, char *argv[]) {
     int init_mode = 0;
     int control_mode = 0;
     int goal_behavior = 0;
-
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {

@@ -47,9 +47,8 @@ struct DriveNet {
     Multidiscrete *multidiscrete;
 };
 
-
-DriveNet* init_drivenet(Weights* weights, int num_agents, int dynamics_model, bool use_rc, bool use_ec, bool use_dc) {
-    DriveNet* net = calloc(1, sizeof(DriveNet));
+DriveNet *init_drivenet(Weights *weights, int num_agents, int dynamics_model, bool use_rc, bool use_ec, bool use_dc) {
+    DriveNet *net = calloc(1, sizeof(DriveNet));
     int hidden_size = 256;
     int input_size = 64;
 
@@ -64,8 +63,8 @@ DriveNet* init_drivenet(Weights* weights, int num_agents, int dynamics_model, bo
         action_size = 7 * 13; // Joint action space
         logit_sizes[0] = 7 * 13;
         action_dim = 1;
-    } else {  // JERK
-        action_size = 7;   // 4 + 3
+    } else {             // JERK
+        action_size = 7; // 4 + 3
         logit_sizes[0] = 4;
         logit_sizes[1] = 3;
         action_dim = 2;
@@ -73,16 +72,16 @@ DriveNet* init_drivenet(Weights* weights, int num_agents, int dynamics_model, bo
 
     net->num_agents = num_agents;
 
-    net->obs_self = calloc(num_agents*net->ego_dim, sizeof(float));
-    net->obs_partner = calloc(num_agents*63*7, sizeof(float)); // 63 objects, 7 features
-    net->obs_road = calloc(num_agents*200*13, sizeof(float)); // 200 objects, 13 features
+    net->obs_self = calloc(num_agents * net->ego_dim, sizeof(float));
+    net->obs_partner = calloc(num_agents * 63 * 7, sizeof(float)); // 63 objects, 7 features
+    net->obs_road = calloc(num_agents * 200 * 13, sizeof(float));  // 200 objects, 13 features
 
-    net->partner_linear_output = calloc(num_agents*63*input_size, sizeof(float));
-    net->road_linear_output = calloc(num_agents*200*input_size, sizeof(float));
-    net->partner_linear_output_two = calloc(num_agents*63*input_size, sizeof(float));
-    net->road_linear_output_two = calloc(num_agents*200*input_size, sizeof(float));
-    net->partner_layernorm_output = calloc(num_agents*63*input_size, sizeof(float));
-    net->road_layernorm_output = calloc(num_agents*200*input_size, sizeof(float));
+    net->partner_linear_output = calloc(num_agents * 63 * input_size, sizeof(float));
+    net->road_linear_output = calloc(num_agents * 200 * input_size, sizeof(float));
+    net->partner_linear_output_two = calloc(num_agents * 63 * input_size, sizeof(float));
+    net->road_linear_output_two = calloc(num_agents * 200 * input_size, sizeof(float));
+    net->partner_layernorm_output = calloc(num_agents * 63 * input_size, sizeof(float));
+    net->road_layernorm_output = calloc(num_agents * 200 * input_size, sizeof(float));
     net->ego_encoder = make_linear(weights, num_agents, net->ego_dim, input_size);
     net->ego_layernorm = make_layernorm(weights, num_agents, input_size);
     net->ego_encoder_two = make_linear(weights, num_agents, input_size, input_size);
@@ -96,14 +95,14 @@ DriveNet* init_drivenet(Weights* weights, int num_agents, int dynamics_model, bo
     net->road_max = make_max_dim1(num_agents, 200, input_size);
     net->cat1 = make_cat_dim1(num_agents, input_size, input_size);
     net->cat2 = make_cat_dim1(num_agents, input_size + input_size, input_size);
-    net->gelu = make_gelu(num_agents, 3*input_size);
-    net->shared_embedding = make_linear(weights, num_agents, input_size*3, hidden_size);
+    net->gelu = make_gelu(num_agents, 3 * input_size);
+    net->shared_embedding = make_linear(weights, num_agents, input_size * 3, hidden_size);
     net->relu = make_relu(num_agents, hidden_size);
     net->actor = make_linear(weights, num_agents, hidden_size, action_size);
     net->value_fn = make_linear(weights, num_agents, hidden_size, 1);
     net->lstm = make_lstm(weights, num_agents, hidden_size, 256);
-    memset(net->lstm->state_h, 0, num_agents*256*sizeof(float));
-    memset(net->lstm->state_c, 0, num_agents*256*sizeof(float));
+    memset(net->lstm->state_h, 0, num_agents * 256 * sizeof(float));
+    memset(net->lstm->state_c, 0, num_agents * 256 * sizeof(float));
     net->multidiscrete = make_multidiscrete(num_agents, logit_sizes, action_dim);
     return net;
 }

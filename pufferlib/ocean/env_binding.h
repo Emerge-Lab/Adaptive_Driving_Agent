@@ -564,24 +564,24 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     if (!vec) {
         return NULL;
     }
-    
+
     PyObject *num_agents_arg = PyTuple_GetItem(args, 1);
     float num_agents = (float)PyLong_AsLong(num_agents_arg);
-    
+
     // Iterates over logs one float at a time. Will break
     // horribly if Log has non-float data.
     Log aggregate = {0};
     int num_keys = sizeof(Log) / sizeof(float);
-    
-    int has_co_players = 0;  // Flag to check if any env has co-players
-    Log co_player_aggregate = {0};  // Now using Log struct instead of Co_Player_Log
-    
+
+    int has_co_players = 0;        // Flag to check if any env has co-players
+    Log co_player_aggregate = {0}; // Now using Log struct instead of Co_Player_Log
+
     for (int i = 0; i < vec->num_envs; i++) {
         Env *env = vec->envs[i];
         for (int j = 0; j < num_keys; j++) {
             ((float *)&aggregate)[j] += ((float *)&env->log)[j];
         }
-        
+
         if (env->population_play && env->num_co_players > 0 && env->co_player_ids != NULL) {
             has_co_players = 1;
             // Aggregate co-player logs (now same structure as ego logs)
@@ -590,55 +590,57 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
             }
         }
     }
-    
+
     PyObject *dict = PyDict_New();
-    
-    // Only log if we have at least num_agents worth of data
-    if (aggregate.n < num_agents) {
-        return dict;
+
+    // Check if we have enough data from EITHER ego agents OR total (ego + co-players)
+    float total_n = aggregate.n + (has_co_players ? co_player_aggregate.n : 0.0f);
+    if (total_n < num_agents) {
+        return dict; // Not enough data yet
     }
-    
+
     // Got enough data. Reset logs and return metrics
     for (int i = 0; i < vec->num_envs; i++) {
         Env *env = vec->envs[i];
         for (int j = 0; j < num_keys; j++) {
             ((float *)&env->log)[j] = 0.0f;
         }
-        
+
         if (env->population_play && env->num_co_players > 0 && env->co_player_ids != NULL) {
             for (int j = 0; j < num_keys; j++) {
                 ((float *)&env->co_player_log)[j] = 0.0f;
             }
         }
     }
-    
+
     float n = aggregate.n;
-    // Average across agents
-    for (int i = 0; i < num_keys; i++) {
-        ((float *)&aggregate)[i] /= n;
+    // Average across EGO agents only
+    if (n > 0) {
+        for (int i = 0; i < num_keys; i++) {
+            ((float *)&aggregate)[i] /= n;
+        }
+
+        // Compute completion_rate from aggregated counts
+        aggregate.completion_rate = aggregate.goals_reached_this_episode / aggregate.goals_sampled_this_episode;
     }
-    
-    // Compute completion_rate from aggregated counts
-    aggregate.completion_rate = aggregate.goals_reached_this_episode / aggregate.goals_sampled_this_episode;
-    
+
     // User populates dict
     my_log(dict, &aggregate);
     assign_to_dict(dict, "n", n);
-    
+
     // Handle co-player metrics
     if (has_co_players && co_player_aggregate.n > 0.0f) {
         float co_player_n = co_player_aggregate.n;
-        
-        // Average co-player metrics
+
+        // Average co-player metrics across CO-PLAYER agents only
         for (int i = 0; i < num_keys; i++) {
-            if (((float *)&co_player_aggregate)[i] != 0.0f) {
-                ((float *)&co_player_aggregate)[i] /= co_player_n;
-            }
+            ((float *)&co_player_aggregate)[i] /= co_player_n;
         }
-        
+
         // Compute co-player completion rate
-        co_player_aggregate.completion_rate = co_player_aggregate.goals_reached_this_episode / co_player_aggregate.goals_sampled_this_episode;
-        
+        co_player_aggregate.completion_rate =
+            co_player_aggregate.goals_reached_this_episode / co_player_aggregate.goals_sampled_this_episode;
+
         // Add co-player metrics to dict with co_player_ prefix
         assign_to_dict(dict, "ego_co_player_ratio", n / co_player_n);
         assign_to_dict(dict, "co_player_completion_rate", co_player_aggregate.completion_rate);
@@ -656,7 +658,7 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         assign_to_dict(dict, "co_player_goals_sampled_this_episode", co_player_aggregate.goals_sampled_this_episode);
         assign_to_dict(dict, "co_player_n", co_player_n);
     }
-    
+
     return dict;
 }
 static PyObject *vec_close(PyObject *self, PyObject *args) {

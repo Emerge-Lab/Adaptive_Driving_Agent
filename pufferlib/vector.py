@@ -838,7 +838,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         import gymnasium
         from pufferlib.ocean.torch import Drive
         import pufferlib.models
-        from pufferlib.ocean.drive import binding 
+        from pufferlib.ocean.drive import binding
 
         dynamics_model = env_k.get("dynamics_model", "classic")
         action_type = env_k.get("action_type", "discrete")
@@ -855,7 +855,6 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         reward_conditioned = condition_type in ("reward", "all")
         entropy_conditioned = condition_type in ("entropy", "all")
         discount_conditioned = condition_type in ("discount", "all")
-
 
         if action_type == "discrete":
             if dynamics_model == "classic":
@@ -874,41 +873,35 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
             raise ValueError(f"action_space must be 'discrete' or 'continuous'. Got: {action_type}")
 
         # # Observation space calculation
-        ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
-        dynamics_model
-        )
+        ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(dynamics_model)
 
         conditioning_dims = (
             (3 if reward_conditioned else 0) + (1 if entropy_conditioned else 0) + (1 if discount_conditioned else 0)
         )
-        
+
         ego_features += conditioning_dims
 
         # # Extract observation shapes from constants
         # # These need to be defined in C, since they determine the shape of the arrays
-        max_road_objects = binding.MAX_ROAD_SEGMENT_OBSERVATIONS
-        max_partner_objects = binding.MAX_AGENTS - 1
-        partner_features = binding.PARTNER_FEATURES
-        road_features = binding.ROAD_FEATURES
+        max_road_objects = 200
+        max_partner_objects = 63
+        partner_features = 7
+        road_features = 7
 
-        num_obs = (
-            ego_features
-            + max_partner_objects * partner_features
-            + max_road_objects * road_features
-        )
+        num_obs = ego_features + max_partner_objects * partner_features + max_road_objects * road_features
         single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32)
 
         co_player_env = SimpleNamespace(
             single_action_space=single_action_space,
-            single_observation_space= single_observation_space,
+            single_observation_space=single_observation_space,
             reward_conditioned=reward_conditioned,
             entropy_conditioned=entropy_conditioned,
             discount_conditioned=discount_conditioned,
             dynamics_model=dynamics_model,  ## keep these the same I think, multiple dynamics models could get weird
-            max_partner_objects = max_partner_objects,
-            partner_features = partner_features,
-            max_road_objects = max_road_objects,
-            road_features = road_features,
+            max_partner_objects=max_partner_objects,
+            partner_features=partner_features,
+            max_road_objects=max_road_objects,
+            road_features=road_features,
         )
 
         base_policy = Drive(co_player_env, input_size=input_size, hidden_size=hidden_size)
