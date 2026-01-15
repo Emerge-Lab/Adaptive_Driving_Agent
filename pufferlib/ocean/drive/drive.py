@@ -30,6 +30,7 @@ class Drive(pufferlib.PufferEnv):
         offroad_behavior=0,
         dt=0.1,
         scenario_length=None,
+        episode_length=None,
         termination_mode=None,
         resample_frequency=91,
         num_maps=100,
@@ -73,6 +74,9 @@ class Drive(pufferlib.PufferEnv):
         self.resample_frequency = resample_frequency
         self.ini_file = ini_file
         self.use_all_maps = use_all_maps
+
+        if episode_length != None:
+            self.scenario_length = episode_length
 
         # Adaptive driving agent setup
         self.adaptive_driving_agent = int(adaptive_driving_agent)
