@@ -883,12 +883,20 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
         # # Extract observation shapes from constants
         # # These need to be defined in C, since they determine the shape of the arrays
-        max_road_objects = 200
-        max_partner_objects = 63
-        partner_features = 7
-        road_features = 7
+        # max_road_objects = 200
+        # max_partner_objects = 63
+        # partner_features = 7
+        # road_features = 7
+
+        # Extract observation shapes from constants
+        # These need to be defined in C, since they determine the shape of the arrays
+        max_road_objects = binding.MAX_ROAD_SEGMENT_OBSERVATIONS
+        max_partner_objects = binding.MAX_AGENTS - 1
+        partner_features = binding.PARTNER_FEATURES
+        road_features = binding.ROAD_FEATURES
 
         num_obs = ego_features + max_partner_objects * partner_features + max_road_objects * road_features
+
         single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32)
 
         co_player_env = SimpleNamespace(
