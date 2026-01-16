@@ -573,18 +573,14 @@ class Drive(pufferlib.PufferEnv):
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
-                print(f"log is {log}", flush=True)
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
-
                     # Only append to info if we're in the 0th scenario
                     if self.current_scenario == 0:
                         info.append(log)
-                        print("0th scenario metrics are ", log, flush=True)
                 else:
                     # Non-adaptive mode: always append
                     info.append(log)
-                    print("Regular metrics are ", log, flush=True)
 
         if self.tick % self.scenario_length == 0:
             if self.adaptive_driving_agent and self.current_scenario_infos:
@@ -596,7 +592,6 @@ class Drive(pufferlib.PufferEnv):
                     delta_metrics = self._compute_delta_metrics()
                     if delta_metrics:
                         info.append(delta_metrics)
-                        print("delta metrics are ", delta_metrics, flush=True)
 
                     self.scenario_metrics = []
 
@@ -613,7 +608,6 @@ class Drive(pufferlib.PufferEnv):
                     delta_metrics = self._compute_delta_metrics()
                     if delta_metrics:
                         info.append(delta_metrics)
-                        print("delta metrics 2, are ", delta_metrics, flush=True)
                     self.scenario_metrics = []
                     self.current_scenario_infos = []
                     self.current_scenario = 0
