@@ -232,7 +232,7 @@ class Drive(pufferlib.PufferEnv):
         available_maps = len([name for name in os.listdir(map_dir) if name.endswith(".bin")])
         if num_maps > available_maps:
             raise ValueError(
-                f"num_maps ({num_maps}) exceeds available maps in directory ({available_maps}). Please reduce num_maps or add more maps to resources/drive/binaries."
+                f"num_maps ({num_maps}) exceeds available maps in directory ({available_maps}). Please reduce num_maps or add more maps to {map_dir}."
             )
         if self.population_play:
             if self.num_ego_agents > num_agents:
