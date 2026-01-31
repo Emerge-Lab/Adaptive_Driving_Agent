@@ -3,25 +3,25 @@
 #define MY_PUT
 #include "binding.h"
 
-static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
-    PyObject *obs = PyDict_GetItemString(kwargs, "observations");
+static int my_put(Env* env, PyObject* args, PyObject* kwargs) {
+    PyObject* obs = PyDict_GetItemString(kwargs, "observations");
     if (!PyObject_TypeCheck(obs, &PyArray_Type)) {
         PyErr_SetString(PyExc_TypeError, "Observations must be a NumPy array");
         return 1;
     }
-    PyArrayObject *observations = (PyArrayObject *)obs;
+    PyArrayObject* observations = (PyArrayObject*)obs;
     if (!PyArray_ISCONTIGUOUS(observations)) {
         PyErr_SetString(PyExc_ValueError, "Observations must be contiguous");
         return 1;
     }
     env->observations = PyArray_DATA(observations);
 
-    PyObject *act = PyDict_GetItemString(kwargs, "actions");
+    PyObject* act = PyDict_GetItemString(kwargs, "actions");
     if (!PyObject_TypeCheck(act, &PyArray_Type)) {
         PyErr_SetString(PyExc_TypeError, "Actions must be a NumPy array");
         return 1;
     }
-    PyArrayObject *actions = (PyArrayObject *)act;
+    PyArrayObject* actions = (PyArrayObject*)act;
     if (!PyArray_ISCONTIGUOUS(actions)) {
         PyErr_SetString(PyExc_ValueError, "Actions must be contiguous");
         return 1;
@@ -32,12 +32,12 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
         return 1;
     }
 
-    PyObject *rew = PyDict_GetItemString(kwargs, "rewards");
+    PyObject* rew = PyDict_GetItemString(kwargs, "rewards");
     if (!PyObject_TypeCheck(rew, &PyArray_Type)) {
         PyErr_SetString(PyExc_TypeError, "Rewards must be a NumPy array");
         return 1;
     }
-    PyArrayObject *rewards = (PyArrayObject *)rew;
+    PyArrayObject* rewards = (PyArrayObject*)rew;
     if (!PyArray_ISCONTIGUOUS(rewards)) {
         PyErr_SetString(PyExc_ValueError, "Rewards must be contiguous");
         return 1;
@@ -48,12 +48,12 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
     }
     env->rewards = PyArray_DATA(rewards);
 
-    PyObject *term = PyDict_GetItemString(kwargs, "terminals");
+    PyObject* term = PyDict_GetItemString(kwargs, "terminals");
     if (!PyObject_TypeCheck(term, &PyArray_Type)) {
         PyErr_SetString(PyExc_TypeError, "Terminals must be a NumPy array");
         return 1;
     }
-    PyArrayObject *terminals = (PyArrayObject *)term;
+    PyArrayObject* terminals = (PyArrayObject*)term;
     if (!PyArray_ISCONTIGUOUS(terminals)) {
         PyErr_SetString(PyExc_ValueError, "Terminals must be contiguous");
         return 1;
@@ -66,21 +66,23 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
     return 0;
 }
 
-static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
+static PyObject* my_shared(PyObject* self, PyObject* args, PyObject* kwargs) {
 
     int population_play = unpack(kwargs, "population_play");
-    if (population_play) {
-        return my_shared_population_play(self, args, kwargs);
-    } else {
-        return my_shared_self_play(self, args, kwargs);
+    if (population_play){
+        return my_shared_population_play(self, args,  kwargs);
     }
+    else{
+        return my_shared_self_play( self, args,  kwargs);
+    }
+
 }
 
-static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
+static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->human_agent_idx = unpack(kwargs, "human_agent_idx");
     env->ini_file = unpack_str(kwargs, "ini_file");
     env_init_config conf = {0};
-    if (ini_parse(env->ini_file, handler, &conf) < 0) {
+    if(ini_parse(env->ini_file, handler, &conf) < 0) {
         printf("Error while loading %s", env->ini_file);
     }
     if (kwargs && PyDict_GetItemString(kwargs, "scenario_length")) {
@@ -93,7 +95,7 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->action_type = conf.action_type;
     env->dynamics_model = conf.dynamics_model;
     if (PyDict_GetItemString(kwargs, "dynamics_model")) {
-        char *dynamics_str = unpack_str(kwargs, "dynamics_model");
+        char* dynamics_str = unpack_str(kwargs, "dynamics_model");
         env->dynamics_model = (strcmp(dynamics_str, "jerk") == 0) ? JERK : CLASSIC;
     }
     env->reward_vehicle_collision = conf.reward_vehicle_collision;
@@ -125,10 +127,10 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
 
     if (env->population_play) {
         env->num_co_players = unpack(kwargs, "num_co_players");
-        double *co_player_ids_d = unpack_float_array(kwargs, "co_player_ids", &env->num_co_players);
+        double* co_player_ids_d = unpack_float_array(kwargs, "co_player_ids", &env->num_co_players);
 
         if (co_player_ids_d != NULL && env->num_co_players > 0) {
-            env->co_player_ids = (int *)malloc(env->num_co_players * sizeof(int));
+            env->co_player_ids = (int*)malloc(env->num_co_players * sizeof(int));
             if (env->co_player_ids == NULL) {
                 fprintf(stderr, "Error: Failed to allocate memory for co_player_ids\n");
                 free(co_player_ids_d);
@@ -150,9 +152,9 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
         // Handle ego agents - always as an array
         env->num_ego_agents = unpack(kwargs, "num_ego_agents");
         if (env->num_ego_agents > 0) {
-            double *ego_agent_ids_d = unpack_float_array(kwargs, "ego_agent_ids", &env->num_ego_agents);
+            double* ego_agent_ids_d = unpack_float_array(kwargs, "ego_agent_ids", &env->num_ego_agents);
             if (ego_agent_ids_d != NULL) {
-                env->ego_agent_ids = (int *)malloc(env->num_ego_agents * sizeof(int));
+                env->ego_agent_ids = (int*)malloc(env->num_ego_agents * sizeof(int));
                 for (int i = 0; i < env->num_ego_agents; i++) {
                     env->ego_agent_ids[i] = (int)ego_agent_ids_d[i];
                 }
@@ -171,6 +173,7 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
         env->ego_agent_ids = NULL;
     }
 
+
     env->init_mode = (int)unpack(kwargs, "init_mode");
     env->control_mode = (int)unpack(kwargs, "control_mode");
     env->goal_behavior = (int)unpack(kwargs, "goal_behavior");
@@ -188,7 +191,7 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     return 0;
 }
 
-static int my_log(PyObject *dict, Log *log) {
+static int my_log(PyObject* dict, Log* log) {
     assign_to_dict(dict, "n", log->n);
     assign_to_dict(dict, "offroad_rate", log->offroad_rate);
     assign_to_dict(dict, "episode_length", log->episode_length);
