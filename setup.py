@@ -326,7 +326,6 @@ if not NO_TRAIN:
         "heavyball<2.0.0",
         "neptune",
         "wandb",
-        "matplotlib",
     ]
 
 setup(
