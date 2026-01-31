@@ -32,7 +32,7 @@ class Drive(nn.Module):
         # Determine ego dimension from environment's dynamics model
         base_ego_dim = 10 if env.dynamics_model == "jerk" else 7
         self.ego_dim = base_ego_dim + self.conditioning_dims
-
+        print(f"ego dimensions: {self.ego_dim}", flush=True)
         self.ego_encoder = nn.Sequential(
             pufferlib.pytorch.layer_init(nn.Linear(self.ego_dim, input_size)),
             nn.LayerNorm(input_size),

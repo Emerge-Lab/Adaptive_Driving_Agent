@@ -226,6 +226,15 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
     }
     fclose(policy_file);
 
+    int use_rc = (conf.conditioning != NULL)
+                     ? (strcmp(conf.conditioning->type, "reward") == 0 || strcmp(conf.conditioning->type, "all") == 0)
+                     : 0;
+    int use_ec = (conf.conditioning != NULL)
+                     ? (strcmp(conf.conditioning->type, "entropy") == 0 || strcmp(conf.conditioning->type, "all") == 0)
+                     : 0;
+    int use_dc = (conf.conditioning != NULL)
+                     ? (strcmp(conf.conditioning->type, "discount") == 0 || strcmp(conf.conditioning->type, "all") == 0)
+                     : 0;
     // Initialize environment with all config values from INI [env] section
     Drive env = {
         .action_type = conf.action_type,
@@ -239,7 +248,7 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
         .goal_target_distance = conf.goal_target_distance,
         .goal_speed = conf.goal_speed,
         .dt = conf.dt,
-        .episode_length = conf.episode_length,
+        .scenario_length = conf.scenario_length,
         .termination_mode = conf.termination_mode,
         .collision_behavior = conf.collision_behavior,
         .offroad_behavior = conf.offroad_behavior,
@@ -247,6 +256,20 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
         .init_mode = conf.init_mode,
         .control_mode = conf.control_mode,
         .map_name = (char *)map_name,
+        .use_rc = use_rc,
+        .use_ec = use_ec,
+        .use_dc = use_dc,
+        .collision_weight_lb = (conf.conditioning != NULL) ? conf.conditioning->reward_collision_weight_lb : 0.0f,
+        .collision_weight_ub = (conf.conditioning != NULL) ? conf.conditioning->reward_collision_weight_ub : 0.0f,
+        .offroad_weight_lb = (conf.conditioning != NULL) ? conf.conditioning->reward_offroad_weight_lb : 0.0f,
+        .offroad_weight_ub = (conf.conditioning != NULL) ? conf.conditioning->reward_offroad_weight_ub : 0.0f,
+        .goal_weight_lb = (conf.conditioning != NULL) ? conf.conditioning->reward_goal_weight_lb : 0.0f,
+        .goal_weight_ub = (conf.conditioning != NULL) ? conf.conditioning->reward_goal_weight_ub : 0.0f,
+        .entropy_weight_lb = (conf.conditioning != NULL) ? conf.conditioning->entropy_weight_lb : 0.0f,
+        .entropy_weight_ub = (conf.conditioning != NULL) ? conf.conditioning->entropy_weight_ub : 0.0f,
+        .discount_weight_lb = (conf.conditioning != NULL) ? conf.conditioning->discount_weight_lb : 0.0f,
+        .discount_weight_ub = (conf.conditioning != NULL) ? conf.conditioning->discount_weight_ub : 0.0f,
+        .max_controlled_agents = 32,
     };
 
     allocate(&env);
@@ -296,9 +319,9 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
 
     Weights *weights = load_weights(policy_name);
     printf("Active agents in map: %d\n", env.active_agent_count);
-    DriveNet *net = init_drivenet(weights, env.active_agent_count, env.dynamics_model);
+    DriveNet *net = init_drivenet(weights, env.active_agent_count, env.dynamics_model, use_rc, use_ec, use_dc);
 
-    int frame_count = env.episode_length > 0 ? env.episode_length : TRAJECTORY_LENGTH_DEFAULT;
+    int frame_count = env.scenario_length > 0 ? env.scenario_length : TRAJECTORY_LENGTH_DEFAULT;
     char filename_topdown[256];
     char filename_agent[256];
 
@@ -427,10 +450,6 @@ int main(int argc, char *argv[]) {
     int init_mode = 0;
     int control_mode = 0;
     int goal_behavior = 0;
-
-    const char* view_mode = "both";  // "both", "topdown", "agent"
-    const char* output_topdown = NULL;
-    const char* output_agent = NULL;
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {

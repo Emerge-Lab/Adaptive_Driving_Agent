@@ -66,16 +66,14 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
     return 0;
 }
 
-static PyObject* my_shared(PyObject* self, PyObject* args, PyObject* kwargs) {
+static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
 
     int population_play = unpack(kwargs, "population_play");
-    if (population_play){
-        return my_shared_population_play(self, args,  kwargs);
+    if (population_play) {
+        return my_shared_population_play(self, args, kwargs);
+    } else {
+        return my_shared_self_play(self, args, kwargs);
     }
-    else{
-        return my_shared_self_play( self, args,  kwargs);
-    }
-
 }
 
 static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
@@ -85,26 +83,25 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     if (ini_parse(env->ini_file, handler, &conf) < 0) {
         printf("Error while loading %s", env->ini_file);
     }
-    if (kwargs && PyDict_GetItemString(kwargs, "episode_length")) {
-        conf.episode_length = (int)unpack(kwargs, "episode_length");
+    if (kwargs && PyDict_GetItemString(kwargs, "scenario_length")) {
+        conf.scenario_length = (int)unpack(kwargs, "scenario_length");
     }
-    if (conf.episode_length <= 0) {
-        PyErr_SetString(PyExc_ValueError, "episode_length must be > 0 (set in INI or kwargs)");
+    if (conf.scenario_length <= 0) {
+        PyErr_SetString(PyExc_ValueError, "scenario_length must be > 0 (set in INI or kwargs)");
         return -1;
     }
     env->action_type = conf.action_type;
     env->dynamics_model = conf.dynamics_model;
     if (PyDict_GetItemString(kwargs, "dynamics_model")) {
-        char* dynamics_str = unpack_str(kwargs, "dynamics_model");
+        char *dynamics_str = unpack_str(kwargs, "dynamics_model");
         env->dynamics_model = (strcmp(dynamics_str, "jerk") == 0) ? JERK : CLASSIC;
     }
     env->reward_vehicle_collision = conf.reward_vehicle_collision;
     env->reward_offroad_collision = conf.reward_offroad_collision;
     env->reward_goal = conf.reward_goal;
     env->reward_goal_post_respawn = conf.reward_goal_post_respawn;
-    env->reward_ade = conf.reward_ade;
     env->scenario_length = conf.scenario_length;
-    env->episode_length = conf.episode_length;
+
     env->termination_mode = conf.termination_mode;
     env->collision_behavior = conf.collision_behavior;
     env->offroad_behavior = conf.offroad_behavior;
@@ -129,10 +126,10 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
 
     if (env->population_play) {
         env->num_co_players = unpack(kwargs, "num_co_players");
-        double* co_player_ids_d = unpack_float_array(kwargs, "co_player_ids", &env->num_co_players);
+        double *co_player_ids_d = unpack_float_array(kwargs, "co_player_ids", &env->num_co_players);
 
         if (co_player_ids_d != NULL && env->num_co_players > 0) {
-            env->co_player_ids = (int*)malloc(env->num_co_players * sizeof(int));
+            env->co_player_ids = (int *)malloc(env->num_co_players * sizeof(int));
             if (env->co_player_ids == NULL) {
                 fprintf(stderr, "Error: Failed to allocate memory for co_player_ids\n");
                 free(co_player_ids_d);
@@ -154,9 +151,9 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
         // Handle ego agents - always as an array
         env->num_ego_agents = unpack(kwargs, "num_ego_agents");
         if (env->num_ego_agents > 0) {
-            double* ego_agent_ids_d = unpack_float_array(kwargs, "ego_agent_ids", &env->num_ego_agents);
+            double *ego_agent_ids_d = unpack_float_array(kwargs, "ego_agent_ids", &env->num_ego_agents);
             if (ego_agent_ids_d != NULL) {
-                env->ego_agent_ids = (int*)malloc(env->num_ego_agents * sizeof(int));
+                env->ego_agent_ids = (int *)malloc(env->num_ego_agents * sizeof(int));
                 for (int i = 0; i < env->num_ego_agents; i++) {
                     env->ego_agent_ids[i] = (int)ego_agent_ids_d[i];
                 }
@@ -174,7 +171,6 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
         env->num_ego_agents = 0;
         env->ego_agent_ids = NULL;
     }
-
 
     env->init_mode = (int)unpack(kwargs, "init_mode");
     env->control_mode = (int)unpack(kwargs, "control_mode");

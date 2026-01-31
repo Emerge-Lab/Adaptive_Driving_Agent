@@ -6,6 +6,20 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+typedef struct {
+    char *type;
+    float reward_offroad_weight_lb;
+    float reward_offroad_weight_ub;
+    float reward_collision_weight_lb;
+    float reward_collision_weight_ub;
+    float reward_goal_weight_lb;
+    float reward_goal_weight_ub;
+    float entropy_weight_lb;
+    float entropy_weight_ub;
+    float discount_weight_lb;
+    float discount_weight_ub;
+} conditioning_config;
+
 // Config struct for parsing INI files - contains all environment configuration
 typedef struct {
     int action_type;
@@ -23,12 +37,13 @@ typedef struct {
     float dt;
     int goal_behavior;
     float goal_target_distance;
-    int episode_length;
+    int scenario_length;
     int termination_mode;
     int init_steps;
     int init_mode;
     int control_mode;
     char map_dir[256];
+    conditioning_config *conditioning;
 } env_init_config;
 
 // INI file parser handler - parses all environment configuration from drive.ini
@@ -80,8 +95,8 @@ static int handler(void *config, const char *section, const char *name, const ch
         env_config->spawn_immunity_timer = atoi(value);
     } else if (MATCH("env", "dt")) {
         env_config->dt = atof(value);
-    } else if (MATCH("env", "episode_length")) {
-        env_config->episode_length = atoi(value);
+    } else if (MATCH("env", "scenario_length")) {
+        env_config->scenario_length = atoi(value);
     } else if (MATCH("env", "termination_mode")) {
         env_config->termination_mode = atoi(value);
     } else if (MATCH("env", "init_steps")) {
@@ -96,7 +111,72 @@ static int handler(void *config, const char *section, const char *name, const ch
             env_config->map_dir[sizeof(env_config->map_dir) - 1] = '\0';
         }
         // printf("Parsed map_dir: '%s'\n", env_config->map_dir);
-    } else {
+    } else if (MATCH("env.conditioning", "type")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        // Remove quotes if present
+        if (value[0] == '"') {
+            size_t len = strlen(value) - 2; // -2 for both quotes
+            env_config->conditioning->type = (char *)malloc(len + 1);
+            strncpy(env_config->conditioning->type, value + 1, len);
+            env_config->conditioning->type[len] = '\0';
+        } else {
+            env_config->conditioning->type = strdup(value);
+        }
+    } else if (MATCH("env.conditioning", "collision_weight_lb")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->reward_collision_weight_lb = atof(value);
+    } else if (MATCH("env.conditioning", "collision_weight_ub")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->reward_collision_weight_ub = atof(value);
+    } else if (MATCH("env.conditioning", "offroad_weight_lb")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->reward_offroad_weight_lb = atof(value);
+    } else if (MATCH("env.conditioning", "offroad_weight_ub")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->reward_offroad_weight_ub = atof(value);
+    } else if (MATCH("env.conditioning", "goal_weight_lb")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->reward_goal_weight_lb = atof(value);
+    } else if (MATCH("env.conditioning", "goal_weight_ub")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->reward_goal_weight_ub = atof(value);
+    } else if (MATCH("env.conditioning", "entropy_weight_lb")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->entropy_weight_lb = atof(value);
+    } else if (MATCH("env.conditioning", "entropy_weight_ub")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->entropy_weight_ub = atof(value);
+    } else if (MATCH("env.conditioning", "discount_weight_lb")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->discount_weight_lb = atof(value);
+    } else if (MATCH("env.conditioning", "discount_weight_ub")) {
+        if (env_config->conditioning == NULL) {
+            env_config->conditioning = (conditioning_config *)malloc(sizeof(conditioning_config));
+        }
+        env_config->conditioning->discount_weight_ub = atof(value);
+    }
+
+    else {
         return 0; // Unknown section/name, indicate failure to handle
     }
 

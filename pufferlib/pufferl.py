@@ -104,6 +104,7 @@ class PuffeRL:
 
         batch_size = config["batch_size"]
         horizon = config["bptt_horizon"]
+        print(f"----   horizon is {horizon}   -----", flush=True)
         segments = batch_size // horizon
         self.segments = segments
         if not self.population_play:
@@ -298,24 +299,28 @@ class PuffeRL:
             # print(f"o shape is {o.shape}", flush = True)
             if self.population_play:
                 batch_size = self.vecenv.batch_size
-                ego_ids = info[-1]
+                # Filter info to get only the ego_ids lists (not the metrics dicts)
+                ego_ids_per_env = [item for item in info if isinstance(item, list)]
 
                 if batch_size > 1:
                     total_agents = len(o)
                     num_agents_per_env = total_agents // batch_size
 
-                    original_shape = o.shape
+                    # Create flat ego_ids by adding batch offset
+                    flat_ego_ids = []
+                    for env_idx in range(batch_size):
+                        ego_ids = ego_ids_per_env[env_idx]
+                        offset = env_idx * num_agents_per_env
+                        flat_ego_ids.extend([int(idx) + offset for idx in ego_ids])
 
-                    o = o.reshape(batch_size, num_agents_per_env, *original_shape[1:])
-                    r = r.reshape(batch_size, num_agents_per_env)
-                    d = d.reshape(batch_size, num_agents_per_env)
-                    t = t.reshape(batch_size, num_agents_per_env)
-
-                    o = o[:, ego_ids].reshape(batch_size * len(ego_ids), *original_shape[1:])
-                    r = r[:, ego_ids].flatten()
-                    d = d[:, ego_ids].flatten()
-                    t = t[:, ego_ids].flatten()
+                    # Simply index with the flat ego_ids
+                    o = o[flat_ego_ids]
+                    r = r[flat_ego_ids]
+                    d = d[flat_ego_ids]
+                    t = t[flat_ego_ids]
                 else:
+                    ego_ids = ego_ids_per_env[0]  # Single environment
+                    ego_ids = [int(idx) for idx in ego_ids]  # Convert to int
                     o = o[ego_ids]
                     r = r[ego_ids]
                     d = d[ego_ids]
@@ -609,6 +614,7 @@ class PuffeRL:
             self.msg = f"Checkpoint saved at update {self.epoch}"
 
             if self.render and self.epoch % self.render_interval == 0:
+                print("Attempting Render ")
                 model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
                 model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
 

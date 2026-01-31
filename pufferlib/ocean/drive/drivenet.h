@@ -49,15 +49,10 @@ struct DriveNet {
 
 DriveNet *init_drivenet(Weights *weights, int num_agents, int dynamics_model, bool use_rc, bool use_ec, bool use_dc) {
     DriveNet *net = calloc(1, sizeof(DriveNet));
-    // Use constants directly from drive.h
-    int ego_dim = (dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
-    int max_partners = MAX_AGENTS - 1;
-    int max_road_obs = MAX_ROAD_SEGMENT_OBSERVATIONS;
-    int partner_features = PARTNER_FEATURES;
-    int road_features = ROAD_FEATURES;
-    int input_size = NN_INPUT_SIZE;
-    int base_hidden_size = NN_HIDDEN_SIZE;
-    int road_feat_onehot = road_features + 6; // one-hot extra 6 features for road
+    int hidden_size = 256;
+    int input_size = 64;
+
+    int base_ego_dim = (dynamics_model == JERK) ? 10 : 7;
     net->conditioning_dims = (use_rc ? 3 : 0) + (use_ec ? 1 : 0) + (use_dc ? 1 : 0);
     net->ego_dim = base_ego_dim + net->conditioning_dims;
 
@@ -68,35 +63,36 @@ DriveNet *init_drivenet(Weights *weights, int num_agents, int dynamics_model, bo
         action_size = 7 * 13; // Joint action space
         logit_sizes[0] = 7 * 13;
         action_dim = 1;
-    } else {                 // JERK
-        action_size = 4 * 3; // Joint action space (4 longitudinal × 3 lateral = 12)
-        logit_sizes[0] = 4 * 3;
-        action_dim = 1;
+    } else {             // JERK
+        action_size = 7; // 4 + 3
+        logit_sizes[0] = 4;
+        logit_sizes[1] = 3;
+        action_dim = 2;
     }
 
     net->num_agents = num_agents;
-    net->ego_dim = ego_dim;
-    net->obs_self = calloc(num_agents * ego_dim, sizeof(float));
-    net->obs_partner = calloc(num_agents * max_partners * partner_features, sizeof(float));
-    net->obs_road = calloc(num_agents * max_road_obs * road_feat_onehot, sizeof(float));
-    net->partner_linear_output = calloc(num_agents * max_partners * input_size, sizeof(float));
-    net->road_linear_output = calloc(num_agents * max_road_obs * input_size, sizeof(float));
-    net->partner_linear_output_two = calloc(num_agents * max_partners * input_size, sizeof(float));
-    net->road_linear_output_two = calloc(num_agents * max_road_obs * input_size, sizeof(float));
-    net->partner_layernorm_output = calloc(num_agents * max_partners * input_size, sizeof(float));
-    net->road_layernorm_output = calloc(num_agents * max_road_obs * input_size, sizeof(float));
 
-    net->ego_encoder = make_linear(weights, num_agents, ego_dim, input_size);
+    net->obs_self = calloc(num_agents * net->ego_dim, sizeof(float));
+    net->obs_partner = calloc(num_agents * 63 * 7, sizeof(float)); // 63 objects, 7 features
+    net->obs_road = calloc(num_agents * 200 * 13, sizeof(float));  // 200 objects, 13 features
+
+    net->partner_linear_output = calloc(num_agents * 63 * input_size, sizeof(float));
+    net->road_linear_output = calloc(num_agents * 200 * input_size, sizeof(float));
+    net->partner_linear_output_two = calloc(num_agents * 63 * input_size, sizeof(float));
+    net->road_linear_output_two = calloc(num_agents * 200 * input_size, sizeof(float));
+    net->partner_layernorm_output = calloc(num_agents * 63 * input_size, sizeof(float));
+    net->road_layernorm_output = calloc(num_agents * 200 * input_size, sizeof(float));
+    net->ego_encoder = make_linear(weights, num_agents, net->ego_dim, input_size);
     net->ego_layernorm = make_layernorm(weights, num_agents, input_size);
     net->ego_encoder_two = make_linear(weights, num_agents, input_size, input_size);
-    net->road_encoder = make_linear(weights, num_agents, road_feat_onehot, input_size);
+    net->road_encoder = make_linear(weights, num_agents, 13, input_size);
     net->road_layernorm = make_layernorm(weights, num_agents, input_size);
     net->road_encoder_two = make_linear(weights, num_agents, input_size, input_size);
-    net->partner_encoder = make_linear(weights, num_agents, partner_features, input_size);
+    net->partner_encoder = make_linear(weights, num_agents, 7, input_size);
     net->partner_layernorm = make_layernorm(weights, num_agents, input_size);
     net->partner_encoder_two = make_linear(weights, num_agents, input_size, input_size);
-    net->partner_max = make_max_dim1(num_agents, max_partners, input_size);
-    net->road_max = make_max_dim1(num_agents, max_road_obs, input_size);
+    net->partner_max = make_max_dim1(num_agents, 63, input_size);
+    net->road_max = make_max_dim1(num_agents, 200, input_size);
     net->cat1 = make_cat_dim1(num_agents, input_size, input_size);
     net->cat2 = make_cat_dim1(num_agents, input_size + input_size, input_size);
     net->gelu = make_gelu(num_agents, 3 * input_size);
@@ -104,9 +100,9 @@ DriveNet *init_drivenet(Weights *weights, int num_agents, int dynamics_model, bo
     net->relu = make_relu(num_agents, hidden_size);
     net->actor = make_linear(weights, num_agents, hidden_size, action_size);
     net->value_fn = make_linear(weights, num_agents, hidden_size, 1);
-    net->lstm = make_lstm(weights, num_agents, hidden_size, NN_HIDDEN_SIZE);
-    memset(net->lstm->state_h, 0, num_agents * NN_HIDDEN_SIZE * sizeof(float));
-    memset(net->lstm->state_c, 0, num_agents * NN_HIDDEN_SIZE * sizeof(float));
+    net->lstm = make_lstm(weights, num_agents, hidden_size, 256);
+    memset(net->lstm->state_h, 0, num_agents * 256 * sizeof(float));
+    memset(net->lstm->state_c, 0, num_agents * 256 * sizeof(float));
     net->multidiscrete = make_multidiscrete(num_agents, logit_sizes, action_dim);
     return net;
 }
