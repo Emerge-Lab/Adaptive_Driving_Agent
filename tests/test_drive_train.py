@@ -48,8 +48,12 @@ def test_drive_training():
         args["env"].update(
             {
                 "num_agents": 8,  # 1 env * 8 agents = 8 total <= 16 segments
+                "num_ego_agents": 8,  # Must match num_agents for population play
                 "action_type": "discrete",
                 "num_maps": 1,
+                "map_dir": "resources/drive/binaries/training",
+                "init_mode": "create_all_valid",
+                "control_mode": "control_agents",
             }
         )
 
