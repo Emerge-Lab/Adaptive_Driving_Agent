@@ -302,12 +302,6 @@ class PuffeRL:
                     total_agents = len(o)
                     num_agents_per_env = total_agents // batch_size
 
-                    # Convert global ego_ids to local (per-environment) indices
-                    # ego_ids contains ALL ego agents across ALL environments, not just this batch
-                    # Count how many ego IDs belong to the first environment (IDs < num_agents_per_env)
-                    num_ego_per_env = sum(1 for eid in ego_ids if eid < num_agents_per_env)
-                    local_ego_ids = [eid % num_agents_per_env for eid in ego_ids[:num_ego_per_env]]
-
                     original_shape = o.shape
 
                     o = o.reshape(batch_size, num_agents_per_env, *original_shape[1:])
@@ -315,10 +309,10 @@ class PuffeRL:
                     d = d.reshape(batch_size, num_agents_per_env)
                     t = t.reshape(batch_size, num_agents_per_env)
 
-                    o = o[:, local_ego_ids].reshape(batch_size * num_ego_per_env, *original_shape[1:])
-                    r = r[:, local_ego_ids].flatten()
-                    d = d[:, local_ego_ids].flatten()
-                    t = t[:, local_ego_ids].flatten()
+                    o = o[:, ego_ids].reshape(batch_size * len(ego_ids), *original_shape[1:])
+                    r = r[:, ego_ids].flatten()
+                    d = d[:, ego_ids].flatten()
+                    t = t[:, ego_ids].flatten()
                 else:
                     o = o[ego_ids]
                     r = r[ego_ids]
