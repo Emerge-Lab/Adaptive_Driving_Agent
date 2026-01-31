@@ -184,3 +184,6 @@ pufferlib/resources/drive/output_agent.gif pufferlib/resources/drive/output.gif 
 artifacts/
 # Local drive renders
 pufferlib/resources/drive/output*.mp4
+
+# Local TODO tracking
+TODO.md
