@@ -285,7 +285,7 @@ class Drive(pufferlib.PufferEnv):
                 collision_behavior=self.collision_behavior,
                 offroad_behavior=self.offroad_behavior,
                 dt=dt,
-                scenario_length=(int(scenario_length) if scenario_length is not None else None),
+                scenario_length=(int(self.scenario_length) if self.scenario_length is not None else None),
                 termination_mode=(int(self.termination_mode) if self.termination_mode is not None else 0),
                 max_controlled_agents=self.max_controlled_agents,
                 map_id=self.map_ids[i],
