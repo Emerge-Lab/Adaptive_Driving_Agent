@@ -58,7 +58,7 @@ def test_drive_render():
                 "--frame-skip",
                 "10",
                 "--map-name",
-                "resources/drive/binaries/map_000.bin",
+                "resources/drive/binaries/training/map_000.bin",
                 "--output-topdown",
                 "resources/drive/output_topdown.mp4",
                 "--output-agent",

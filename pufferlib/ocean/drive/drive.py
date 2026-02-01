@@ -6,6 +6,8 @@ import os
 import pufferlib
 from pufferlib.ocean.drive import binding
 import torch
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
 
 
 class Drive(pufferlib.PufferEnv):
@@ -20,13 +22,16 @@ class Drive(pufferlib.PufferEnv):
         reward_offroad_collision=-0.1,
         reward_goal=1.0,
         reward_goal_post_respawn=0.5,
-        reward_ade=0.0,
         goal_behavior=0,
+        goal_target_distance=10.0,
         goal_radius=2.0,
+        goal_speed=20.0,
         collision_behavior=0,
         offroad_behavior=0,
         dt=0.1,
         scenario_length=None,
+        episode_length=None,
+        termination_mode=None,
         resample_frequency=91,
         num_maps=100,
         num_agents=512,
@@ -45,6 +50,8 @@ class Drive(pufferlib.PufferEnv):
         co_player_enabled=False,
         num_ego_agents=512,
         co_player_policy={},
+        map_dir="resources/drive/binaries/training",
+        use_all_maps=False,
     ):
         # env
         self.dt = dt
@@ -56,14 +63,20 @@ class Drive(pufferlib.PufferEnv):
         self.reward_goal = reward_goal
         self.reward_goal_post_respawn = reward_goal_post_respawn
         self.goal_radius = goal_radius
+        self.goal_speed = goal_speed
         self.goal_behavior = goal_behavior
+        self.goal_target_distance = goal_target_distance
         self.collision_behavior = collision_behavior
         self.offroad_behavior = offroad_behavior
-        self.reward_ade = reward_ade
         self.human_agent_idx = human_agent_idx
         self.scenario_length = scenario_length
+        self.termination_mode = termination_mode
         self.resample_frequency = resample_frequency
         self.ini_file = ini_file
+        self.use_all_maps = use_all_maps
+
+        if episode_length != None:
+            self.scenario_length = episode_length
 
         # Adaptive driving agent setup
         self.adaptive_driving_agent = int(adaptive_driving_agent)
@@ -119,16 +132,24 @@ class Drive(pufferlib.PufferEnv):
         self.dynamics_model = dynamics_model
 
         # Observation space calculation
-        base_ego_dim = 10 if self.dynamics_model == "jerk" else 7
-
-        partner_features = 7
-        road_features = 7
-        max_partner_objects = 63
-        max_road_objects = 200
-        self.num_obs = (
-            base_ego_dim + conditioning_dims + max_partner_objects * partner_features + max_road_objects * road_features
+        self.ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
+            dynamics_model
         )
 
+        self.ego_features += conditioning_dims
+
+        # Extract observation shapes from constants
+        # These need to be defined in C, since they determine the shape of the arrays
+        self.max_road_objects = binding.MAX_ROAD_SEGMENT_OBSERVATIONS
+        self.max_partner_objects = binding.MAX_AGENTS - 1
+        self.partner_features = binding.PARTNER_FEATURES
+        self.road_features = binding.ROAD_FEATURES
+
+        self.num_obs = (
+            self.ego_features
+            + self.max_partner_objects * self.partner_features
+            + self.max_road_objects * self.road_features
+        )
         self.single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(self.num_obs,), dtype=np.float32)
 
         # Co-player policy setup
@@ -159,12 +180,13 @@ class Drive(pufferlib.PufferEnv):
         self.init_steps = init_steps
         self.init_mode_str = init_mode
         self.control_mode_str = control_mode
+        self.map_dir = map_dir
 
         if self.control_mode_str == "control_vehicles":
             self.control_mode = 0
         elif self.control_mode_str == "control_agents":
             self.control_mode = 1
-        elif self.control_mode_str == "control_tracks_to_predict":
+        elif self.control_mode_str == "control_wosac":
             self.control_mode = 2
         elif self.control_mode_str == "control_sdc_only":
             self.control_mode = 3
@@ -188,7 +210,8 @@ class Drive(pufferlib.PufferEnv):
                 # Multi discrete (assume independence)
                 # self.single_action_space = gymnasium.spaces.MultiDiscrete([7, 13])
             elif dynamics_model == "jerk":
-                self.single_action_space = gymnasium.spaces.MultiDiscrete([4, 3])
+                # Joint action space (assume dependence) - 4 longitudinal × 3 lateral = 12
+                self.single_action_space = gymnasium.spaces.MultiDiscrete([4 * 3])
             else:
                 raise ValueError(f"dynamics_model must be 'classic' or 'jerk'. Got: {dynamics_model}")
         elif action_type == "continuous":
@@ -199,17 +222,17 @@ class Drive(pufferlib.PufferEnv):
         self._action_type_flag = 0 if action_type == "discrete" else 1
 
         # Check if resources directory exists
-        binary_path = "resources/drive/binaries/map_000.bin"
+        binary_path = f"{map_dir}/map_000.bin"
         if not os.path.exists(binary_path):
             raise FileNotFoundError(
                 f"Required directory {binary_path} not found. Please ensure the Drive maps are downloaded and installed correctly per docs."
             )
 
         # Check maps availability
-        available_maps = len([name for name in os.listdir("resources/drive/binaries") if name.endswith(".bin")])
+        available_maps = len([name for name in os.listdir(map_dir) if name.endswith(".bin")])
         if num_maps > available_maps:
             raise ValueError(
-                f"num_maps ({num_maps}) exceeds available maps in directory ({available_maps}). Please reduce num_maps or add more maps to resources/drive/binaries."
+                f"num_maps ({num_maps}) exceeds available maps in directory ({available_maps}). Please reduce num_maps or add more maps to {map_dir}."
             )
         if self.population_play:
             if self.num_ego_agents > num_agents:
@@ -237,7 +260,6 @@ class Drive(pufferlib.PufferEnv):
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=co_player_atn_space.dtype)
             else:
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=np.int32)
-
         env_ids = []
         for i in range(self.num_envs):
             cur = self.agent_offsets[i]
@@ -256,13 +278,15 @@ class Drive(pufferlib.PufferEnv):
                 reward_offroad_collision=reward_offroad_collision,
                 reward_goal=reward_goal,
                 reward_goal_post_respawn=reward_goal_post_respawn,
-                reward_ade=reward_ade,
                 goal_radius=goal_radius,
+                goal_speed=goal_speed,
                 goal_behavior=self.goal_behavior,
+                goal_target_distance=self.goal_target_distance,
                 collision_behavior=self.collision_behavior,
                 offroad_behavior=self.offroad_behavior,
                 dt=dt,
-                scenario_length=(int(scenario_length) if scenario_length is not None else None),
+                scenario_length=(int(self.scenario_length) if self.scenario_length is not None else None),
+                termination_mode=(int(self.termination_mode) if self.termination_mode is not None else 0),
                 max_controlled_agents=self.max_controlled_agents,
                 map_id=self.map_ids[i],
                 max_agents=nxt - cur,
@@ -288,6 +312,7 @@ class Drive(pufferlib.PufferEnv):
                 discount_weight_ub=self.discount_weight_ub,
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
+                map_dir=map_dir,
             )
             env_ids.append(env_id)
 
@@ -304,6 +329,7 @@ class Drive(pufferlib.PufferEnv):
 
     def _set_env_variables(self):
         my_shared_tuple = binding.shared(
+            map_dir=self.map_dir,
             num_agents=self.num_agents,
             num_maps=self.num_maps,
             init_mode=self.init_mode,
@@ -313,6 +339,8 @@ class Drive(pufferlib.PufferEnv):
             goal_behavior=self.goal_behavior,
             population_play=self.population_play,
             num_ego_agents=self.num_ego_agents,
+            goal_target_distance=self.goal_target_distance,
+            use_all_maps=self.use_all_maps,
         )
 
         if self.population_play:
@@ -526,10 +554,6 @@ class Drive(pufferlib.PufferEnv):
                 delta_key = f"ada_delta_{metric}"
                 delta_metrics[delta_key] = last_metrics[metric] - first_metrics[metric]
 
-        # Add a count of how many agents this represents
-        if "n" in last_metrics:
-            delta_metrics["ada_agent_count"] = last_metrics["n"]
-
         return delta_metrics
 
     def step(self, actions):
@@ -547,19 +571,16 @@ class Drive(pufferlib.PufferEnv):
         info = []
 
         if self.tick % self.report_interval == 0:
-            log = binding.vec_log(self.c_envs)
+            log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
-
                     # Only append to info if we're in the 0th scenario
                     if self.current_scenario == 0:
                         info.append(log)
-                        print("0th scenario metrics are ", log, flush=True)
                 else:
                     # Non-adaptive mode: always append
                     info.append(log)
-                    print("Regular metrics are ", log, flush=True)
 
         if self.tick % self.scenario_length == 0:
             if self.adaptive_driving_agent and self.current_scenario_infos:
@@ -571,7 +592,6 @@ class Drive(pufferlib.PufferEnv):
                     delta_metrics = self._compute_delta_metrics()
                     if delta_metrics:
                         info.append(delta_metrics)
-                        print("delta metrics are ", delta_metrics, flush=True)
 
                     self.scenario_metrics = []
 
@@ -588,7 +608,6 @@ class Drive(pufferlib.PufferEnv):
                     delta_metrics = self._compute_delta_metrics()
                     if delta_metrics:
                         info.append(delta_metrics)
-                        print("delta metrics 2, are ", delta_metrics, flush=True)
                     self.scenario_metrics = []
                     self.current_scenario_infos = []
                     self.current_scenario = 0
@@ -612,13 +631,14 @@ class Drive(pufferlib.PufferEnv):
                         dynamics_model=self.dynamics_model,
                         reward_vehicle_collision=self.reward_vehicle_collision,
                         reward_offroad_collision=self.reward_offroad_collision,
-                        reward_goal=self.reward_goal,
-                        reward_goal_post_respawn=self.reward_goal_post_respawn,
-                        reward_ade=self.reward_ade,
                         goal_radius=self.goal_radius,
                         goal_behavior=self.goal_behavior,
                         collision_behavior=self.collision_behavior,
                         offroad_behavior=self.offroad_behavior,
+                        reward_goal=self.reward_goal,
+                        reward_goal_post_respawn=self.reward_goal_post_respawn,
+                        goal_speed=self.goal_speed,
+                        goal_target_distance=self.goal_target_distance,
                         dt=self.dt,
                         scenario_length=(int(self.scenario_length) if self.scenario_length is not None else None),
                         max_controlled_agents=self.max_controlled_agents,
@@ -646,6 +666,7 @@ class Drive(pufferlib.PufferEnv):
                         init_steps=self.init_steps,
                         init_mode=self.init_mode,
                         control_mode=self.control_mode,
+                        map_dir=self.map_dir,
                     )
                     env_ids.append(env_id)
                 self.c_envs = binding.vectorize(*env_ids)
@@ -662,7 +683,7 @@ class Drive(pufferlib.PufferEnv):
         """Get current global state of all active agents.
 
         Returns:
-            dict with keys 'x', 'y', 'z', 'heading', 'id' containing numpy arrays
+            dict with keys 'x', 'y', 'z', 'heading', 'id', 'length', 'width' containing numpy arrays
             of shape (num_active_agents,)
         """
         num_agents = self.num_agents
@@ -673,10 +694,19 @@ class Drive(pufferlib.PufferEnv):
             "z": np.zeros(num_agents, dtype=np.float32),
             "heading": np.zeros(num_agents, dtype=np.float32),
             "id": np.zeros(num_agents, dtype=np.int32),
+            "length": np.zeros(num_agents, dtype=np.float32),
+            "width": np.zeros(num_agents, dtype=np.float32),
         }
 
         binding.vec_get_global_agent_state(
-            self.c_envs, states["x"], states["y"], states["z"], states["heading"], states["id"]
+            self.c_envs,
+            states["x"],
+            states["y"],
+            states["z"],
+            states["heading"],
+            states["id"],
+            states["length"],
+            states["width"],
         )
 
         return states
@@ -715,6 +745,32 @@ class Drive(pufferlib.PufferEnv):
 
         return trajectories
 
+    def get_road_edge_polylines(self):
+        """Get road edge polylines for all scenarios.
+
+        Returns:
+            dict with keys 'x', 'y', 'lengths', 'scenario_id' containing numpy arrays.
+            x, y are flattened point coordinates; lengths indicates points per polyline.
+        """
+        num_polylines, total_points = binding.vec_get_road_edge_counts(self.c_envs)
+
+        polylines = {
+            "x": np.zeros(total_points, dtype=np.float32),
+            "y": np.zeros(total_points, dtype=np.float32),
+            "lengths": np.zeros(num_polylines, dtype=np.int32),
+            "scenario_id": np.zeros(num_polylines, dtype=np.int32),
+        }
+
+        binding.vec_get_road_edge_polylines(
+            self.c_envs,
+            polylines["x"],
+            polylines["y"],
+            polylines["lengths"],
+            polylines["scenario_id"],
+        )
+
+        return polylines
+
     def render(self):
         binding.vec_render(self.c_envs, 0)
 
@@ -727,7 +783,13 @@ def calculate_area(p1, p2, p3):
     return 0.5 * abs((p1["x"] - p3["x"]) * (p2["y"] - p1["y"]) - (p1["x"] - p2["x"]) * (p3["y"] - p1["y"]))
 
 
-def simplify_polyline(geometry, polyline_reduction_threshold):
+def dist(a, b):
+    dx = a["x"] - b["x"]
+    dy = a["y"] - b["y"]
+    return dx * dx + dy * dy
+
+
+def simplify_polyline(geometry, polyline_reduction_threshold, max_segment_length):
     """Simplify the given polyline using a method inspired by Visvalingham-Whyatt, optimized for Python."""
     num_points = len(geometry)
     if num_points < 3:
@@ -756,8 +818,7 @@ def simplify_polyline(geometry, polyline_reduction_threshold):
             point2 = geometry[k_1]
             point3 = geometry[k_2]
             area = calculate_area(point1, point2, point3)
-
-            if area < polyline_reduction_threshold:
+            if area < polyline_reduction_threshold and dist(point1, point3) <= max_segment_length:
                 skip[k_1] = True
                 skip_changed = True
                 k = k_2
@@ -786,8 +847,6 @@ def save_map_binary(map_data, output_file, unique_map_id):
             f.write(struct.pack("i", track_index))
 
         # Count total entities
-        print(len(map_data.get("objects", [])))
-        print(len(map_data.get("roads", [])))
         num_objects = len(map_data.get("objects", []))
         num_roads = len(map_data.get("roads", []))
         # num_entities = num_objects + num_roads
@@ -869,7 +928,7 @@ def save_map_binary(map_data, output_file, unique_map_id):
                 road_type = 15
             # breakpoint()
             if len(geometry) > 10 and road_type <= 16:
-                geometry = simplify_polyline(geometry, 0.1)
+                geometry = simplify_polyline(geometry, 0.1, 250)
             size = len(geometry)
             # breakpoint()
             if road_type >= 0 and road_type <= 3:
@@ -916,32 +975,66 @@ def load_map(map_name, unique_map_id, binary_output=None):
         save_map_binary(map_data, binary_output, unique_map_id)
 
 
-def process_all_maps():
-    """Process all maps and save them as binaries"""
+def _process_single_map(args):
+    """Worker function to process a single map file"""
+    i, map_path, binary_path = args
+    try:
+        load_map(str(map_path), i, str(binary_path))
+        return (i, map_path.name, True, None)
+    except Exception as e:
+        return (i, map_path.name, False, str(e))
+
+
+def process_all_maps(
+    data_folder="data/processed/training",
+    max_maps=50_000,
+    num_workers=None,
+):
+    """Process all maps and save them as binaries using multiprocessing
+
+    Args:
+        data_folder: Path to the folder containing JSON map files
+        max_maps: Maximum number of maps to process
+        num_workers: Number of parallel workers (defaults to cpu_count())
+    """
     from pathlib import Path
 
-    # Create the binaries directory if it doesn't exist
-    binary_dir = Path("resources/drive/binaries")
-    binary_dir.mkdir(parents=True, exist_ok=True)
+    if num_workers is None:
+        num_workers = cpu_count()
 
     # Path to the training data
-    data_dir = Path("data/processed/training")
+    data_dir = Path(data_folder)
+    dataset_name = data_dir.name
+
+    # Create the binaries directory if it doesn't exist
+    binary_dir = Path(f"resources/drive/binaries/{dataset_name}")
+    binary_dir.mkdir(parents=True, exist_ok=True)
 
     # Get all JSON files in the training directory
     json_files = sorted(data_dir.glob("*.json"))
 
-    print(f"Found {len(json_files)} JSON files")
-
-    # Process each JSON file
-    for i, map_path in enumerate(json_files[:10000]):
-        binary_file = f"map_{i:03d}.bin"  # Use zero-padded numbers for consistent sorting
+    # Prepare arguments for parallel processing
+    tasks = []
+    for i, map_path in enumerate(json_files[:max_maps]):
+        binary_file = f"map_{i:03d}.bin"
         binary_path = binary_dir / binary_file
+        tasks.append((i, map_path, binary_path))
 
-        print(f"Processing {map_path.name} -> {binary_file}")
-        # try:
-        load_map(str(map_path), i, str(binary_path))
-        # except Exception as e:
-        #     print(f"Error processing {map_path.name}: {e}")
+    # Process maps in parallel with progress bar
+    with Pool(num_workers) as pool:
+        results = list(
+            tqdm(pool.imap(_process_single_map, tasks), total=len(tasks), desc="Processing maps", unit="map")
+        )
+
+    # Collect statistics
+    successful = sum(1 for _, _, success, _ in results if success)
+    failed = sum(1 for _, _, success, _ in results if not success)
+
+    if failed > 0:
+        print(f"\nFailed {failed}/{len(results)} files:")
+        for i, name, success, error in results:
+            if not success:
+                print(f"  {name}: {error}")
 
 
 def test_performance(timeout=10, atn_cache=1024, num_agents=1024):
@@ -976,4 +1069,9 @@ def test_performance(timeout=10, atn_cache=1024, num_agents=1024):
 
 if __name__ == "__main__":
     # test_performance()
-    process_all_maps()
+    # Process the train dataset
+    process_all_maps(data_folder="/data/processed/training")
+    # Process the validation/test dataset
+    # process_all_maps(data_folder="data/processed/validation")
+    # # Process the validation_interactive dataset
+    # process_all_maps(data_folder="data/processed/validation_interactive")

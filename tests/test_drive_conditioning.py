@@ -12,7 +12,13 @@ import pytest
 )
 def test_no_conditioning(dynamics_model, base_dim, total_dim):
     """Test that condition_type='none' works for both dynamics models."""
-    env = Drive(num_agents=4, condition_type="none", num_maps=1, dynamics_model=dynamics_model, scenario_length=91)
+    env = Drive(
+        num_agents=4,
+        conditioning={"type": "none"},
+        num_maps=1,
+        dynamics_model=dynamics_model,
+        scenario_length=91,
+    )
     assert env.single_observation_space.shape[0] == base_dim + 63 * 7 + 200 * 7
     assert not env.reward_conditioned
     assert not env.entropy_conditioned
@@ -32,13 +38,15 @@ def test_reward_conditioning(dynamics_model, base_dim):
     """Test that RC adds 3 dimensions and weights are in range for both dynamics models."""
     env = Drive(
         num_agents=4,
-        condition_type="reward",
-        collision_weight_lb=-1.0,
-        collision_weight_ub=0.0,
-        offroad_weight_lb=-1.0,
-        offroad_weight_ub=0.0,
-        goal_weight_lb=0.0,
-        goal_weight_ub=1.0,
+        conditioning={
+            "type": "reward",
+            "collision_weight_lb": -1.0,
+            "collision_weight_ub": 0.0,
+            "offroad_weight_lb": -1.0,
+            "offroad_weight_ub": 0.0,
+            "goal_weight_lb": 0.0,
+            "goal_weight_ub": 1.0,
+        },
         num_maps=1,
         dynamics_model=dynamics_model,
         scenario_length=91,
@@ -64,9 +72,11 @@ def test_entropy_conditioning(dynamics_model, base_dim):
     """Test that EC adds 1 dimension and weight is in range for both dynamics models."""
     env = Drive(
         num_agents=4,
-        condition_type="entropy",
-        entropy_weight_lb=0.0,
-        entropy_weight_ub=0.1,
+        conditioning={
+            "type": "entropy",
+            "entropy_weight_lb": 0.0,
+            "entropy_weight_ub": 0.1,
+        },
         num_maps=1,
         dynamics_model=dynamics_model,
         scenario_length=91,
@@ -90,9 +100,11 @@ def test_discount_conditioning(dynamics_model, base_dim):
     """Test that DC adds 1 dimension and weight is in range for both dynamics models."""
     env = Drive(
         num_agents=4,
-        condition_type="discount",
-        discount_weight_lb=0.9,
-        discount_weight_ub=0.99,
+        conditioning={
+            "type": "discount",
+            "discount_weight_lb": 0.9,
+            "discount_weight_ub": 0.99,
+        },
         num_maps=1,
         dynamics_model=dynamics_model,
         scenario_length=91,
@@ -116,17 +128,19 @@ def test_combined_conditioning(dynamics_model, base_dim):
     """Test that RC + EC + DC work together for both dynamics models."""
     env = Drive(
         num_agents=4,
-        condition_type="all",
-        collision_weight_lb=-1.0,
-        collision_weight_ub=0.0,
-        offroad_weight_lb=-1.0,
-        offroad_weight_ub=0.0,
-        goal_weight_lb=0.0,
-        goal_weight_ub=1.0,
-        entropy_weight_lb=0.0,
-        entropy_weight_ub=0.1,
-        discount_weight_lb=0.9,
-        discount_weight_ub=0.99,
+        conditioning={
+            "type": "all",
+            "collision_weight_lb": -1.0,
+            "collision_weight_ub": 0.0,
+            "offroad_weight_lb": -1.0,
+            "offroad_weight_ub": 0.0,
+            "goal_weight_lb": 0.0,
+            "goal_weight_ub": 1.0,
+            "entropy_weight_lb": 0.0,
+            "entropy_weight_ub": 0.1,
+            "discount_weight_lb": 0.9,
+            "discount_weight_ub": 0.99,
+        },
         num_maps=1,
         dynamics_model=dynamics_model,
         scenario_length=91,

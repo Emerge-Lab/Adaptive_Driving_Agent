@@ -19,10 +19,10 @@ def run_training_test(env_name, config_overrides, target_steps=10000, test_name=
                 "device": "cpu",
                 "compile": False,
                 "total_timesteps": 100000,
-                "batch_size": 128,
+                "batch_size": 64,
                 "bptt_horizon": 8,
-                "minibatch_size": 128,
-                "max_minibatch_size": 128,
+                "minibatch_size": 64,
+                "max_minibatch_size": 64,
                 "update_epochs": 1,
                 "render": False,
                 "checkpoint_interval": 999999,
@@ -41,8 +41,10 @@ def run_training_test(env_name, config_overrides, target_steps=10000, test_name=
         args["env"].update(
             {
                 "num_agents": 8,
+                "num_ego_agents": 8,
                 "action_type": "discrete",
                 "num_maps": 1,
+                "map_dir": "resources/drive/binaries/training",
             }
         )
 

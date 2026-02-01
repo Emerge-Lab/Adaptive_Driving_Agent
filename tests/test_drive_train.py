@@ -26,10 +26,10 @@ def test_drive_training():
                 "device": "cpu",
                 "compile": False,
                 "total_timesteps": 100000,
-                "batch_size": 128,
+                "batch_size": 64,
                 "bptt_horizon": 8,
-                "minibatch_size": 128,
-                "max_minibatch_size": 128,
+                "minibatch_size": 64,
+                "max_minibatch_size": 64,
                 "update_epochs": 1,
                 "render": False,
                 "checkpoint_interval": 999999,
@@ -48,8 +48,12 @@ def test_drive_training():
         args["env"].update(
             {
                 "num_agents": 8,  # 1 env * 8 agents = 8 total <= 16 segments
+                "num_ego_agents": 8,  # Must match num_agents for population play
                 "action_type": "discrete",
                 "num_maps": 1,
+                "map_dir": "resources/drive/binaries/training",
+                "init_mode": "create_all_valid",
+                "control_mode": "control_agents",
             }
         )
 
