@@ -7,7 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --account=torch_pr_355_tandon_priority
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=48
 #SBATCH --gres=gpu:1
 #SBATCH --array=0-15
 
@@ -53,6 +53,11 @@ singularity exec --nv \
    cd /scratch/mmk9418/projects/Adaptive_Driving_Agent
    source .venv/bin/activate
 
+   # Start GPU heartbeat in background (for RL training which is CPU-bound)
+   nice -n 19 python scripts/gpu_heartbeat.py &
+   HEARTBEAT_PID=\$!
+   echo \"Started GPU Heartbeat with PID: \$HEARTBEAT_PID\"
+
    puffer train puffer_adaptive_drive --wandb --env.num-maps 1000 \
      --env.conditioning.type none \
      --env.co-player-enabled 1 \
@@ -62,4 +67,6 @@ singularity exec --nv \
      --env.co-player-policy.conditioning.discount-weight-ub $DISCOUNT_UB \
      --env.co-player-policy.conditioning.entropy-weight-lb $ENTROPY_LB \
      --env.co-player-policy.conditioning.entropy-weight-ub $ENTROPY_UB
+
+   kill \$HEARTBEAT_PID
  "

@@ -989,6 +989,7 @@ def process_all_maps(
     data_folder="data/processed/training",
     max_maps=50_000,
     num_workers=None,
+    shuffle=False,
 ):
     """Process all maps and save them as binaries using multiprocessing
 
@@ -996,8 +997,12 @@ def process_all_maps(
         data_folder: Path to the folder containing JSON map files
         max_maps: Maximum number of maps to process
         num_workers: Number of parallel workers (defaults to cpu_count())
+        shuffle: If True, shuffle the JSON files before assigning map IDs.
+                 This ensures that when using num_maps < total, you get
+                 a random mix of all source maps instead of alphabetically first ones.
     """
     from pathlib import Path
+    import random
 
     if num_workers is None:
         num_workers = cpu_count()
@@ -1012,6 +1017,10 @@ def process_all_maps(
 
     # Get all JSON files in the training directory
     json_files = sorted(data_dir.glob("*.json"))
+
+    if shuffle:
+        json_files = list(json_files)
+        random.shuffle(json_files)
 
     # Prepare arguments for parallel processing
     tasks = []
