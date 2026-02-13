@@ -344,11 +344,12 @@ class PuffeRL:
         
         if config["use_transformer"]:
             h = self.policy.hidden_size
+            context_length = config.get("context_window", 91)
             for k in self.transformer_context:
-                # Reset to empty context at episode start
                 n = self.transformer_context[k].shape[0]
-                self.transformer_context[k] = torch.zeros(n, 0, h, device=device)
-                self.transformer_position[k] = torch.zeros(n, dtype=torch.long, device=device)
+                # Pre-allocate full buffer instead of empty
+                self.transformer_context[k] = torch.zeros(n, context_length, h, device=device)
+                self.transformer_position[k] = torch.zeros(1, dtype=torch.long, device=device)
 
         self.full_rows = 0
         while self.full_rows < self.segments:
@@ -605,7 +606,10 @@ class PuffeRL:
             
             # Handle action sampling based on observation shape
             if config["use_rnn"] or config["use_transformer"]:
-                # Actions are already in [B, T, ...] shape
+
+                # Add this right before calling sample_logits
+                if isinstance(logits, tuple):
+                    logits = logits[0]
                 actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(
                     logits, 
                     action=mb_actions

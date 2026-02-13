@@ -280,7 +280,6 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
 
     def create_causal_mask(self, seq_len, device):
         """Create causal attention mask"""
-        # Upper triangular matrix of -inf (mask future positions)
         mask = torch.triu(
             torch.full((seq_len, seq_len), float('-inf'), device=device),
             diagonal=1
@@ -292,100 +291,70 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
         buffer_name = f'_causal_mask_{T}'
         if hasattr(self, buffer_name):
             return getattr(self, buffer_name).to(device)
-        # Fallback for uncommon lengths
         return self.create_causal_mask(T, device)
 
     def create_episode_mask(self, terminals, seq_len):
-        """Create mask that prevents attending across episode boundaries
-        
-        Args:
-            terminals: [B, T] tensor of terminal flags
-            seq_len: sequence length T
-            
-        Returns:
-            mask: [B, T, T] attention mask
-        """
+        """Episode mask which ensures that you arent attending over episode boundaries"""
         B = terminals.shape[0]
         device = terminals.device
         
-        # Compute episode IDs by cumulative sum of terminals
-        # Shift by 1 so terminal states are in the same episode as preceding states
-        episode_ids = torch.cat([
-            torch.zeros(B, 1, device=device),
-            terminals[:, :-1]
-        ], dim=1).cumsum(dim=1)
+        episode_ids = torch.nn.functional.pad(terminals[:, :-1], (1, 0)).cumsum(dim=1)
         
-        # Create mask: can only attend within same episode
-        # [B, T, 1] == [B, 1, T] -> [B, T, T]
-        episode_mask = episode_ids.unsqueeze(2) == episode_ids.unsqueeze(1)
+        mask_allow = episode_ids.unsqueeze(2) == episode_ids.unsqueeze(1)
         
-        # Convert to additive mask (-inf where attention not allowed)
-        mask = torch.zeros(B, seq_len, seq_len, device=device)
-        mask.masked_fill_(~episode_mask, float('-inf'))
-        
-        return mask
+        return torch.where(mask_allow, 
+                        torch.zeros(1, device=device), 
+                        torch.full((1,), float('-inf'), device=device))
+
 
     def forward_eval(self, observations, state):
-        """Optimized forward for eval - minimal context"""
         B = observations.shape[0]
         device = observations.device
         
-        # Encode observations
         hidden = self.policy.encode_observations(observations, state=state)
         hidden = self.input_projection(hidden)
         
-        # For eval, just use last N observations (don't accumulate unbounded)
         if "transformer_context" not in state or state["transformer_context"] is None:
-            # Start with just current observation
-            context = hidden.unsqueeze(1)  # [B, 1, D]
+            context = torch.zeros(B, self.context_length, self.hidden_size, device=device)
+            pos = torch.zeros(1, dtype=torch.long, device=device)
         else:
-            prev_context = state["transformer_context"]
+            context = state["transformer_context"]
+            pos = state.get("transformer_position",
+                            torch.zeros(1, dtype=torch.long, device=device))
             
-            # CHECK: If cached context has wrong shape, reinitialize
-            if prev_context.shape[-1] != self.hidden_size:
-                print(f"Warning: Cached context has wrong shape {prev_context.shape[-1]}, expected {self.hidden_size}. Reinitializing.")
-                context = hidden.unsqueeze(1)
-            else:
-                context = torch.cat([prev_context, hidden.unsqueeze(1)], dim=1)
-                # Keep only last context_length observations
-                if context.shape[1] > self.context_length:
-                    context = context[:, -self.context_length:, :]
+            if (context.shape[-1] != self.hidden_size or 
+                context.shape[0] != B or
+                context.shape[1] != self.context_length):
+                context = torch.zeros(B, self.context_length, self.hidden_size, device=device)
+                pos = torch.zeros(1, dtype=torch.long, device=device)
         
-        seq_len = context.shape[1]
         
-        # Skip transformer for very short sequences
-        if seq_len <= 2:
-            # Not enough context for transformer to help
-            hidden = context[:, -1, :]
-        else:
-            # Add positional embeddings
-            context = context + self.positional_embedding[:, :seq_len, :]
-            
-            # Simple causal mask
-            causal_mask = self.create_causal_mask(seq_len, device)
-            
-            # Apply transformer
-            output = self.transformer(context, mask=causal_mask, is_causal=True)
-            output = self.output_norm(output)
-            hidden = output[:, -1, :]
+        write_idx = (pos % self.context_length).long()
+        context[:, write_idx, :] = hidden.unsqueeze(1)
+        pos = pos + 1
         
-        # Update state
-        state["transformer_context"] = context.detach()
-        state["hidden"] = hidden
+        pos_embed = self.positional_embedding[:, :self.context_length]
+        context_with_pos = context + pos_embed
         
-        # Decode
-        logits, values = self.policy.decode_actions(hidden)
+        causal_mask = self.get_causal_mask(self.context_length, device)
+        
+        output = self.transformer(context_with_pos, mask=causal_mask, is_causal=True)
+        output = self.output_norm(output)
+        
+        read_idx = ((pos - 1) % self.context_length).long()
+        hidden_out = output[:, read_idx, :].squeeze(1)  
+        
+        state["transformer_context"] = context
+        state["transformer_position"] = pos
+        state["hidden"] = hidden_out
+        
+        logits, values = self.policy.decode_actions(hidden_out)
         return logits, values
 
     def forward(self, observations, state):
-        """Forward function for training - optimized version
-        
-        Processes sequences in parallel for efficient training.
-        """
         x = observations
         device = x.device
         
-        # Simplified shape parsing
         if x.ndim == len(self.obs_shape) + 1:
             B, T = x.shape[0], 1
         elif x.ndim == len(self.obs_shape) + 2:
@@ -393,62 +362,50 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
         else:
             raise ValueError(f"Invalid input tensor shape: {x.shape}")
         
-        # Flatten batch and time for encoding
         x_flat = x.view(B * T, *self.obs_shape)
         hidden = self.policy.encode_observations(x_flat, state)
         
-        # Reshape to [B, T, D] and project
         hidden = hidden.view(B, T, self.input_size)
         hidden = self.input_projection(hidden)
         
-        # Truncate to context length if needed
-        if T > self.context_length:
-            hidden = hidden[:, -self.context_length:]
-            T = self.context_length
+        # Remove dynamic truncation - use clamp instead of if
+        T_actual = min(T, self.context_length)  # Python int, fine
+        if T_actual < T:
+            hidden = hidden[:, -T_actual:]
+            T = T_actual
         
-        # Add positional embeddings (cached slice)
         hidden = hidden + self.positional_embedding[:, :T]
         
-        causal_mask = self.create_causal_mask(seq_len, device)
+        use_episode_mask = "terminals" in state and state["terminals"] is not None
         
-        # Handle episode boundary mask if needed
-        if "terminals" in state and state["terminals"] is not None:
+        if not use_episode_mask:
+            causal_mask = self.get_causal_mask(T, device)
+            hidden = self.transformer(hidden, mask=causal_mask, is_causal=True)
+        else:
             terminals = state["terminals"]
             if terminals.shape[1] > T:
                 terminals = terminals[:, -T:]
-            
+            causal_mask = self.get_causal_mask(T, device)
             episode_mask = self.create_episode_mask(terminals, T)
-            
-            # Combine masks
-            attn_mask = causal_mask.unsqueeze(0) + episode_mask  # (B, T, T)
-            
-            # Optimized expansion for multi-head attention
-            # More efficient than reshape -> expand -> reshape
+            attn_mask = causal_mask.unsqueeze(0) + episode_mask
             attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
-            is_causal = False
-        else:
-            attn_mask = causal_mask
-            is_causal = True
+            hidden = self.transformer(hidden, mask=attn_mask, is_causal=False)
         
-        # Apply transformer
-        hidden = self.transformer(hidden, mask=attn_mask, is_causal=is_causal)
         hidden = self.output_norm(hidden)
-        
-        # Flatten for action decoding (use view instead of reshape when possible)
         flat_hidden = hidden.contiguous().view(B * T, self.hidden_size)
         
-        # Decode actions
         logits, values = self.policy.decode_actions(flat_hidden)
         values = values.view(B, T)
         
-        # Update state (compute context length once)
+        # Use Python int for context_len - no sync
         context_len = min(T, self.context_length)
         state["hidden"] = hidden
         state["transformer_context"] = hidden[:, -context_len:].detach()
-        state["transformer_position"] = torch.full((B,), context_len - 1, dtype=torch.long, device=device)
+        state["transformer_position"] = torch.full(
+            (B,), context_len - 1, dtype=torch.long, device=device
+        )
         
         return logits, values
-
 class Convolutional(nn.Module):
     def __init__(
         self,
