@@ -12,6 +12,9 @@ class AdaptiveDrivingAgent(Drive):
         kwargs["ini_file"] = "pufferlib/config/ocean/adaptive.ini"
         kwargs["adaptive_driving_agent"] = True
 
+        # Remove goal_radius_end - it's used by training loop for curriculum, not Drive
+        kwargs.pop("goal_radius_end", None)
+
         kwargs["resample_frequency"] = self.k_scenarios * self.scenario_length
         self.episode_length = kwargs["resample_frequency"]
         # print(f"resample frequency is ", kwargs["resample_frequency"], flush=True)

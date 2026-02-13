@@ -1,7 +1,48 @@
 #define Env Drive
 #define MY_SHARED
 #define MY_PUT
+
+#include <Python.h>
+
+// Forward declaration for custom methods
+static PyObject *vec_set_goal_radius(PyObject *self, PyObject *args);
+
+#define MY_METHODS {"vec_set_goal_radius", vec_set_goal_radius, METH_VARARGS, "Set goal radius for all environments in the vector"}
+
 #include "binding.h"
+
+// Set goal_radius for all environments in a VecEnv (for curriculum learning)
+static PyObject *vec_set_goal_radius(PyObject *self, PyObject *args) {
+    if (PyTuple_Size(args) != 2) {
+        PyErr_SetString(PyExc_TypeError, "vec_set_goal_radius requires 2 arguments (vec_handle, goal_radius)");
+        return NULL;
+    }
+
+    PyObject *handle_obj = PyTuple_GetItem(args, 0);
+    if (!PyObject_TypeCheck(handle_obj, &PyLong_Type)) {
+        PyErr_SetString(PyExc_TypeError, "vec_handle must be an integer");
+        return NULL;
+    }
+
+    VecEnv *vec = (VecEnv *)PyLong_AsVoidPtr(handle_obj);
+    if (!vec || vec->num_envs <= 0) {
+        PyErr_SetString(PyExc_ValueError, "Invalid vec_env handle");
+        return NULL;
+    }
+
+    PyObject *radius_obj = PyTuple_GetItem(args, 1);
+    if (!PyFloat_Check(radius_obj) && !PyLong_Check(radius_obj)) {
+        PyErr_SetString(PyExc_TypeError, "goal_radius must be a number");
+        return NULL;
+    }
+    float goal_radius = (float)PyFloat_AsDouble(radius_obj);
+
+    for (int i = 0; i < vec->num_envs; i++) {
+        vec->envs[i]->goal_radius = goal_radius;
+    }
+
+    Py_RETURN_NONE;
+}
 
 static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
     PyObject *obs = PyDict_GetItemString(kwargs, "observations");

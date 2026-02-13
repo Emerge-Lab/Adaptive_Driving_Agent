@@ -679,6 +679,10 @@ class PuffeRL:
             # **{f'performance/{k}': dist_sum(v['elapsed'], device) for k, v in self.profile},
         }
 
+        # Log curriculum learning metrics if available
+        if hasattr(self.vecenv.driver_env, "goal_radius"):
+            logs["curriculum/goal_radius"] = self.vecenv.driver_env.goal_radius
+
         if torch.distributed.is_initialized():
             if torch.distributed.get_rank() != 0:
                 self.logger.log(logs, agent_steps)
@@ -1121,8 +1125,23 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     train_config = dict(**args["train"], env=env_name, eval=args.get("eval", {}))
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
+    # Goal radius curriculum learning (for adaptive driving)
+    goal_radius_start = args["env"].get("goal_radius", 2.0)
+    goal_radius_end = args["env"].get("goal_radius_end", goal_radius_start)  # Default: no curriculum
+    use_goal_radius_curriculum = goal_radius_start != goal_radius_end
+    last_goal_radius = goal_radius_start
+
     all_logs = []
     while pufferl.global_step < train_config["total_timesteps"]:
+        # Update goal radius based on training progress (curriculum learning)
+        if use_goal_radius_curriculum and hasattr(vecenv.driver_env, "set_goal_radius"):
+            progress = pufferl.global_step / train_config["total_timesteps"]
+            current_goal_radius = goal_radius_start + (goal_radius_end - goal_radius_start) * progress
+            # Only update if changed significantly (avoid unnecessary calls)
+            if abs(current_goal_radius - last_goal_radius) > 0.01:
+                vecenv.driver_env.set_goal_radius(current_goal_radius)
+                last_goal_radius = current_goal_radius
+
         if train_config["device"] == "cuda":
             torch.compiler.cudagraph_mark_step_begin()
         pufferl.evaluate()

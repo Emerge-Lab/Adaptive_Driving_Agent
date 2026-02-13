@@ -774,6 +774,11 @@ class Drive(pufferlib.PufferEnv):
     def render(self):
         binding.vec_render(self.c_envs, 0)
 
+    def set_goal_radius(self, goal_radius):
+        """Set goal radius for all environments (used for curriculum learning)."""
+        self.goal_radius = goal_radius
+        binding.vec_set_goal_radius(self.c_envs, float(goal_radius))
+
     def close(self):
         binding.vec_close(self.c_envs)
 
