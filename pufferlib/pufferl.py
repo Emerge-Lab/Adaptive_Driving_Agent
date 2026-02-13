@@ -76,7 +76,10 @@ class PuffeRL:
         # Vecenv info
         self.adaptive_driving_agent = getattr(vecenv.driver_env, "env_name", None) == "adaptive_drive"
         if self.adaptive_driving_agent:
-            config["bptt_horizon"] = vecenv.driver_env.episode_length
+            if config["use_rnn"]:
+                config["bptt_horizon"] = vecenv.driver_env.episode_length
+            elif config["use_transformer"]:
+                config["context_window"] = vecenv.driver_env.episode_length
 
         vecenv.async_reset(seed)
         obs_space = vecenv.single_observation_space
@@ -86,7 +89,10 @@ class PuffeRL:
         if self.population_play:
             total_ego_agents = vecenv.num_ego_agents
             agents_for_calc = total_ego_agents
-            batch_size = vecenv.driver_env.num_ego_agents * config["bptt_horizon"] * vecenv.num_workers
+            if config["use_rnn"]:
+                batch_size = vecenv.driver_env.num_ego_agents * config["bptt_horizon"] * vecenv.num_workers
+            if config["use_transformer"]:
+                batch_size = vecenv.driver_env.num_ego_agents * config["context_window"] * vecenv.num_workers
             config["batch_size"] = batch_size  ## this is dynamic and based on ego agents
         else:
             agents_for_calc = total_agents
@@ -95,16 +101,30 @@ class PuffeRL:
         self.total_agents = total_agents
 
         # Experience
-        if config["batch_size"] == "auto" and config["bptt_horizon"] == "auto":
-            raise pufferlib.APIUsageError("Must specify batch_size or bptt_horizon")
+        if config["batch_size"] == "auto" and config.get("bptt_horizon", "auto") == "auto" and config.get("context_window", "auto") == "auto":
+            raise pufferlib.APIUsageError("Must specify batch_size, bptt_horizon, or context_window")
         elif config["batch_size"] == "auto":
-            config["batch_size"] = agents_for_calc * config["bptt_horizon"]
-        elif config["bptt_horizon"] == "auto":
+            if config["use_rnn"]:
+                config["batch_size"] = agents_for_calc * config["bptt_horizon"]
+            elif config["use_transformer"]:
+                config["batch_size"] = agents_for_calc * config["context_window"]
+        elif config.get("bptt_horizon", "auto") == "auto" and config["use_rnn"]:
             config["bptt_horizon"] = config["batch_size"] // agents_for_calc
+        elif config.get("context_window", "auto") == "auto" and config["use_transformer"]:
+            config["context_window"] = config["batch_size"] // agents_for_calc
 
         batch_size = config["batch_size"]
-        horizon = config["bptt_horizon"]
-        print(f"----   horizon is {horizon}   -----", flush=True)
+        
+        # Set horizon based on model type
+        if config["use_rnn"]:
+            horizon = config["bptt_horizon"]
+        elif config["use_transformer"]:
+            horizon = config["context_window"]
+        else:
+            horizon = config.get("bptt_horizon", config.get("context_window", 1))
+        
+        config["bptt_horizon"] = horizon  # For backward compatibility
+
         segments = batch_size // horizon
         self.segments = segments
         if not self.population_play:
@@ -158,6 +178,32 @@ class PuffeRL:
                 n = vecenv.agents_per_batch
                 self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
                 self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
+        
+        # TRANSFORMER
+        if config["use_transformer"]:
+            h = policy.hidden_size
+            context_len = config["context_window"]
+            
+            if self.population_play:
+                n = vecenv.ego_agents_per_batch  # Use ego agents per batch
+                num_chunks = total_ego_agents // n
+                # Initialize transformer context buffers
+                self.transformer_context = {
+                    i * n: torch.zeros(n, 0, h, device=device) for i in range(num_chunks)
+                }
+                self.transformer_position = {
+                    i * n: torch.zeros(n, dtype=torch.long, device=device) for i in range(num_chunks)
+                }
+            else:
+                n = vecenv.agents_per_batch
+                num_chunks = total_agents // n
+                # Initialize transformer context buffers
+                self.transformer_context = {
+                    i * n: torch.zeros(n, 0, h, device=device) for i in range(num_chunks)
+                }
+                self.transformer_position = {
+                    i * n: torch.zeros(n, dtype=torch.long, device=device) for i in range(num_chunks)
+                }
 
         # Minibatching & gradient accumulation
         if self.adaptive_driving_agent:
@@ -182,7 +228,7 @@ class PuffeRL:
         self.minibatch_segments = self.minibatch_size // horizon
         if self.minibatch_segments * horizon != self.minibatch_size:
             raise pufferlib.APIUsageError(
-                f"minibatch_size {self.minibatch_size} must be divisible by bptt_horizon {horizon}"
+                f"minibatch_size {self.minibatch_size} must be divisible by horizon {horizon}"
             )
 
         # Torch compile
@@ -190,7 +236,8 @@ class PuffeRL:
         self.policy = policy
         if config["compile"]:
             self.policy = torch.compile(policy, mode=config["compile_mode"])
-            self.policy.forward_eval = torch.compile(policy, mode=config["compile_mode"])
+            if hasattr(policy, 'forward_eval'):
+                self.policy.forward_eval = torch.compile(policy.forward_eval, mode=config["compile_mode"])
             pufferlib.pytorch.sample_logits = torch.compile(
                 pufferlib.pytorch.sample_logits, mode=config["compile_mode"]
             )
@@ -220,6 +267,7 @@ class PuffeRL:
             raise ValueError(f"Unknown optimizer: {config['optimizer']}")
 
         self.optimizer = optimizer
+        
         # Logging
         self.logger = logger
         if logger is None:
@@ -263,6 +311,7 @@ class PuffeRL:
         self.stats = defaultdict(list)
         self.last_stats = defaultdict(list)
         self.losses = {}
+        
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
@@ -287,10 +336,20 @@ class PuffeRL:
         config = self.config
         device = config["device"]
 
+        # Reset hidden states for both RNN and Transformer
         if config["use_rnn"]:
             for k in self.lstm_h:
                 self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
+        
+        if config["use_transformer"]:
+            h = self.policy.hidden_size
+            context_length = config.get("context_window", 91)
+            for k in self.transformer_context:
+                n = self.transformer_context[k].shape[0]
+                # Pre-allocate full buffer instead of empty
+                self.transformer_context[k] = torch.zeros(n, context_length, h, device=device)
+                self.transformer_position[k] = torch.zeros(1, dtype=torch.long, device=device)
 
         self.full_rows = 0
         while self.full_rows < self.segments:
@@ -345,10 +404,21 @@ class PuffeRL:
                     env_id=env_id,
                     mask=mask,
                 )
+                # Get appropriate batch key for state lookup
+                if self.population_play:
+                    batch_size = self.vecenv.ego_agents_per_batch
+                else:
+                    batch_size = self.vecenv.agents_per_batch
+                state_key = (env_id.start // batch_size) * batch_size
 
                 if config["use_rnn"]:
-                    state["lstm_h"] = self.lstm_h[env_id.start]
-                    state["lstm_c"] = self.lstm_c[env_id.start]
+                    state["lstm_h"] = self.lstm_h[state_key]
+                    state["lstm_c"] = self.lstm_c[state_key]
+                
+                if config["use_transformer"]:
+                    state["transformer_context"] = self.transformer_context[state_key]
+                    state["transformer_position"] = self.transformer_position[state_key]
+                    # Note: terminals not needed for eval since we're doing single-step inference
 
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
@@ -356,18 +426,37 @@ class PuffeRL:
 
             profile("eval_copy", epoch)
             with torch.no_grad():
+                # Update hidden states after forward pass
                 if config["use_rnn"]:
-                    # Use the same lstm_key calculation
                     if self.population_play:
                         batch_size = self.vecenv.ego_agents_per_batch
                     else:
                         batch_size = self.vecenv.agents_per_batch
 
                     lstm_key = (env_id.start // batch_size) * batch_size
-
                     self.lstm_h[lstm_key] = state["lstm_h"]
                     self.lstm_c[lstm_key] = state["lstm_c"]
+                
+                if config["use_transformer"]:
+                    if self.population_play:
+                        batch_size = self.vecenv.ego_agents_per_batch
+                    else:
+                        batch_size = self.vecenv.agents_per_batch
 
+                    transformer_key = (env_id.start // batch_size) * batch_size
+                    self.transformer_context[transformer_key] = state["transformer_context"]
+                    self.transformer_position[transformer_key] = state["transformer_position"]
+                    
+                    # Reset transformer context on episode boundaries
+                    if done_mask.any():
+                        done_indices = torch.where(torch.from_numpy(done_mask))[0]
+                        if len(done_indices) > 0:
+                            batch_start_in_group = env_id.start % batch_size
+                            global_indices = batch_start_in_group + done_indices
+                            valid_mask = global_indices < self.transformer_position[transformer_key].shape[0]
+                            valid_indices = global_indices[valid_mask]
+                            if len(valid_indices) > 0:
+                                self.transformer_position[transformer_key][valid_indices] = -1
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
                 batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
@@ -385,7 +474,9 @@ class PuffeRL:
 
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
-                if l + 1 >= config["bptt_horizon"]:
+                # Use appropriate horizon based on model type
+                horizon = config.get("context_window") if config["use_transformer"] else config["bptt_horizon"]
+                if l + 1 >= horizon:
                     num_full = env_id.stop - env_id.start
                     self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config["device"]).int()
                     self.ep_lengths[env_id] = 0
@@ -407,12 +498,17 @@ class PuffeRL:
                         self.stats[k].append(v)
 
             profile("env", epoch)
-
             self.vecenv.send(action)
 
         profile("eval_misc", epoch)
         self.free_idx = self.total_agents
-        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
+        
+        if self.population_play:
+            total_agents = self.vecenv.num_ego_agents
+        else:
+            total_agents = self.total_agents
+        
+        self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.ep_lengths.zero_()
         profile.end()
         return self.stats
@@ -487,17 +583,43 @@ class PuffeRL:
             mb_advantages = advantages[idx]
 
             profile("train_forward", epoch)
-            if not config["use_rnn"]:
+            
+            # Handle observation reshaping based on model type
+            if not config["use_rnn"] and not config["use_transformer"]:
+                # Flatten for non-recurrent models
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
             state = dict(
                 action=mb_actions,
-                lstm_h=None,
-                lstm_c=None,
             )
 
+            # Add appropriate state based on model type
+            if config["use_rnn"]:
+                state["lstm_h"] = None
+                state["lstm_c"] = None
+            elif config["use_transformer"]:
+                state["transformer_context"] = None
+                state["transformer_position"] = None
+                state["terminals"] = mb_terminals  # For episode boundary masking
+
             logits, newvalue = self.policy(mb_obs, state)
-            actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+            
+            # Handle action sampling based on observation shape
+            if config["use_rnn"] or config["use_transformer"]:
+
+                # Add this right before calling sample_logits
+                if isinstance(logits, tuple):
+                    logits = logits[0]
+                actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(
+                    logits, 
+                    action=mb_actions
+                )
+            else:
+                # Need to flatten actions for non-recurrent models
+                actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(
+                    logits, 
+                    action=mb_actions.reshape(-1, *mb_actions.shape[2:]) if len(mb_actions.shape) > 2 else mb_actions
+                )
 
             profile("train_misc", epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
@@ -515,6 +637,8 @@ class PuffeRL:
                 mb_gammas = gammas[idx]
             else:
                 mb_gammas = torch.full((len(idx),), config["gamma"], device=device, dtype=torch.float32)
+            
+            # Recompute advantages with new ratios
             adv = compute_puff_advantage(
                 mb_values,
                 mb_rewards,
@@ -1526,7 +1650,6 @@ def load_env(env_name, args):
     make_env = env_module.env_creator(env_name)
     return pufferlib.vector.make(make_env, env_kwargs=args["env"], **args["vec"])
 
-
 def load_policy(args, vecenv, env_name=""):
     package = args["package"]
     module_name = "pufferlib.ocean" if package == "ocean" else f"pufferlib.environments.{package}"
@@ -1536,9 +1659,19 @@ def load_policy(args, vecenv, env_name=""):
     policy_cls = getattr(env_module.torch, args["policy_name"])
     policy = policy_cls(vecenv.driver_env, **args["policy"])
 
-    rnn_name = args["rnn_name"]
-    if rnn_name is not None:
-        rnn_cls = getattr(env_module.torch, args["rnn_name"])
+    # Handle both RNN and Transformer wrappers
+    rnn_name = args.get("rnn_name")
+    transformer_name = args.get("transformer_name")
+    
+    if transformer_name is not None:
+        # Load transformer wrapper
+        print("Available attributes in env_module.torch:")
+        print(dir(env_module.torch))
+        transformer_cls = getattr(env_module.torch, transformer_name)
+        policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
+    elif rnn_name is not None:
+        # Load RNN wrapper
+        rnn_cls = getattr(env_module.torch, rnn_name)
         policy = rnn_cls(vecenv.driver_env, policy, **args["rnn"])
 
     policy = policy.to(device)
