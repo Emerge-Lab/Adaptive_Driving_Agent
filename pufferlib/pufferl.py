@@ -78,8 +78,9 @@ class PuffeRL:
         if self.adaptive_driving_agent:
             if config["use_rnn"]:
                 config["bptt_horizon"] = vecenv.driver_env.episode_length
-            elif config["use_transformer"]:
+            if config["use_transformer"]:
                 config["context_window"] = vecenv.driver_env.episode_length
+                config["bptt_horizon"] = vecenv.driver_env.episode_length ## think this might be used somewhere downstream, better safe than sorry
 
         vecenv.async_reset(seed)
         obs_space = vecenv.single_observation_space
