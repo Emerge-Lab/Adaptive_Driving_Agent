@@ -79,8 +79,8 @@ class PuffeRL:
             if config["use_rnn"]:
                 config["bptt_horizon"] = vecenv.driver_env.episode_length
             if config["use_transformer"]:
-                config["context_window"] = vecenv.driver_env.episode_length
-                config["bptt_horizon"] = vecenv.driver_env.episode_length ## think this might be used somewhere downstream, better safe than sorry
+                config["context_window"] = self.context_length = vecenv.driver_env.episode_length
+                config["bptt_horizon"] = vecenv.driver_env.episode_length ## this is used downstream so you need to define it too
 
         vecenv.async_reset(seed)
         obs_space = vecenv.single_observation_space
@@ -183,7 +183,6 @@ class PuffeRL:
         # TRANSFORMER
         if config["use_transformer"]:
             h = policy.hidden_size
-            context_len = config["context_window"]
             
             if self.population_play:
                 n = vecenv.ego_agents_per_batch  # Use ego agents per batch
@@ -345,11 +344,10 @@ class PuffeRL:
         
         if config["use_transformer"]:
             h = self.policy.hidden_size
-            context_length = config.get("context_window", 91)
             for k in self.transformer_context:
                 n = self.transformer_context[k].shape[0]
                 # Pre-allocate full buffer instead of empty
-                self.transformer_context[k] = torch.zeros(n, context_length, h, device=device)
+                self.transformer_context[k] = torch.zeros(n, self.context_length, h, device=device)
                 self.transformer_position[k] = torch.zeros(1, dtype=torch.long, device=device)
 
         self.full_rows = 0
@@ -1666,9 +1664,8 @@ def load_policy(args, vecenv, env_name=""):
     
     if transformer_name is not None:
         # Load transformer wrapper
-        print("Available attributes in env_module.torch:")
-        print(dir(env_module.torch))
         transformer_cls = getattr(env_module.torch, transformer_name)
+        args["transformer"]["context_length"] = vecenv.driver_env.episode_length
         policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
     elif rnn_name is not None:
         # Load RNN wrapper
