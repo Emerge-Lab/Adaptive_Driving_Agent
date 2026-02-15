@@ -2229,19 +2229,20 @@ void c_reset(Drive *env) {
     env->timestep = env->init_steps;
     set_start_position(env);
 
-    // Initialize all conditioning weights even when no conditioning (lb=ub)
-    for (int i = 0; i < env->active_agent_count; i++) {
-        env->collision_weights[i] = ((float)rand() / RAND_MAX) * (env->collision_weight_ub - env->collision_weight_lb) +
-                                    env->collision_weight_lb;
-        env->offroad_weights[i] =
-            ((float)rand() / RAND_MAX) * (env->offroad_weight_ub - env->offroad_weight_lb) + env->offroad_weight_lb;
-        env->goal_weights[i] =
-            ((float)rand() / RAND_MAX) * (env->goal_weight_ub - env->goal_weight_lb) + env->goal_weight_lb;
-        env->entropy_weights[i] =
-            ((float)rand() / RAND_MAX) * (env->entropy_weight_ub - env->entropy_weight_lb) + env->entropy_weight_lb;
-        env->discount_weights[i] =
-            ((float)rand() / RAND_MAX) * (env->discount_weight_ub - env->discount_weight_lb) + env->discount_weight_lb;
-    }
+    // Don't resample conditioning weights between scenarios - keep them the same
+    // so the agent can adapt to the same task across scenarios
+    // for (int i = 0; i < env->active_agent_count; i++) {
+    //     env->collision_weights[i] = ((float)rand() / RAND_MAX) * (env->collision_weight_ub - env->collision_weight_lb) +
+    //                                 env->collision_weight_lb;
+    //     env->offroad_weights[i] =
+    //         ((float)rand() / RAND_MAX) * (env->offroad_weight_ub - env->offroad_weight_lb) + env->offroad_weight_lb;
+    //     env->goal_weights[i] =
+    //         ((float)rand() / RAND_MAX) * (env->goal_weight_ub - env->goal_weight_lb) + env->goal_weight_lb;
+    //     env->entropy_weights[i] =
+    //         ((float)rand() / RAND_MAX) * (env->entropy_weight_ub - env->entropy_weight_lb) + env->entropy_weight_lb;
+    //     env->discount_weights[i] =
+    //         ((float)rand() / RAND_MAX) * (env->discount_weight_ub - env->discount_weight_lb) + env->discount_weight_lb;
+    // }
 
     for (int x = 0; x < env->active_agent_count; x++) {
         env->logs[x] = (Log){0};
