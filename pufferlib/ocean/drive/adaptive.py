@@ -12,6 +12,11 @@ class AdaptiveDrivingAgent(Drive):
         kwargs["ini_file"] = "pufferlib/config/ocean/adaptive.ini"
         kwargs["adaptive_driving_agent"] = True
 
+        # Human replay mode: disable co-players, use human trajectories for other agents
+        human_replay_mode = kwargs.pop("human_replay_mode", False)
+        if human_replay_mode:
+            kwargs["co_player_enabled"] = False
+
         # Remove goal_radius_end - it's used by training loop for curriculum, not Drive
         kwargs.pop("goal_radius_end", None)
 

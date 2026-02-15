@@ -3,7 +3,7 @@
 #SBATCH --output=/scratch/mmk9418/logs/%A_%a_%x.out
 #SBATCH --error=/scratch/mmk9418/logs/%A_%a_%x.err
 #SBATCH --mem=128GB
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --account=torch_pr_355_tandon_priority

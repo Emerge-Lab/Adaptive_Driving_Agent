@@ -52,10 +52,12 @@ class Drive(pufferlib.PufferEnv):
         co_player_policy={},
         map_dir="resources/drive/binaries/training",
         use_all_maps=False,
+        report_all_scenarios=False,
     ):
         # env
         self.dt = dt
         self.render_mode = render_mode
+        self.report_all_scenarios = report_all_scenarios
         self.num_maps = num_maps
         self.report_interval = report_interval
         self.reward_vehicle_collision = reward_vehicle_collision
@@ -575,8 +577,9 @@ class Drive(pufferlib.PufferEnv):
             if log:
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
-                    # Only append to info if we're in the 0th scenario
-                    if self.current_scenario == 0:
+                    # For training: only report 0-shot (scenario 0) metrics
+                    # For evaluation: report all scenarios when report_all_scenarios=True
+                    if self.current_scenario == 0 or self.report_all_scenarios:
                         info.append(log)
                 else:
                     # Non-adaptive mode: always append

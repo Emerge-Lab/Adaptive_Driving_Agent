@@ -123,6 +123,11 @@ def main():
     parser.add_argument("--adaptive-driving-agent", type=int, default=0, help="Enable adaptive driving agent")
     parser.add_argument("--k-scenarios", type=int, default=1, help="Number of scenarios (default 1 for non-adaptive)")
     parser.add_argument("--dynamics-model", type=str, default="classic")
+    parser.add_argument(
+        "--human-replay",
+        action="store_true",
+        help="Enable human replay mode (other agents follow logged trajectories instead of neural network co-players)",
+    )
     args = parser.parse_args()
 
     num_batches = (args.num_rollouts + args.batch_size - 1) // args.batch_size
@@ -137,22 +142,36 @@ def main():
     print(f"  Num agents per env: {args.num_agents}")
     print(f"  Adaptive agent: {bool(args.adaptive_driving_agent)}")
     print(f"  K scenarios: {args.k_scenarios}")
-    print(f"  Output: {args.output}\n")
+    print(f"  Human replay mode: {args.human_replay}")
+    print(f"  Output: {args.output}")
     print(f"  Dynamics Model: {args.dynamics_model}")
 
     # Load policy
     print("Loading policy...")
     env_name = "puffer_adaptive_drive" if args.adaptive_driving_agent else "puffer_drive"
     make_env = env_creator(env_name)
-    temp_env = make_env(
-        num_agents=64,
-        num_maps=args.num_maps,
-        scenario_length=91,
-        co_player_cond_type=args.condition_type,
-        adaptive_driving_agent=args.adaptive_driving_agent,
-        k_scenarios=args.k_scenarios,
-        dynamics_model=args.dynamics_model,
-    )
+    # Build temp env kwargs
+    temp_env_kwargs = {
+        "num_agents": 64,
+        "num_maps": args.num_maps,
+        "scenario_length": 91,
+        "adaptive_driving_agent": args.adaptive_driving_agent,
+        "k_scenarios": args.k_scenarios,
+        "dynamics_model": args.dynamics_model,
+    }
+    # Human replay mode: disable co-players, use human trajectories
+    if args.human_replay:
+        temp_env_kwargs["human_replay_mode"] = True
+        temp_env_kwargs["max_controlled_agents"] = 1
+        # Use control_vehicles with max_controlled_agents=1 to control one agent
+        # and let others follow human trajectories (expert replay)
+        temp_env_kwargs["control_mode"] = "control_vehicles"
+
+    # For adaptive agents, report metrics for all scenarios (not just 0-shot)
+    if args.adaptive_driving_agent:
+        temp_env_kwargs["report_all_scenarios"] = True
+
+    temp_env = make_env(**temp_env_kwargs)
 
     base_policy = Drive(temp_env, input_size=64, hidden_size=256)
     policy = Recurrent(temp_env, base_policy, input_size=256, hidden_size=256).to(args.device)
@@ -177,10 +196,19 @@ def main():
         "adaptive_driving_agent": args.adaptive_driving_agent,
         "k_scenarios": args.k_scenarios,
         "dynamics_model": args.dynamics_model,
-        "co_player_cond_type": args.condition_type,
-        "co_player_cond_entropy_ub": 0.05,
-        "co_player_cond_discount_lb": 0.40,
     }
+
+    # Human replay mode: disable co-players, use human trajectories
+    if args.human_replay:
+        env_kwargs["human_replay_mode"] = True
+        env_kwargs["max_controlled_agents"] = args.max_controlled_agents if args.max_controlled_agents > 0 else 1
+        # Use control_vehicles with max_controlled_agents to control N agents
+        # and let others follow human trajectories (expert replay)
+        env_kwargs["control_mode"] = "control_vehicles"
+
+    # For adaptive agents, report metrics for all scenarios (not just 0-shot)
+    if args.adaptive_driving_agent:
+        env_kwargs["report_all_scenarios"] = True
 
     print("Running evaluation...")
     for batch_idx in range(num_batches):
@@ -326,9 +354,7 @@ def main():
 
         # Helper function to compute delta percentage
         def compute_delta_percent(first_val, last_val):
-            if abs(first_val) < 0.0001:
-                return 0.0
-            return (last_val - first_val) / first_val * 100.0
+            return (last_val - first_val) 
 
         # Compute all delta metrics
         results["ada_delta_completion_rate"] = compute_delta_percent(
