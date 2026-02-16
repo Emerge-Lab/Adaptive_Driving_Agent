@@ -354,7 +354,7 @@ def main():
 
         # Helper function to compute delta percentage
         def compute_delta_percent(first_val, last_val):
-            return (last_val - first_val) 
+            return last_val - first_val
 
         # Compute all delta metrics
         results["ada_delta_completion_rate"] = compute_delta_percent(
