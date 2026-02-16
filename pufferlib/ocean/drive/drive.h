@@ -2229,7 +2229,6 @@ void c_reset(Drive *env) {
     env->timestep = env->init_steps;
     set_start_position(env);
 
-    // Initialize all conditioning weights even when no conditioning (lb=ub)
     for (int i = 0; i < env->active_agent_count; i++) {
         env->collision_weights[i] = ((float)rand() / RAND_MAX) * (env->collision_weight_ub - env->collision_weight_lb) +
                                     env->collision_weight_lb;

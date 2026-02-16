@@ -52,10 +52,12 @@ class Drive(pufferlib.PufferEnv):
         co_player_policy={},
         map_dir="resources/drive/binaries/training",
         use_all_maps=False,
+        report_all_scenarios=False,
     ):
         # env
         self.dt = dt
         self.render_mode = render_mode
+        self.report_all_scenarios = report_all_scenarios
         self.num_maps = num_maps
         self.report_interval = report_interval
         self.reward_vehicle_collision = reward_vehicle_collision
@@ -575,8 +577,9 @@ class Drive(pufferlib.PufferEnv):
             if log:
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
-                    # Only append to info if we're in the 0th scenario
-                    if self.current_scenario == 0:
+                    # For training: only report 0-shot (scenario 0) metrics
+                    # For evaluation: report all scenarios when report_all_scenarios=True
+                    if self.current_scenario == 0 or self.report_all_scenarios:
                         info.append(log)
                 else:
                     # Non-adaptive mode: always append
@@ -989,6 +992,7 @@ def process_all_maps(
     data_folder="data/processed/training",
     max_maps=50_000,
     num_workers=None,
+    shuffle=False,
 ):
     """Process all maps and save them as binaries using multiprocessing
 
@@ -996,8 +1000,12 @@ def process_all_maps(
         data_folder: Path to the folder containing JSON map files
         max_maps: Maximum number of maps to process
         num_workers: Number of parallel workers (defaults to cpu_count())
+        shuffle: If True, shuffle the JSON files before assigning map IDs.
+                 This ensures that when using num_maps < total, you get
+                 a random mix of all source maps instead of alphabetically first ones.
     """
     from pathlib import Path
+    import random
 
     if num_workers is None:
         num_workers = cpu_count()
@@ -1012,6 +1020,10 @@ def process_all_maps(
 
     # Get all JSON files in the training directory
     json_files = sorted(data_dir.glob("*.json"))
+
+    if shuffle:
+        json_files = list(json_files)
+        random.shuffle(json_files)
 
     # Prepare arguments for parallel processing
     tasks = []

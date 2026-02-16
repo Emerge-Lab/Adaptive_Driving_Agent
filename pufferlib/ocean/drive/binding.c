@@ -1,6 +1,8 @@
 #define Env Drive
 #define MY_SHARED
 #define MY_PUT
+
+#include <Python.h>
 #include "binding.h"
 
 static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
