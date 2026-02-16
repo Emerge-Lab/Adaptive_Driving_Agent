@@ -679,10 +679,6 @@ class PuffeRL:
             # **{f'performance/{k}': dist_sum(v['elapsed'], device) for k, v in self.profile},
         }
 
-        # Log curriculum learning metrics if available
-        if hasattr(self.vecenv.driver_env, "goal_radius"):
-            logs["curriculum/goal_radius"] = self.vecenv.driver_env.goal_radius
-
         if torch.distributed.is_initialized():
             if torch.distributed.get_rank() != 0:
                 self.logger.log(logs, agent_steps)
