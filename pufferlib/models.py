@@ -199,7 +199,7 @@ class LSTMWrapper(nn.Module):
         return logits, values
 
 
-class TransformerWrapper(nn.Module): #TransformerWrapper
+class TransformerWrapper(nn.Module):  # TransformerWrapper
     def __init__(
         self,
         env,
@@ -212,7 +212,7 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
         dropout=0.0,
     ):
         """Wraps your policy with a Transformer for temporal modeling.
-        
+
         Args:
             env: Environment instance
             policy: Your Drive policy (must have encode_observations and decode_actions)
@@ -240,9 +240,7 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
             self.input_projection = nn.Identity()
 
         # Learnable positional embeddings
-        self.positional_embedding = nn.Parameter(
-            torch.zeros(1, context_length, hidden_size)
-        )
+        self.positional_embedding = nn.Parameter(torch.zeros(1, context_length, hidden_size))
         nn.init.normal_(self.positional_embedding, std=0.02)
 
         # Transformer encoder
@@ -257,10 +255,10 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # create cache for memory context 
+        # create cache for memory context
         for T in [1, 2, 4, 8, 16, 32, 64, 91, 182, 273, 364, 455]:
-            mask = self.create_causal_mask(T, 'cpu')
-            self.register_buffer(f'_causal_mask_{T}', mask, persistent=False)
+            mask = self.create_causal_mask(T, "cpu")
+            self.register_buffer(f"_causal_mask_{T}", mask, persistent=False)
 
         # Layer norm for output
         self.output_norm = nn.LayerNorm(hidden_size)
@@ -280,15 +278,12 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
 
     def create_causal_mask(self, seq_len, device):
         """Create causal attention mask"""
-        mask = torch.triu(
-            torch.full((seq_len, seq_len), float('-inf'), device=device),
-            diagonal=1
-        )
+        mask = torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=device), diagonal=1)
         return mask
 
     def get_causal_mask(self, T, device):
         """Get cached causal mask or create new one"""
-        buffer_name = f'_causal_mask_{T}'
+        buffer_name = f"_causal_mask_{T}"
         if hasattr(self, buffer_name):
             return getattr(self, buffer_name).to(device)
         return self.create_causal_mask(T, device)
@@ -297,87 +292,84 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
         """Episode mask which ensures that you arent attending over episode boundaries"""
         B = terminals.shape[0]
         device = terminals.device
-        
-        episode_ids = torch.nn.functional.pad(terminals[:, :-1], (1, 0)).cumsum(dim=1)
-        
-        mask_allow = episode_ids.unsqueeze(2) == episode_ids.unsqueeze(1)
-        
-        return torch.where(mask_allow, 
-                        torch.zeros(1, device=device), 
-                        torch.full((1,), float('-inf'), device=device))
 
+        episode_ids = torch.nn.functional.pad(terminals[:, :-1], (1, 0)).cumsum(dim=1)
+
+        mask_allow = episode_ids.unsqueeze(2) == episode_ids.unsqueeze(1)
+
+        return torch.where(mask_allow, torch.zeros(1, device=device), torch.full((1,), float("-inf"), device=device))
 
     def forward_eval(self, observations, state):
         B = observations.shape[0]
         device = observations.device
-        
+
         hidden = self.policy.encode_observations(observations, state=state)
         hidden = self.input_projection(hidden)
-        
+
         if "transformer_context" not in state or state["transformer_context"] is None:
             context = torch.zeros(B, self.context_length, self.hidden_size, device=device)
             pos = torch.zeros(1, dtype=torch.long, device=device)
         else:
             context = state["transformer_context"]
-            pos = state.get("transformer_position",
-                            torch.zeros(1, dtype=torch.long, device=device))
-            
-            if (context.shape[-1] != self.hidden_size or 
-                context.shape[0] != B or
-                context.shape[1] != self.context_length):
+            pos = state.get("transformer_position", torch.zeros(1, dtype=torch.long, device=device))
+
+            if (
+                context.shape[-1] != self.hidden_size
+                or context.shape[0] != B
+                or context.shape[1] != self.context_length
+            ):
                 context = torch.zeros(B, self.context_length, self.hidden_size, device=device)
                 pos = torch.zeros(1, dtype=torch.long, device=device)
-        
-        
+
         write_idx = (pos % self.context_length).long()
         context[:, write_idx, :] = hidden.unsqueeze(1)
         pos = pos + 1
-        
-        pos_embed = self.positional_embedding[:, :self.context_length]
+
+        pos_embed = self.positional_embedding[:, : self.context_length]
         context_with_pos = context + pos_embed
-        
+
         causal_mask = self.get_causal_mask(self.context_length, device)
-        
+
         output = self.transformer(context_with_pos, mask=causal_mask, is_causal=True)
         output = self.output_norm(output)
-        
+
         read_idx = ((pos - 1) % self.context_length).long()
-        hidden_out = output[:, read_idx, :].squeeze(1)  
-        
+        hidden_out = output[:, read_idx, :].squeeze(1)
+
         state["transformer_context"] = context
         state["transformer_position"] = pos
         state["hidden"] = hidden_out
-        
+
         logits, values = self.policy.decode_actions(hidden_out)
         return logits, values
 
     def forward(self, observations, state):
         x = observations
         device = x.device
-        
+
         if x.ndim == len(self.obs_shape) + 1:
             B, T = x.shape[0], 1
         elif x.ndim == len(self.obs_shape) + 2:
             B, T = x.shape[:2]
         else:
             raise ValueError(f"Invalid input tensor shape: {x.shape}")
-        
+
         x_flat = x.view(B * T, *self.obs_shape)
         hidden = self.policy.encode_observations(x_flat, state)
-        
+
         hidden = hidden.view(B, T, self.input_size)
         hidden = self.input_projection(hidden)
-        
+
         # Remove dynamic truncation - use clamp instead of if
         T_actual = min(T, self.context_length)  # Python int, fine
         if T_actual < T:
             hidden = hidden[:, -T_actual:]
             T = T_actual
-        
+
         hidden = hidden + self.positional_embedding[:, :T]
-        
+
         use_episode_mask = "terminals" in state and state["terminals"] is not None
-        
+
         if not use_episode_mask:
             causal_mask = self.get_causal_mask(T, device)
             hidden = self.transformer(hidden, mask=causal_mask, is_causal=True)
@@ -390,22 +382,22 @@ class TransformerWrapper(nn.Module): #TransformerWrapper
             attn_mask = causal_mask.unsqueeze(0) + episode_mask
             attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
             hidden = self.transformer(hidden, mask=attn_mask, is_causal=False)
-        
+
         hidden = self.output_norm(hidden)
         flat_hidden = hidden.contiguous().view(B * T, self.hidden_size)
-        
+
         logits, values = self.policy.decode_actions(flat_hidden)
         values = values.view(B, T)
-        
+
         # Use Python int for context_len - no sync
         context_len = min(T, self.context_length)
         state["hidden"] = hidden
         state["transformer_context"] = hidden[:, -context_len:].detach()
-        state["transformer_position"] = torch.full(
-            (B,), context_len - 1, dtype=torch.long, device=device
-        )
-        
+        state["transformer_position"] = torch.full((B,), context_len - 1, dtype=torch.long, device=device)
+
         return logits, values
+
+
 class Convolutional(nn.Module):
     def __init__(
         self,
