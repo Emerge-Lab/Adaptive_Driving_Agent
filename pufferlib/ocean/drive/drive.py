@@ -407,7 +407,7 @@ class Drive(pufferlib.PufferEnv):
             self.agent_offsets, self.map_ids, self.num_envs = my_shared_tuple
             self.ego_ids = [i for i in range(self.agent_offsets[-1])]
             if len(self.ego_ids) != self.num_agents:
-                raise ValueError("mismatch between number of ego agents and number of agents")
+                raise ValueError(f"mismatch between number of ego agents {len(self.ego_ids)} and number of agents {self.num_agents}")
             self.local_co_player_ids = [[] for i in range(self.num_envs)]
             self.local_ego_ids = [[0] for i in range(self.num_envs)]
 

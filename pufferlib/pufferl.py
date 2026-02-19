@@ -76,9 +76,9 @@ class PuffeRL:
         # Vecenv info
         self.adaptive_driving_agent = getattr(vecenv.driver_env, "env_name", None) == "adaptive_drive"
         if self.adaptive_driving_agent:
-            if config["use_rnn"]:
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
                 config["bptt_horizon"] = vecenv.driver_env.episode_length
-            if config["use_transformer"]:
+            if config.get("policy_architecture", "Recurrent") == "Transformer":
                 config["context_window"] = self.context_length = vecenv.driver_env.episode_length
                 config["bptt_horizon"] = (
                     vecenv.driver_env.episode_length
@@ -92,9 +92,9 @@ class PuffeRL:
         if self.population_play:
             total_ego_agents = vecenv.num_ego_agents
             agents_for_calc = total_ego_agents
-            if config["use_rnn"]:
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
                 batch_size = vecenv.driver_env.num_ego_agents * config["bptt_horizon"] * vecenv.num_workers
-            if config["use_transformer"]:
+            if config.get("policy_architecture", "Recurrent") == "Transformer":
                 batch_size = vecenv.driver_env.num_ego_agents * config["context_window"] * vecenv.num_workers
             config["batch_size"] = batch_size  ## this is dynamic and based on ego agents
         else:
@@ -111,21 +111,21 @@ class PuffeRL:
         ):
             raise pufferlib.APIUsageError("Must specify batch_size, bptt_horizon, or context_window")
         elif config["batch_size"] == "auto":
-            if config["use_rnn"]:
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
                 config["batch_size"] = agents_for_calc * config["bptt_horizon"]
-            elif config["use_transformer"]:
+            elif config.get("policy_architecture", "Recurrent") == "Transformer":
                 config["batch_size"] = agents_for_calc * config["context_window"]
-        elif config.get("bptt_horizon", "auto") == "auto" and config["use_rnn"]:
+        elif config.get("bptt_horizon", "auto") == "auto" and config.get("policy_architecture", "Recurrent") == "Recurrent":
             config["bptt_horizon"] = config["batch_size"] // agents_for_calc
-        elif config.get("context_window", "auto") == "auto" and config["use_transformer"]:
+        elif config.get("context_window", "auto") == "auto" and config.get("policy_architecture", "Recurrent") == "Transformer":
             config["context_window"] = config["batch_size"] // agents_for_calc
 
         batch_size = config["batch_size"]
 
         # Set horizon based on model type
-        if config["use_rnn"]:
+        if config.get("policy_architecture", "Recurrent") == "Recurrent":
             horizon = config["bptt_horizon"]
-        elif config["use_transformer"]:
+        elif config.get("policy_architecture", "Recurrent") == "Transformer":
             horizon = config["context_window"]
         else:
             horizon = config.get("bptt_horizon", config.get("context_window", 1))
@@ -174,7 +174,7 @@ class PuffeRL:
             ensure_drive_binary()
 
         # LSTM
-        if config["use_rnn"]:
+        if config.get("policy_architecture", "Recurrent") == "Recurrent":
             h = policy.hidden_size
             if self.population_play:
                 n = vecenv.ego_agents_per_batch  # Use ego agents per batch
@@ -187,7 +187,7 @@ class PuffeRL:
                 self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
 
         # TRANSFORMER
-        if config["use_transformer"]:
+        if config.get("policy_architecture", "Recurrent") == "Transformer":
             h = policy.hidden_size
 
             if self.population_play:
@@ -339,12 +339,12 @@ class PuffeRL:
         device = config["device"]
 
         # Reset hidden states for both RNN and Transformer
-        if config["use_rnn"]:
+        if config.get("policy_architecture", "Recurrent") == "Recurrent":
             for k in self.lstm_h:
                 self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
 
-        if config["use_transformer"]:
+        if config.get("policy_architecture", "Recurrent") == "Transformer":
             h = self.policy.hidden_size
             for k in self.transformer_context:
                 n = self.transformer_context[k].shape[0]
@@ -412,11 +412,11 @@ class PuffeRL:
                     batch_size = self.vecenv.agents_per_batch
                 state_key = (env_id.start // batch_size) * batch_size
 
-                if config["use_rnn"]:
+                if config.get("policy_architecture", "Recurrent") == "Recurrent":
                     state["lstm_h"] = self.lstm_h[state_key]
                     state["lstm_c"] = self.lstm_c[state_key]
 
-                if config["use_transformer"]:
+                if config.get("policy_architecture", "Recurrent") == "Transformer":
                     state["transformer_context"] = self.transformer_context[state_key]
                     state["transformer_position"] = self.transformer_position[state_key]
                     # Note: terminals not needed for eval since we're doing single-step inference
@@ -428,7 +428,7 @@ class PuffeRL:
             profile("eval_copy", epoch)
             with torch.no_grad():
                 # Update hidden states after forward pass
-                if config["use_rnn"]:
+                if config.get("policy_architecture", "Recurrent") == "Recurrent":
                     if self.population_play:
                         batch_size = self.vecenv.ego_agents_per_batch
                     else:
@@ -438,7 +438,7 @@ class PuffeRL:
                     self.lstm_h[lstm_key] = state["lstm_h"]
                     self.lstm_c[lstm_key] = state["lstm_c"]
 
-                if config["use_transformer"]:
+                if config.get("policy_architecture", "Recurrent") == "Transformer":
                     if self.population_play:
                         batch_size = self.vecenv.ego_agents_per_batch
                     else:
@@ -476,7 +476,7 @@ class PuffeRL:
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
                 # Use appropriate horizon based on model type
-                horizon = config.get("context_window") if config["use_transformer"] else config["bptt_horizon"]
+                horizon = config.get("context_window") if config.get("policy_architecture", "Recurrent") == "Transformer" else config["bptt_horizon"]
                 if l + 1 >= horizon:
                     num_full = env_id.stop - env_id.start
                     self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config["device"]).int()
@@ -586,7 +586,7 @@ class PuffeRL:
             profile("train_forward", epoch)
 
             # Handle observation reshaping based on model type
-            if not config["use_rnn"] and not config["use_transformer"]:
+            if not config.get("policy_architecture", "Recurrent") == "Recurrent" and not config.get("policy_architecture", "Recurrent") == "Transformer":
                 # Flatten for non-recurrent models
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
@@ -595,18 +595,18 @@ class PuffeRL:
             )
 
             # Add appropriate state based on model type
-            if config["use_rnn"]:
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
                 state["lstm_h"] = None
                 state["lstm_c"] = None
-            elif config["use_transformer"]:
+            elif config.get("policy_architecture", "Recurrent") == "Transformer":
                 state["transformer_context"] = None
                 state["transformer_position"] = None
                 state["terminals"] = mb_terminals  # For episode boundary masking
 
             logits, newvalue = self.policy(mb_obs, state)
-
+            
             # Handle action sampling based on observation shape
-            if config["use_rnn"] or config["use_transformer"]:
+            if config.get("policy_architecture", "Recurrent") == "Recurrent" or config.get("policy_architecture", "Recurrent") == "Transformer":
                 # Add this right before calling sample_logits
                 if isinstance(logits, tuple):
                     logits = logits[0]

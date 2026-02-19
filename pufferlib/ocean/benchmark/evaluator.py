@@ -619,13 +619,15 @@ class WOSACEvaluator:
 
             plt.savefig(f"trajectory_comparison_agent_{agent_idx}.png")
 
-
 class HumanReplayEvaluator:
     """Evaluates policies against human replays in PufferDrive."""
 
     def __init__(self, config: Dict):
         self.config = config
-        self.sim_steps = 91 - self.config["env"]["init_steps"]
+        k_scenarios = self.config["env"].get("k_scenarios", 1)
+        scenario_length = self.config["env"].get("scenario_length", 91)
+        init_steps = self.config["env"].get("init_steps", 0)
+        self.sim_steps = k_scenarios * scenario_length - init_steps
 
     def rollout(self, args, puffer_env, policy):
         """Roll out policy in env with human replays. Store statistics.
@@ -635,14 +637,12 @@ class HumanReplayEvaluator:
         the policy is with (static) human partners.
 
         Args:
-            args: Config dict with train settings (device, use_rnn, etc.)
+            args: Config dict with train settings (device, use_rnn, policy_architecture, etc.)
             puffer_env: PufferLib environment wrapper
             policy: Trained policy to evaluate
 
         Returns:
-            dict: Aggregated metrics including:
-                - avg_collisions_per_agent: Average collisions per agent
-                - avg_offroad_per_agent: Average offroad events per agent
+            dict: Aggregated metrics including delta metrics for adaptive agents
         """
         import numpy as np
         import torch
@@ -652,26 +652,72 @@ class HumanReplayEvaluator:
         device = args["train"]["device"]
 
         obs, info = puffer_env.reset()
-        state = {}
-        if args["train"]["use_rnn"]:
+        
+        policy_architecture = args["train"].get("policy_architecture", "Recurrent")
+        k_scenarios = args["env"].get("k_scenarios", 1)
+        
+        if policy_architecture == "Recurrent":
             state = dict(
                 lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
                 lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
             )
+        elif policy_architecture == "Transformer":
+            context_length = args["train"].get("context_window", 182)
+            state = dict(
+                transformer_context=torch.zeros(num_agents, context_length, policy.hidden_size, device=device),
+                transformer_position=torch.zeros(1, dtype=torch.long, device=device),
+            )
+        else:
+            state = {}
 
-        for time_idx in range(self.sim_steps):
-            # Step policy
-            with torch.no_grad():
-                ob_tensor = torch.as_tensor(obs).to(device)
-                logits, value = policy.forward_eval(ob_tensor, state)
-                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-                action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
+        collected_infos = []
+        delta_metrics = None
+        
+        # Loop through scenarios
+        for scenario in range(k_scenarios):
+            for time_idx in range(self.sim_steps):
+                # Step policy
+                with torch.no_grad():
+                    ob_tensor = torch.as_tensor(obs).to(device)
+                    logits, value = policy.forward_eval(ob_tensor, state)
+                    action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                    action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
 
-            if isinstance(logits, torch.distributions.Normal):
-                action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
+                if isinstance(logits, torch.distributions.Normal):
+                    action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
 
-            obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
+                obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
+                
+                # Reset transformer context on mid-scenario terminations (not at scenario boundaries)
+                if policy_architecture == "Transformer":
+                    is_last_step = (time_idx == self.sim_steps - 1)
+                    if not is_last_step:
+                        done_mask = dones | truncs
+                        if done_mask.any():
+                            done_indices = np.where(done_mask)[0]
+                            state["transformer_context"][done_indices] = 0.0
 
-            if len(info_list) > 0:  # Happens at the end of episode
-                results = info_list[0]
-                return results
+                # Collect infos
+                if len(info_list) > 0:
+                    for info_dict in info_list:
+                        if isinstance(info_dict, dict):
+                            if "ada_delta_score" in info_dict:
+                                delta_metrics = info_dict
+                            elif "score" in info_dict:
+                                collected_infos.append(info_dict)
+
+        # Return the last info dict which contains delta metrics for adaptive agents
+        if collected_infos:
+            metric_keys = collected_infos[0].keys()
+            aggregated = {}
+            for key in metric_keys:
+                values = [info.get(key, 0) for info in collected_infos]
+                aggregated[key] = np.mean(values)
+            
+            # Merge delta metrics if they exist
+            if delta_metrics:
+                aggregated.update(delta_metrics)
+            
+            return aggregated
+
+        return {}
