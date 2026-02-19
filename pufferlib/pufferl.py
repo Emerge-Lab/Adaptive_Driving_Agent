@@ -115,9 +115,15 @@ class PuffeRL:
                 config["batch_size"] = agents_for_calc * config["bptt_horizon"]
             elif config.get("policy_architecture", "Recurrent") == "Transformer":
                 config["batch_size"] = agents_for_calc * config["context_window"]
-        elif config.get("bptt_horizon", "auto") == "auto" and config.get("policy_architecture", "Recurrent") == "Recurrent":
+        elif (
+            config.get("bptt_horizon", "auto") == "auto"
+            and config.get("policy_architecture", "Recurrent") == "Recurrent"
+        ):
             config["bptt_horizon"] = config["batch_size"] // agents_for_calc
-        elif config.get("context_window", "auto") == "auto" and config.get("policy_architecture", "Recurrent") == "Transformer":
+        elif (
+            config.get("context_window", "auto") == "auto"
+            and config.get("policy_architecture", "Recurrent") == "Transformer"
+        ):
             config["context_window"] = config["batch_size"] // agents_for_calc
 
         batch_size = config["batch_size"]
@@ -476,7 +482,11 @@ class PuffeRL:
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
                 # Use appropriate horizon based on model type
-                horizon = config.get("context_window") if config.get("policy_architecture", "Recurrent") == "Transformer" else config["bptt_horizon"]
+                horizon = (
+                    config.get("context_window")
+                    if config.get("policy_architecture", "Recurrent") == "Transformer"
+                    else config["bptt_horizon"]
+                )
                 if l + 1 >= horizon:
                     num_full = env_id.stop - env_id.start
                     self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config["device"]).int()
@@ -586,7 +596,10 @@ class PuffeRL:
             profile("train_forward", epoch)
 
             # Handle observation reshaping based on model type
-            if not config.get("policy_architecture", "Recurrent") == "Recurrent" and not config.get("policy_architecture", "Recurrent") == "Transformer":
+            if (
+                not config.get("policy_architecture", "Recurrent") == "Recurrent"
+                and not config.get("policy_architecture", "Recurrent") == "Transformer"
+            ):
                 # Flatten for non-recurrent models
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
@@ -604,9 +617,12 @@ class PuffeRL:
                 state["terminals"] = mb_terminals  # For episode boundary masking
 
             logits, newvalue = self.policy(mb_obs, state)
-            
+
             # Handle action sampling based on observation shape
-            if config.get("policy_architecture", "Recurrent") == "Recurrent" or config.get("policy_architecture", "Recurrent") == "Transformer":
+            if (
+                config.get("policy_architecture", "Recurrent") == "Recurrent"
+                or config.get("policy_architecture", "Recurrent") == "Transformer"
+            ):
                 # Add this right before calling sample_logits
                 if isinstance(logits, tuple):
                     logits = logits[0]

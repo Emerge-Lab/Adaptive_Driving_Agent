@@ -619,6 +619,7 @@ class WOSACEvaluator:
 
             plt.savefig(f"trajectory_comparison_agent_{agent_idx}.png")
 
+
 class HumanReplayEvaluator:
     """Evaluates policies against human replays in PufferDrive."""
 
@@ -627,7 +628,7 @@ class HumanReplayEvaluator:
         k_scenarios = self.config["env"].get("k_scenarios", 1)
         scenario_length = self.config["env"].get("scenario_length", 91)
         init_steps = self.config["env"].get("init_steps", 0)
-        self.sim_steps = k_scenarios * scenario_length - init_steps
+        self.sim_steps = scenario_length - init_steps
 
     def rollout(self, args, puffer_env, policy):
         """Roll out policy in env with human replays. Store statistics.
@@ -652,10 +653,10 @@ class HumanReplayEvaluator:
         device = args["train"]["device"]
 
         obs, info = puffer_env.reset()
-        
+
         policy_architecture = args["train"].get("policy_architecture", "Recurrent")
         k_scenarios = args["env"].get("k_scenarios", 1)
-        
+
         if policy_architecture == "Recurrent":
             state = dict(
                 lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
@@ -672,7 +673,7 @@ class HumanReplayEvaluator:
 
         collected_infos = []
         delta_metrics = None
-        
+
         # Loop through scenarios
         for scenario in range(k_scenarios):
             for time_idx in range(self.sim_steps):
@@ -687,10 +688,10 @@ class HumanReplayEvaluator:
                     action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
 
                 obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
-                
+
                 # Reset transformer context on mid-scenario terminations (not at scenario boundaries)
                 if policy_architecture == "Transformer":
-                    is_last_step = (time_idx == self.sim_steps - 1)
+                    is_last_step = time_idx == self.sim_steps - 1
                     if not is_last_step:
                         done_mask = dones | truncs
                         if done_mask.any():
@@ -713,11 +714,11 @@ class HumanReplayEvaluator:
             for key in metric_keys:
                 values = [info.get(key, 0) for info in collected_infos]
                 aggregated[key] = np.mean(values)
-            
+
             # Merge delta metrics if they exist
             if delta_metrics:
                 aggregated.update(delta_metrics)
-            
+
             return aggregated
 
         return {}

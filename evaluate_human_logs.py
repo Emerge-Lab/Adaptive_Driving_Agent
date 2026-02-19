@@ -99,6 +99,7 @@ def plot_adaptive_metrics(first_metrics, last_metrics, delta_metrics, output_pat
     print(f"\nAdaptive metrics plot saved to {output_path.replace('.json', '_adaptive_metrics.png')}")
     plt.close()
 
+
 def main():
     print("Beginning human evaluations using HumanReplayEvaluator")
     parser = argparse.ArgumentParser()
@@ -130,10 +131,10 @@ def main():
     # Build args dict in the format expected by HumanReplayEvaluator
     env_name = "puffer_adaptive_drive" if args_parsed.adaptive_driving_agent else "puffer_drive"
     make_env = env_creator(env_name)
-    
+
     scenario_length = 91
     context_length = args_parsed.k_scenarios * scenario_length
-    
+
     args = {
         "train": {
             "device": args_parsed.device,
@@ -153,11 +154,11 @@ def main():
             "control_mode": "control_vehicles",
             "episode_length": scenario_length,
             "report_all_scenarios": args_parsed.adaptive_driving_agent,
-            "dynamics_model" : "classic" ,
-            "reward_vehicle_collision" : -0.5,
-            "reward_offroad_collision" : -0.5,
-            "reward_goal" : 1.0,
-            "reward_goal_post_respawn" : 0.25,
+            "dynamics_model": "classic",
+            "reward_vehicle_collision": -0.5,
+            "reward_offroad_collision": -0.5,
+            "reward_goal": 1.0,
+            "reward_goal_post_respawn": 0.25,
         },
         "vec": {
             "backend": "PufferEnv",
@@ -174,19 +175,22 @@ def main():
     # Load policy once
     print("Loading policy...")
     temp_env = make_env(**args["env"])
-    
+
     if args_parsed.policy_architecture == "Recurrent":
         base_policy = Drive(temp_env, input_size=64, hidden_size=256)
         policy = Recurrent(temp_env, base_policy, input_size=256, hidden_size=256).to(args_parsed.device)
     elif args_parsed.policy_architecture == "Transformer":
         base_policy = Drive(temp_env, input_size=128, hidden_size=256)
         policy = Transformer(
-            temp_env, base_policy,
-            input_size=256, hidden_size=256,
-            num_layers=2, num_heads=4,
-            context_length=context_length
+            temp_env,
+            base_policy,
+            input_size=256,
+            hidden_size=256,
+            num_layers=2,
+            num_heads=4,
+            context_length=context_length,
         ).to(args_parsed.device)
-    
+
     state_dict = torch.load(args_parsed.policy_path, map_location=args_parsed.device)
     state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     policy.load_state_dict(state_dict)
@@ -196,12 +200,13 @@ def main():
 
     # Create evaluator
     from pufferlib.ocean.benchmark.evaluator import HumanReplayEvaluator
+
     evaluator = HumanReplayEvaluator(args)
 
     # Run multiple rollouts
     print(f"Running {args_parsed.num_rollouts} rollouts...")
     all_results = []
-    
+
     for rollout_idx in tqdm(range(args_parsed.num_rollouts), desc="Rollouts"):
         # Create fresh env for each rollout
         vecenv = pufferlib.vector.make(
@@ -210,11 +215,11 @@ def main():
             backend=pufferlib.vector.Serial,
             num_envs=1,
         )
-        
+
         # Run single rollout
         results = evaluator.rollout(args, vecenv, policy)
         all_results.append(results)
-        
+
         vecenv.close()
 
     # Aggregate results
@@ -236,11 +241,11 @@ def main():
         for key in delta_keys:
             values = [r.get(key, 0) for r in all_results]
             aggregated[key] = float(np.mean(values))
-        
+
         # Derive last scenario metrics from first + delta
         # Extract first scenario metrics
         first_scenario_keys = [k for k in metric_keys if k not in ["n"]]
-        
+
         # Map metric names to their delta counterparts
         metric_to_delta = {
             "score": "ada_delta_score",
@@ -251,18 +256,16 @@ def main():
             "dnf_rate": "ada_delta_dnf_rate",
             "lane_alignment_rate": "ada_delta_lane_alignment_rate",
         }
-        
+
         # Store first scenario metrics
         for metric_name in metric_to_delta.keys():
             if metric_name in aggregated:
                 aggregated[f"first_scenario_{metric_name}"] = aggregated[metric_name]
-        
+
         # Compute last scenario metrics: last = first + delta
         for metric_name, delta_key in metric_to_delta.items():
             if metric_name in aggregated and delta_key in aggregated:
-                aggregated[f"last_scenario_{metric_name}"] = (
-                    aggregated[metric_name] + aggregated[delta_key]
-                )
+                aggregated[f"last_scenario_{metric_name}"] = aggregated[metric_name] + aggregated[delta_key]
 
     # Save results
     with open(args_parsed.output, "w") as f:
@@ -290,6 +293,7 @@ def main():
 
     print(f"\nSaved to {args_parsed.output}")
     import sys
+
     sys.exit(0)
 
 
