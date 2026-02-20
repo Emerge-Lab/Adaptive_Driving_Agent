@@ -44,7 +44,7 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
                 "--policy-path",
                 latest_cpt,
                 "--policy-architecture",
-                "Transformer",
+                config.get("policy_architecture", "Transformer"),
                 "--adaptive-driving-agent",
                 "1",
                 "--k-scenarios",
