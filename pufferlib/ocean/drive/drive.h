@@ -232,6 +232,8 @@ struct Entity {
     // population play
     bool is_ego;
     bool is_co_player;
+
+    int color_idx;
 };
 
 void free_entity(Entity *entity) {
@@ -351,7 +353,7 @@ struct Drive {
     int init_mode;
     int control_mode;
 
-    // Reward conditioning
+    // Reward conditioning (ego)
     bool use_rc;
     float collision_weight_lb;
     float collision_weight_ub;
@@ -362,16 +364,38 @@ struct Drive {
     float *collision_weights;
     float *offroad_weights;
     float *goal_weights;
-    // Entropy conditioning
+    // Entropy conditioning (ego)
     bool use_ec;
     float entropy_weight_lb;
     float entropy_weight_ub;
     float *entropy_weights;
-    // Discount conditioning
+    // Discount conditioning (ego)
     bool use_dc;
     float discount_weight_lb;
     float discount_weight_ub;
     float *discount_weights;
+    // Reward conditioning (co-player) 
+    /// co player conditioning only used in visualisations
+    bool co_player_use_rc;
+    float co_player_collision_weight_lb;
+    float co_player_collision_weight_ub;
+    float co_player_offroad_weight_lb;
+    float co_player_offroad_weight_ub;
+    float co_player_goal_weight_lb;
+    float co_player_goal_weight_ub;
+    float *co_player_collision_weights;
+    float *co_player_offroad_weights;
+    float *co_player_goal_weights;
+    // Entropy conditioning (co-player)
+    bool co_player_use_ec;
+    float co_player_entropy_weight_lb;
+    float co_player_entropy_weight_ub;
+    float *co_player_entropy_weights;
+    // Discount conditioning (co-player)
+    bool co_player_use_dc;
+    float co_player_discount_weight_lb;
+    float co_player_discount_weight_ub;
+    float *co_player_discount_weights;
     // fixed population play
     Log co_player_log;
     Log *co_player_logs;
@@ -1123,31 +1147,35 @@ int collision_check(Drive *env, int agent_idx) {
 
     if (agent->x == INVALID_POSITION)
         return -1;
+    if (agent->respawn_timestep != -1)
+        return -1;
 
     int car_collided_with_index = -1;
 
-    if (agent->respawn_timestep != -1)
-        return car_collided_with_index; // Skip respawning entities
-
     for (int i = 0; i < MAX_AGENTS; i++) {
         int index = -1;
+
         if (i < env->active_agent_count) {
-            index = env->active_agent_indices[i];
-        } else if (i < env->num_actors) {
-            index = env->static_agent_indices[i - env->active_agent_count];
+            if (env->active_agent_indices != NULL)
+                index = env->active_agent_indices[i];
+        } else {
+            int static_idx = i - env->active_agent_count;
+            if (static_idx < env->static_agent_count && env->static_agent_indices != NULL)
+                index = env->static_agent_indices[static_idx];
         }
-        if (index == -1)
+
+        if (index == -1 || index == agent_idx)
             continue;
-        if (index == agent_idx)
-            continue;
+
         Entity *entity = &env->entities[index];
         if (entity->respawn_timestep != -1)
-            continue; // Skip respawning entities
-        float x1 = entity->x;
-        float y1 = entity->y;
-        float dist = ((x1 - agent->x) * (x1 - agent->x) + (y1 - agent->y) * (y1 - agent->y));
-        if (dist > 225.0f)
             continue;
+
+        float dx = entity->x - agent->x;
+        float dy = entity->y - agent->y;
+        if ((dx * dx + dy * dy) > 225.0f)
+            continue;
+
         if (check_aabb_collision(agent, entity)) {
             car_collided_with_index = index;
             break;
@@ -1364,14 +1392,11 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
 }
 
 bool should_control_agent(Drive *env, int agent_idx) {
-    // Check if we have room for more agents or are already at capacity
     if (env->active_agent_count >= env->num_agents) {
         return false;
     }
 
     Entity *entity = &env->entities[agent_idx];
-
-    // TODO: Move this elsewhere or remove
     entity->width *= 0.7f;
     entity->length *= 0.7f;
 
@@ -1407,8 +1432,6 @@ bool should_control_agent(Drive *env, int agent_idx) {
     float sin_heading = sinf(entity->traj_heading[0]);
     float goal_dx = entity->goal_position_x - entity->traj_x[0];
     float goal_dy = entity->goal_position_y - entity->traj_y[0];
-
-    // Transform to agent's local frame
     float local_goal_x = goal_dx * cos_heading + goal_dy * sin_heading;
     float local_goal_y = -goal_dx * sin_heading + goal_dy * cos_heading;
     float distance_to_goal = relative_distance_2d(0, 0, local_goal_x, local_goal_y);
@@ -1562,34 +1585,31 @@ void assign_ego_and_coplayer_roles(Drive *env) {
         for (int i = 0; i < env->num_entities; i++) {
             if (!env->entities[i].mark_as_expert) {
                 env->entities[i].is_ego = 1;
+                env->entities[i].is_co_player = 0;
             }
         }
         return;
     }
 
-    // FIRST: Reset ALL flags for active agents
+    // Reset ALL active agents first
     for (int i = 0; i < env->active_agent_count; i++) {
         int entity_idx = env->active_agent_indices[i];
         env->entities[entity_idx].is_ego = 0;
         env->entities[entity_idx].is_co_player = 0;
     }
 
-    // THEN: Mark ego agents
+    // Mark ego agents — ego_agent_ids holds entity indices directly
     for (int j = 0; j < env->num_ego_agents; j++) {
-        int agent_idx = env->ego_agent_ids[j];
-        if (agent_idx >= 0 && agent_idx < env->active_agent_count) {
-            int entity_idx = env->active_agent_indices[agent_idx];
+        int entity_idx = env->ego_agent_ids[j];
+        if (entity_idx >= 0 && entity_idx < env->num_entities)
             env->entities[entity_idx].is_ego = 1;
-        }
     }
 
-    // FINALLY: Mark co-player agents
+    // Mark co-players — co_player_ids holds entity indices directly
     for (int j = 0; j < env->num_co_players; j++) {
-        int agent_idx = env->co_player_ids[j];
-        if (agent_idx >= 0 && agent_idx < env->active_agent_count) {
-            int entity_idx = env->active_agent_indices[agent_idx];
+        int entity_idx = env->co_player_ids[j];
+        if (entity_idx >= 0 && entity_idx < env->num_entities)
             env->entities[entity_idx].is_co_player = 1;
-        }
     }
 }
 
@@ -1689,13 +1709,6 @@ void allocate(Drive *env) {
     int base_ego_dim = (env->dynamics_model == JERK) ? 10 : 7;
     int conditioning_dims = (env->use_rc ? 3 : 0) + (env->use_ec ? 1 : 0) + (env->use_dc ? 1 : 0);
     int ego_dim = base_ego_dim + conditioning_dims;
-
-    // Always allocate weight arrays for consistency
-    env->collision_weights = (float *)calloc(env->active_agent_count, sizeof(float));
-    env->offroad_weights = (float *)calloc(env->active_agent_count, sizeof(float));
-    env->goal_weights = (float *)calloc(env->active_agent_count, sizeof(float));
-    env->entropy_weights = (float *)calloc(env->active_agent_count, sizeof(float));
-    env->discount_weights = (float *)calloc(env->active_agent_count, sizeof(float));
 
     int max_obs = ego_dim + 7 * (MAX_AGENTS - 1) + 7 * MAX_ROAD_SEGMENT_OBSERVATIONS;
     env->observations = (float *)calloc(env->active_agent_count * max_obs, sizeof(float));
@@ -2055,8 +2068,10 @@ void compute_observations(Drive *env) {
             int index = -1;
             if (j < env->active_agent_count) {
                 index = env->active_agent_indices[j];
-            } else if (j < env->num_actors) {
-                index = env->static_agent_indices[j - env->active_agent_count];
+            } else {
+                int static_idx = j - env->active_agent_count;
+                if (static_idx < env->static_agent_count && env->static_agent_indices != NULL)
+                    index = env->static_agent_indices[static_idx];
             }
             if (index == -1)
                 continue;
