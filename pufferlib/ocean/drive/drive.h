@@ -375,27 +375,6 @@ struct Drive {
     float discount_weight_ub;
     float *discount_weights;
     // Reward conditioning (co-player) 
-    /// co player conditioning only used in visualisations
-    bool co_player_use_rc;
-    float co_player_collision_weight_lb;
-    float co_player_collision_weight_ub;
-    float co_player_offroad_weight_lb;
-    float co_player_offroad_weight_ub;
-    float co_player_goal_weight_lb;
-    float co_player_goal_weight_ub;
-    float *co_player_collision_weights;
-    float *co_player_offroad_weights;
-    float *co_player_goal_weights;
-    // Entropy conditioning (co-player)
-    bool co_player_use_ec;
-    float co_player_entropy_weight_lb;
-    float co_player_entropy_weight_ub;
-    float *co_player_entropy_weights;
-    // Discount conditioning (co-player)
-    bool co_player_use_dc;
-    float co_player_discount_weight_lb;
-    float co_player_discount_weight_ub;
-    float *co_player_discount_weights;
     // fixed population play
     Log co_player_log;
     Log *co_player_logs;
