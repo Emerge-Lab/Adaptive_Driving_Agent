@@ -38,13 +38,17 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
 
         if is_adaptive:
             # Use evaluate_human_logs.py for adaptive agents with human replay
+            # Get policy_architecture from train config section
+            train_config = config.get("train", {})
+            policy_architecture = train_config.get("policy_architecture", config.get("policy_architecture", "Recurrent"))
+
             cmd = [
                 sys.executable,
                 "evaluate_human_logs.py",
                 "--policy-path",
                 latest_cpt,
                 "--policy-architecture",
-                config.get("policy_architecture", "Transformer"),
+                policy_architecture,
                 "--adaptive-driving-agent",
                 "1",
                 "--k-scenarios",
@@ -302,8 +306,36 @@ def render_videos(config, vecenv, logger, epoch, global_step, bin_path):
         env_vars = os.environ.copy()
         env_vars["ASAN_OPTIONS"] = "exitcode=0"
 
+        # Detect if this is an adaptive agent
+        env_name = config.get("env", "")
+        is_adaptive = "adaptive" in env_name
+
+        # Select correct INI file based on agent type
+        if is_adaptive:
+            ini_file = "pufferlib/config/ocean/adaptive.ini"
+        else:
+            ini_file = "pufferlib/config/ocean/drive.ini"
+
         # Base command with only visualization flags (env config comes from INI)
         base_cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x720x24", "./visualize"]
+
+        # Pass the correct INI file
+        base_cmd.extend(["--ini-file", ini_file])
+
+        # Get env config for k_scenarios and co-player settings
+        env_config = config.get("env_config", {})
+
+        # Pass k_scenarios for adaptive agents (longer videos)
+        k_scenarios = env_config.get("k_scenarios", 1)
+        if k_scenarios > 1:
+            base_cmd.extend(["--k-scenarios", str(k_scenarios)])
+
+        # Pass co-player policy if population play is enabled
+        co_player_enabled = env_config.get("co_player_enabled", False)
+        if co_player_enabled:
+            co_player_path = f"resources/drive/{config['env']}_co_player.bin"
+            if os.path.exists(co_player_path):
+                base_cmd.extend(["--co-player-policy", co_player_path])
 
         # Visualization config flags only
         if config.get("show_grid", False):
@@ -405,5 +437,112 @@ def render_videos(config, vecenv, logger, epoch, global_step, bin_path):
 
     finally:
         # Clean up bin weights file
+        if os.path.exists(expected_weights_path):
+            os.remove(expected_weights_path)
+
+
+def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, logger=None, global_step=0):
+    """
+    Render videos for human replay evaluation (1 ego agent + human log trajectories).
+
+    In this mode, only one agent is policy-controlled (the ego), while all other agents
+    follow their logged human trajectories (rendered in GOLD).
+
+    Args:
+        config: Configuration dictionary with env settings
+        policy_bin_path: Path to the policy weights .bin file
+        output_dir: Directory to save output videos
+        num_maps: Number of maps to render
+        logger: Optional logger with wandb attribute for logging
+        global_step: Current training step for wandb logging
+
+    Returns:
+        List of output video paths
+    """
+    if not os.path.exists(policy_bin_path):
+        print(f"Policy weights file does not exist: {policy_bin_path}")
+        return []
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Copy the binary weights to the expected location
+        expected_weights_path = "resources/drive/puffer_drive_weights.bin"
+        os.makedirs(os.path.dirname(expected_weights_path), exist_ok=True)
+        shutil.copy2(policy_bin_path, expected_weights_path)
+
+        env_vars = os.environ.copy()
+        env_vars["ASAN_OPTIONS"] = "exitcode=0"
+
+        # Get env config
+        env_config = config.get("env_config", config.get("env", {}))
+        k_scenarios = env_config.get("k_scenarios", 2)
+
+        # Build command for human replay rendering
+        cmd = [
+            "xvfb-run", "-a", "-s", "-screen 0 1280x720x24", "./visualize",
+            "--ini-file", "pufferlib/config/ocean/adaptive.ini",
+            "--policy-name", expected_weights_path,
+            "--max-controlled-agents", "1",  # Only 1 ego agent
+            "--k-scenarios", str(k_scenarios),
+            "--num-maps", str(num_maps),
+            "--log-trajectories",  # Show human trajectory logs
+            "--zoom-in",
+            "--view", "both",
+            "--output-topdown", "resources/drive/output_topdown.mp4",
+            "--output-agent", "resources/drive/output_agent.mp4",
+        ]
+
+        output_videos = []
+        videos_to_log_world = []
+        videos_to_log_agent = []
+
+        for map_idx in range(num_maps):
+            result = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True, text=True, timeout=600, env=env_vars)
+
+            vids_exist = os.path.exists("resources/drive/output_topdown.mp4") and os.path.exists(
+                "resources/drive/output_agent.mp4"
+            )
+
+            if result.returncode == 0 or (result.returncode == 1 and vids_exist):
+                videos = [
+                    ("resources/drive/output_topdown.mp4", f"human_replay_map{map_idx:02d}_topdown.mp4"),
+                    ("resources/drive/output_agent.mp4", f"human_replay_map{map_idx:02d}_agent.mp4"),
+                ]
+
+                for source_vid, target_filename in videos:
+                    if os.path.exists(source_vid):
+                        target_path = os.path.join(output_dir, target_filename)
+                        shutil.move(source_vid, target_path)
+                        output_videos.append(target_path)
+
+                        if logger and hasattr(logger, "wandb") and logger.wandb:
+                            import wandb
+
+                            if "topdown" in target_filename:
+                                videos_to_log_world.append(wandb.Video(target_path, format="mp4"))
+                            else:
+                                videos_to_log_agent.append(wandb.Video(target_path, format="mp4"))
+            else:
+                print(f"Human replay rendering failed for map {map_idx}: {result.stderr}")
+
+        # Log to wandb
+        if logger and hasattr(logger, "wandb") and logger.wandb and (videos_to_log_world or videos_to_log_agent):
+            payload = {}
+            if videos_to_log_world:
+                payload["eval/human_replay_world_view"] = videos_to_log_world
+            if videos_to_log_agent:
+                payload["eval/human_replay_agent_view"] = videos_to_log_agent
+            logger.wandb.log(payload, step=global_step)
+
+        return output_videos
+
+    except subprocess.TimeoutExpired:
+        print("Human replay rendering timed out")
+        return []
+    except Exception as e:
+        print(f"Failed to render human replay videos: {e}")
+        return []
+    finally:
         if os.path.exists(expected_weights_path):
             os.remove(expected_weights_path)

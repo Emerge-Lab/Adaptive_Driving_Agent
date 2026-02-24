@@ -789,6 +789,38 @@ class PuffeRL:
         ):
             pufferlib.utils.run_human_replay_eval_in_subprocess(self.config, self.logger, self.global_step)
 
+        # Eval rendering for adaptive agents (ego vs human logs)
+        if self.adaptive_driving_agent and self.config["eval"].get("human_replay_eval", False):
+            if self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training:
+                model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
+                model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
+
+                if model_files:
+                    latest_cpt = max(model_files, key=os.path.getctime)
+                    bin_path = f"{model_dir}.bin"
+
+                    try:
+                        export_args = {"env_name": self.config["env"], "load_model_path": latest_cpt, **self.config}
+                        export(
+                            args=export_args,
+                            env_name=self.config["env"],
+                            vecenv=self.vecenv,
+                            policy=self.uncompiled_policy,
+                            path=bin_path,
+                            silent=True,
+                        )
+                        eval_video_dir = os.path.join(model_dir, "eval_videos")
+                        pufferlib.utils.render_human_replay_videos(
+                            config=self.config,
+                            policy_bin_path=bin_path,
+                            output_dir=eval_video_dir,
+                            num_maps=self.config["eval"].get("human_replay_render_num_maps", 3),
+                            logger=self.logger,
+                            global_step=self.global_step,
+                        )
+                    except Exception as e:
+                        print(f"Failed to render eval videos: {e}")
+
     def mean_and_log(self):
         config = self.config
         for k in list(self.stats.keys()):
@@ -1673,17 +1705,16 @@ def load_policy(args, vecenv, env_name=""):
     policy_cls = getattr(env_module.torch, args["policy_name"])
     policy = policy_cls(vecenv.driver_env, **args["policy"])
 
-    # Handle both RNN and Transformer wrappers
+    # Handle both RNN and Transformer wrappers via rnn_name
     rnn_name = args.get("rnn_name")
-    transformer_name = args.get("transformer_name")
 
-    if transformer_name is not None:
+    if rnn_name == "Transformer":
         # Load transformer wrapper
-        transformer_cls = getattr(env_module.torch, transformer_name)
+        transformer_cls = getattr(env_module.torch, rnn_name)
         args["transformer"]["context_length"] = vecenv.driver_env.episode_length
         policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
     elif rnn_name is not None:
-        # Load RNN wrapper
+        # Load RNN wrapper (Recurrent)
         rnn_cls = getattr(env_module.torch, rnn_name)
         policy = rnn_cls(vecenv.driver_env, policy, **args["rnn"])
 
