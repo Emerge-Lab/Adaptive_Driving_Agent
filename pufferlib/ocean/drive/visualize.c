@@ -243,17 +243,7 @@ static CondState build_cond_state(const void* config_ptr, unsigned int* seed) {
 #define CAR_COLOR_EGO       2  // Blue
 #define CAR_COLOR_CO_PLAYER 3  // Yellow
 
-static void assign_agent_roles(Drive* env) {
-    // Clear all agents first
-    for (int i = 0; i < env->num_entities; i++)
-        env->entities[i].is_co_player = false;
-    // Mark ego agents
-    for (int i = 0; i < env->num_ego_agents; i++)
-        env->entities[env->ego_agent_ids[i]].is_co_player = false;
-    // Mark co-players
-    for (int i = 0; i < env->num_co_players; i++)
-        env->entities[env->co_player_ids[i]].is_co_player = true;
-}
+
 
 static void assign_agent_colors(Drive* env) {
     for (int i = 0; i < env->num_ego_agents; i++)
@@ -269,7 +259,11 @@ static int entity_to_active_idx(Drive* env, int entity_idx) {
     }
     return -1;
 }
-
+static int entity_to_active_pos(Drive* env, int entity_id) {
+    for (int k = 0; k < env->active_agent_count; k++)
+        if (env->active_agent_indices[k] == entity_id) return k;
+    return -1;
+}
 static void run_render_loop(Drive* env, Client* client, VideoRecorder* recorder,
                             bool is_topdown, int frame_count, int frame_skip,
                             float map_height, int obs_only, int lasers,
@@ -285,8 +279,8 @@ static void run_render_loop(Drive* env, Client* client, VideoRecorder* recorder,
                             int camera_agent) {
     for (int i = 0; i < frame_count; i++) {
         if (!is_topdown) {
-            int cam_idx = env->active_agent_indices[camera_agent];
-            if (env->entities[cam_idx].respawn_count > 0) break;
+            int cam_pos = entity_to_active_pos(env, camera_agent);
+            if (cam_pos != -1 && env->entities[env->active_agent_indices[cam_pos]].respawn_count > 0) break;
         }
 
         if (i % frame_skip == 0) {
@@ -298,20 +292,12 @@ static void run_render_loop(Drive* env, Client* client, VideoRecorder* recorder,
             WriteFrame(recorder, img_width, img_height);
         }
 
-          if (env->population_play) {
+        if (env->population_play) {
+            // Gather ego observations with conditioning
             for (int j = 0; j < env->num_ego_agents; j++) {
-                int entity_id = env->ego_agent_ids[j];
-
-                int active_pos = -1;
-                for (int k = 0; k < env->active_agent_count; k++) {
-                    if (env->active_agent_indices[k] == entity_id) {
-                        active_pos = k;
-                        break;
-                    }
-                }
-                if (active_pos == -1) continue;
-
-                float* src = &env->observations[active_pos * base_obs];
+                int pos = entity_to_active_pos(env, env->ego_agent_ids[j]);
+                if (pos == -1) continue;
+                float* src = &env->observations[pos * base_obs];
                 float* dst = &ego_obs[j * ego_max_obs];
                 memcpy(dst, src, 7 * sizeof(float));
                 int idx = 7;
@@ -320,20 +306,12 @@ static void run_render_loop(Drive* env, Client* client, VideoRecorder* recorder,
                 if (use_dc)   dst[idx++] = ego_cond[COND_DISCOUNT];
                 memcpy(&dst[idx], &src[7], (base_obs - 7) * sizeof(float));
             }
-            for (int j = 0; j < env->num_co_players; j++) {
-                int entity_id = env->co_player_ids[j];
-                
-                // Find position in active_agent_indices
-                int active_pos = -1;
-                for (int k = 0; k < env->active_agent_count; k++) {
-                    if (env->active_agent_indices[k] == entity_id) {
-                        active_pos = k;
-                        break;
-                    }
-                }
-                if (active_pos == -1) continue;  // safety check
 
-                float* src = &env->observations[active_pos * base_obs];
+            // Gather co-player observations with conditioning
+            for (int j = 0; j < env->num_co_players; j++) {
+                int pos = entity_to_active_pos(env, env->co_player_ids[j]);
+                if (pos == -1) continue;
+                float* src = &env->observations[pos * base_obs];
                 float* dst = &co_obs[j * co_max_obs];
                 memcpy(dst, src, 7 * sizeof(float));
                 int idx = 7;
@@ -346,16 +324,48 @@ static void run_render_loop(Drive* env, Client* client, VideoRecorder* recorder,
             forward(ego_net, ego_obs, ego_actions);
             forward(co_net,  co_obs,  co_actions);
 
-            for (int j = 0; j < env->num_ego_agents; j++)
-                ((int*)env->actions)[env->ego_agent_ids[j]] = ego_actions[j];
-            for (int j = 0; j < env->num_co_players; j++)
-                ((int*)env->actions)[env->co_player_ids[j]] = co_actions[j];
+
+            // Scatter actions back — stride 2 per agent
+            for (int j = 0; j < env->num_ego_agents; j++) {
+                int pos = entity_to_active_pos(env, env->ego_agent_ids[j]);
+                if (pos != -1)
+                    ((int*)env->actions)[pos] = ego_actions[j];
+            }
+            for (int j = 0; j < env->num_co_players; j++) {
+                int pos = entity_to_active_pos(env, env->co_player_ids[j]);
+                if (pos != -1)
+                    ((int*)env->actions)[pos] = co_actions[j];
+            }
+            
+                    if (env->population_play && i == 0) {
+            printf("DEBUG actions check:\n");
+            printf("  ego:\n");
+            for (int j = 0; j < env->num_ego_agents; j++) {
+                int pos = entity_to_active_pos(env, env->ego_agent_ids[j]);
+                printf("    ego[%d] entity=%d pos=%d action=%d\n",
+                       j, env->ego_agent_ids[j], pos,
+                       pos != -1 ? ((int*)env->actions)[pos] : -999);
+            }
+            printf("  co-players:\n");
+            for (int j = 0; j < env->num_co_players; j++) {
+                int pos = entity_to_active_pos(env, env->co_player_ids[j]);
+                printf("    co[%d] entity=%d pos=%d action=%d obs[0-2]=%.3f %.3f %.3f\n",
+                       j, env->co_player_ids[j], pos,
+                       pos != -1 ? ((int*)env->actions)[pos] : -999,
+                       pos != -1 ? co_obs[j * co_max_obs + 0] : 0.0f,
+                       pos != -1 ? co_obs[j * co_max_obs + 1] : 0.0f,
+                       pos != -1 ? co_obs[j * co_max_obs + 2] : 0.0f);
+            }
+            fflush(stdout);
+        }
+
         } else {
             forward(net, env->observations, (int*)env->actions);
         }
         c_step(env);
     }
 }
+
 static void conditioning_type_to_flags(const char* type, bool* use_rc, bool* use_ec, bool* use_dc) {
     *use_rc = *use_ec = *use_dc = false;
     if (!type || strcmp(type, "none") == 0) return;
@@ -467,10 +477,15 @@ int eval_gif(const char* map_name, const char* policy_name,
         .max_controlled_agents    = conf.max_controlled_agents > 0 ? conf.max_controlled_agents : -1,
         .map_name                 = (char*)map_name,
         .population_play          = population_play,
+        .goal_speed = conf.goal_speed,
 
     };
 
     allocate(&env);
+    // Verify base_obs matches what allocate() computed
+    int base_ego_dim = (conf.dynamics_model == JERK ? 10 : 7);
+    int base_obs_check = base_ego_dim + 7 * (MAX_AGENTS - 1) + 7 * MAX_ROAD_SEGMENT_OBSERVATIONS;
+
 
     if (env.active_agent_count == 0) {
         fprintf(stderr, "Error: Map %s has no controllable agents\n", map_name);
@@ -501,15 +516,16 @@ int eval_gif(const char* map_name, const char* policy_name,
 
     c_reset(&env);
 
-    int camera_agent = population_play ? env.ego_agent_ids[0]
-                                       : rand() % env.active_agent_count;
-
     if (population_play) {
-        assign_agent_roles(&env);
+        assign_ego_and_coplayer_roles(&env);
         assign_agent_colors(&env);
         printf("Population play: %d ego agent(s), %d co-player(s)\n",
                env.num_ego_agents, env.num_co_players);
     }
+
+    int camera_agent = population_play ? env.ego_agent_ids[0]
+                                       : rand() % env.active_agent_count;
+
     printf("Active agents: %d\n", env.active_agent_count);
 
     // Window setup
@@ -563,8 +579,8 @@ int eval_gif(const char* map_name, const char* policy_name,
 
         ego_obs = calloc(env.num_ego_agents * ego_max_obs, sizeof(float));
         co_obs  = calloc(env.num_co_players * co_max_obs,  sizeof(float));
-        ego_actions = calloc(env.num_ego_agents, sizeof(int));
-        co_actions  = calloc(env.num_co_players, sizeof(int));
+        ego_actions = calloc(env.num_ego_agents,  sizeof(int));
+        co_actions  = calloc(env.num_co_players,  sizeof(int));
 
         if (!ego_obs || !co_obs || !ego_actions || !co_actions) {
             fprintf(stderr, "Error: Failed to allocate population play buffers\n");

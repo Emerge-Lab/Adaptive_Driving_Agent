@@ -1590,6 +1590,17 @@ void assign_ego_and_coplayer_roles(Drive *env) {
         if (entity_idx >= 0 && entity_idx < env->num_entities)
             env->entities[entity_idx].is_co_player = 1;
     }
+
+    printf("DEBUG assign_ego_and_coplayer_roles:\n");
+    for (int i = 0; i < env->active_agent_count; i++) {
+        int entity_idx = env->active_agent_indices[i];
+        printf("  entity=%d is_ego=%d is_co_player=%d\n",
+               entity_idx,
+               env->entities[entity_idx].is_ego,
+               env->entities[entity_idx].is_co_player);
+    }
+    fflush(stdout);
+
 }
 
 void init(Drive *env) {
@@ -2938,11 +2949,18 @@ void draw_scene(Drive *env, Client *client, int mode, int obs_only, int lasers, 
                 }
 
                 // --- Draw the car  ---
-                Color car_color = GRAY; // default for static
+                Color car_color = GRAY;         // default for static
                 if (is_expert)
-                    car_color = GOLD; // expert replay
+                    car_color = GOLD;           // expert replay
                 if (is_active_agent)
-                    car_color = BLUE; // policy-controlled
+                    car_color = BLUE;           // policy-controlled (self play)
+
+                if (is_active_agent && env->population_play) {
+                    if (env->entities[i].is_ego)
+                        car_color = LIGHTGREEN; // ego agent
+                    else if (env->entities[i].is_co_player)
+                        car_color = BLUE;     // co-player
+                }
                 if (is_active_agent && env->entities[i].collision_state > 0)
                     car_color = RED;
                 rlSetLineWidth(3.0f);

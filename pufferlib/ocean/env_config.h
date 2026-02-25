@@ -99,6 +99,8 @@ static int handler(
         env_config->reward_ade = atof(value);
     } else if (MATCH("env", "goal_radius")) {
         env_config->goal_radius = atof(value);
+    }else if (MATCH("env", "goal_speed")) {
+        env_config->goal_speed = atof(value);
     } else if(MATCH("env", "collision_behavior")){
         env_config->collision_behavior = atoi(value);
     } else if(MATCH("env", "offroad_behavior")){
