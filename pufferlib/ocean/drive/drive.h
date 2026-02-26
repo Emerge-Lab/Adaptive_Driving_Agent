@@ -172,7 +172,7 @@ typedef struct Co_Player_Log Co_Player_Log;
 
 struct Log {
     float episode_return;
-    float episode_length;
+    float scenario_length;
     float score;
     float goals_reached_this_episode;
     float goals_sampled_this_episode;
@@ -455,7 +455,7 @@ void add_log(Drive *env) {
             int lane_aligned = env->logs[i].lane_alignment_rate;
             env->log.lane_alignment_rate += lane_aligned;
             env->log.speed_at_goal += env->logs[i].speed_at_goal;
-            env->log.episode_length += env->logs[i].episode_length;
+            env->log.scenario_length += env->logs[i].scenario_length;
             env->log.episode_return += env->logs[i].episode_return;
 
             env->log.active_agent_count += env->active_agent_count;
@@ -501,7 +501,7 @@ void add_log(Drive *env) {
             env->co_player_log.lane_alignment_rate += co_lane_aligned;
             env->co_player_log.speed_at_goal += env->co_player_logs[i].speed_at_goal;
             env->co_player_log.episode_return += env->co_player_logs[i].episode_return;
-            env->co_player_log.episode_length += env->co_player_logs[i].episode_length;
+            env->co_player_log.scenario_length += env->co_player_logs[i].scenario_length;
 
             env->co_player_log.n += 1.0f;
         }
@@ -2416,10 +2416,10 @@ void c_step(Drive *env) {
         // Update logs based on agent type - use i directly as log index
         if (env->entities[agent_idx].is_ego) {
             env->logs[i].score = 0.0f;
-            env->logs[i].episode_length += 1;
+            env->logs[i].scenario_length += 1;
         } else if (env->entities[agent_idx].is_co_player) {
             env->co_player_logs[i].score = 0.0f;
-            env->co_player_logs[i].episode_length += 1;
+            env->co_player_logs[i].scenario_length += 1;
         }
     }
 
@@ -3335,7 +3335,7 @@ void c_render(Drive *env, int view_mode, int draw_traces) {
             if (draw_traces) { // Show logged trajectories of active agents and expert static agents
                 for (int i = 0; i < env->active_agent_count; i++) {
                     int idx = env->active_agent_indices[i];
-                    for (int t = env->init_steps; t < env->episode_length; t++) {
+                    for (int t = env->init_steps; t < env->scenario_length; t++) {
                         Color agent_color = LIGHTBLUE;
                         if (env->entities[idx].type == PEDESTRIAN) {
                             agent_color = LIGHT_ORANGE;
@@ -3350,7 +3350,7 @@ void c_render(Drive *env, int view_mode, int draw_traces) {
 
                 for (int i = 0; i < env->expert_static_agent_count; i++) {
                     int idx = env->expert_static_agent_indices[i];
-                    for (int t = env->init_steps; t < env->episode_length; t++) {
+                    for (int t = env->init_steps; t < env->scenario_length; t++) {
                         DrawSphere(
                             (Vector3){env->entities[idx].traj_x[t], env->entities[idx].traj_y[t], Z_AGENT_DETAILS},
                             0.15f, EXPERT_REPLAY);

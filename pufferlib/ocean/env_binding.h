@@ -680,7 +680,7 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         assign_to_dict(dict, "co_player_offroad_per_agent", co_player_aggregate.offroad_per_agent);
         assign_to_dict(dict, "co_player_score", co_player_aggregate.score);
         assign_to_dict(dict, "co_player_dnf_rate", co_player_aggregate.dnf_rate);
-        assign_to_dict(dict, "co_player_episode_length", co_player_aggregate.episode_length);
+        assign_to_dict(dict, "co_player_scenario_length", co_player_aggregate.scenario_length);
         assign_to_dict(dict, "co_player_episode_return", co_player_aggregate.episode_return);
         assign_to_dict(dict, "co_player_lane_alignment_rate", co_player_aggregate.lane_alignment_rate);
         assign_to_dict(dict, "co_player_speed_at_goal", co_player_aggregate.speed_at_goal);
