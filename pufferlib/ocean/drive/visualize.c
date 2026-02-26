@@ -201,11 +201,11 @@ static int make_gif_from_frames(const char *pattern, int fps, const char *palett
 }
 
 // Transform observations from ego format to co-player format by inserting conditioning values
-// src_obs: Source observations in ego format (without conditioning)
-// dst_obs: Destination buffer for co-player format (with conditioning)
+// src_obs: Source observations (may include ego conditioning)
+// dst_obs: Destination buffer for co-player format (with co-player conditioning)
 // num_agents: Number of agents to transform
 // ego_base_dim: Base ego features (7 for CLASSIC, 10 for JERK)
-// num_conditioning: Number of conditioning features to insert (5 for "all" type)
+// co_use_rc/ec/dc: Co-player conditioning flags (determines which features to insert)
 void transform_obs_for_coplayer(
     float *src_obs,
     float *dst_obs,
@@ -213,43 +213,54 @@ void transform_obs_for_coplayer(
     int ego_obs_size,
     int coplayer_obs_size,
     int ego_base_dim,
-    int num_conditioning,
+    int co_use_rc, int co_use_ec, int co_use_dc,
     float collision_lb, float collision_ub,
     float offroad_lb, float offroad_ub,
     float goal_lb, float goal_ub,
     float entropy_lb, float entropy_ub,
     float discount_lb, float discount_ub
 ) {
-    // Number of features after ego base (partners + roads)
-    int remaining_features = ego_obs_size - ego_base_dim;
+    // Fixed sizes for partner and road features (from drive.h constants)
+    int partner_features = (MAX_AGENTS - 1) * PARTNER_FEATURES;
+    int road_features = MAX_ROAD_SEGMENT_OBSERVATIONS * ROAD_FEATURES;
+    int partner_road_features = partner_features + road_features;
+
+    // Derive source conditioning size from ego_obs_size
+    // This handles cases where ego policy has conditioning (type != "none")
+    int src_conditioning = ego_obs_size - ego_base_dim - partner_road_features;
+
+    // Calculate destination conditioning size from flags
+    int dst_conditioning = (co_use_rc ? 3 : 0) + (co_use_ec ? 1 : 0) + (co_use_dc ? 1 : 0);
 
     for (int i = 0; i < num_agents; i++) {
         float *src = src_obs + i * ego_obs_size;
         float *dst = dst_obs + i * coplayer_obs_size;
 
-        // Copy ego base features
+        // Copy ego base features (without conditioning)
         memcpy(dst, src, ego_base_dim * sizeof(float));
 
-        // Sample and insert conditioning values (5 features for "all" type)
-        // Order: collision, offroad, goal (reward), entropy, discount
+        // Sample and insert conditioning values based on flags
+        // Order must match: reward (3), entropy (1), discount (1)
         int cond_idx = ego_base_dim;
-        if (num_conditioning >= 3) {
-            // Reward conditioning (3 features)
+        if (co_use_rc) {
+            // Reward conditioning (3 features: collision, offroad, goal)
             dst[cond_idx++] = collision_lb + (float)rand() / RAND_MAX * (collision_ub - collision_lb);
             dst[cond_idx++] = offroad_lb + (float)rand() / RAND_MAX * (offroad_ub - offroad_lb);
             dst[cond_idx++] = goal_lb + (float)rand() / RAND_MAX * (goal_ub - goal_lb);
         }
-        if (num_conditioning >= 4) {
-            // Entropy conditioning
+        if (co_use_ec) {
+            // Entropy conditioning (1 feature)
             dst[cond_idx++] = entropy_lb + (float)rand() / RAND_MAX * (entropy_ub - entropy_lb);
         }
-        if (num_conditioning >= 5) {
-            // Discount conditioning
+        if (co_use_dc) {
+            // Discount conditioning (1 feature)
             dst[cond_idx++] = discount_lb + (float)rand() / RAND_MAX * (discount_ub - discount_lb);
         }
 
-        // Copy partner + road features
-        memcpy(dst + ego_base_dim + num_conditioning, src + ego_base_dim, remaining_features * sizeof(float));
+        // Copy partner + road features, skipping over any source conditioning
+        memcpy(dst + ego_base_dim + dst_conditioning,
+               src + ego_base_dim + src_conditioning,
+               partner_road_features * sizeof(float));
     }
 }
 
@@ -266,7 +277,7 @@ void forward_population(
     int ego_obs_size,
     int coplayer_obs_size,
     int ego_base_dim,
-    int coplayer_num_conditioning,
+    int co_use_rc, int co_use_ec, int co_use_dc,
     float co_collision_lb, float co_collision_ub,
     float co_offroad_lb, float co_offroad_ub,
     float co_goal_lb, float co_goal_ub,
@@ -295,7 +306,7 @@ void forward_population(
     transform_obs_for_coplayer(
         co_obs_raw, co_obs_transformed,
         num_co_players, ego_obs_size, coplayer_obs_size,
-        ego_base_dim, coplayer_num_conditioning,
+        ego_base_dim, co_use_rc, co_use_ec, co_use_dc,
         co_collision_lb, co_collision_ub,
         co_offroad_lb, co_offroad_ub,
         co_goal_lb, co_goal_ub,
@@ -451,6 +462,9 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
     int num_co_players = 0;
     DriveNet *co_player_net = NULL;
 
+    // Co-player conditioning flags (hoisted to outer scope for later use)
+    int co_use_rc = 0, co_use_ec = 0, co_use_dc = 0;
+
     // Check if co-player policy is provided (either via CLI or INI)
     const char *actual_co_player_policy = co_player_policy_name;
     if (actual_co_player_policy == NULL && conf.co_player_enabled && strlen(conf.co_player_policy_path) > 0) {
@@ -475,8 +489,7 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
             fclose(co_policy_file);
             Weights *co_weights = load_weights(actual_co_player_policy);
 
-            // Determine co-player conditioning
-            int co_use_rc = 0, co_use_ec = 0, co_use_dc = 0;
+            // Determine co-player conditioning from config
             if (conf.co_player_conditioning != NULL) {
                 co_use_rc = (strcmp(conf.co_player_conditioning->type, "reward") == 0 ||
                              strcmp(conf.co_player_conditioning->type, "all") == 0);
@@ -502,7 +515,9 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
     float co_goal_lb = 0, co_goal_ub = 0;
     float co_entropy_lb = 0, co_entropy_ub = 0;
     float co_discount_lb = 0, co_discount_ub = 0;
-    int coplayer_num_conditioning = 0;
+
+    // Get conditioning dims directly from co_player_net to ensure consistency
+    int coplayer_num_conditioning = (co_player_net != NULL) ? co_player_net->conditioning_dims : 0;
 
     if (conf.co_player_conditioning != NULL) {
         co_collision_lb = conf.co_player_conditioning->reward_collision_weight_lb;
@@ -515,17 +530,6 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
         co_entropy_ub = conf.co_player_conditioning->entropy_weight_ub;
         co_discount_lb = conf.co_player_conditioning->discount_weight_lb;
         co_discount_ub = conf.co_player_conditioning->discount_weight_ub;
-
-        // Calculate number of conditioning features based on type
-        if (strcmp(conf.co_player_conditioning->type, "all") == 0) {
-            coplayer_num_conditioning = 5;  // 3 reward + 1 entropy + 1 discount
-        } else if (strcmp(conf.co_player_conditioning->type, "reward") == 0) {
-            coplayer_num_conditioning = 3;  // 3 reward weights
-        } else if (strcmp(conf.co_player_conditioning->type, "entropy") == 0) {
-            coplayer_num_conditioning = 4;  // 3 reward + 1 entropy (TODO: verify layout)
-        } else if (strcmp(conf.co_player_conditioning->type, "discount") == 0) {
-            coplayer_num_conditioning = 5;  // 3 reward + 1 entropy + 1 discount (TODO: verify layout)
-        }
     }
 
     // Load main (ego) policy
@@ -619,7 +623,7 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
             forward_population(net, co_player_net, env.observations, (int *)env.actions,
                                num_ego_agents, num_co_players,
                                ego_obs_size, coplayer_obs_size,
-                               ego_base_dim, coplayer_num_conditioning,
+                               ego_base_dim, co_use_rc, co_use_ec, co_use_dc,
                                co_collision_lb, co_collision_ub,
                                co_offroad_lb, co_offroad_ub,
                                co_goal_lb, co_goal_ub,
@@ -645,7 +649,7 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
             forward_population(net, co_player_net, env.observations, (int *)env.actions,
                                num_ego_agents, num_co_players,
                                ego_obs_size, coplayer_obs_size,
-                               ego_base_dim, coplayer_num_conditioning,
+                               ego_base_dim, co_use_rc, co_use_ec, co_use_dc,
                                co_collision_lb, co_collision_ub,
                                co_offroad_lb, co_offroad_ub,
                                co_goal_lb, co_goal_ub,
