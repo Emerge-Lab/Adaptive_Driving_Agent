@@ -22,6 +22,7 @@ typedef struct {
 
 // Config struct for parsing INI files - contains all environment configuration
 typedef struct {
+    int render_mode;
     int action_type;
     int dynamics_model;
     float reward_vehicle_collision;
@@ -42,6 +43,7 @@ typedef struct {
     int init_steps;
     int init_mode;
     int control_mode;
+    int max_controlled_agents;
     char map_dir[256];
     conditioning_config *conditioning;
 } env_init_config;
@@ -102,9 +104,29 @@ static int handler(void *config, const char *section, const char *name, const ch
     } else if (MATCH("env", "init_steps")) {
         env_config->init_steps = atoi(value);
     } else if (MATCH("env", "init_mode")) {
-        env_config->init_mode = atoi(value);
+        if (strcmp(value, "\"create_all_valid\"") == 0 || strcmp(value, "create_all_valid") == 0) {
+            env_config->init_mode = 0;
+        } else if (strcmp(value, "\"create_only_controlled\"") == 0 || strcmp(value, "create_only_controlled") == 0) {
+            env_config->init_mode = 1;
+        } else {
+            printf("Warning: Unknown init_mode value '%s', defaulting to CREATE_ALL_VALID\n", value);
+            env_config->init_mode = 0; // Default to CREATE_ALL_VALID
+        }
     } else if (MATCH("env", "control_mode")) {
-        env_config->control_mode = atoi(value);
+        if (strcmp(value, "\"control_vehicles\"") == 0 || strcmp(value, "control_vehicles") == 0) {
+            env_config->control_mode = 0;
+        } else if (strcmp(value, "\"control_agents\"") == 0 || strcmp(value, "control_agents") == 0) {
+            env_config->control_mode = 1;
+        } else if (strcmp(value, "\"control_wosac\"") == 0 || strcmp(value, "control_wosac") == 0) {
+            env_config->control_mode = 2;
+        } else if (strcmp(value, "\"control_sdc_only\"") == 0 || strcmp(value, "control_sdc_only") == 0) {
+            env_config->control_mode = 3;
+        } else if (strcmp(value, "\"control_mixed_play\"") == 0 || strcmp(value, "control_mixed_play") == 0) {
+            env_config->control_mode = 4;
+        } else {
+            printf("Warning: Unknown control_mode value '%s', defaulting to CONTROL_VEHICLES\n", value);
+            env_config->control_mode = 0; // Default to CONTROL_VEHICLES
+        }
     } else if (MATCH("env", "map_dir")) {
         if (sscanf(value, "\"%255[^\"]\"", env_config->map_dir) != 1) {
             strncpy(env_config->map_dir, value, sizeof(env_config->map_dir) - 1);

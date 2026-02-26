@@ -92,6 +92,39 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
         PyErr_SetString(PyExc_ValueError, "scenario_length must be > 0 (set in INI or kwargs)");
         return -1;
     }
+
+// Allow all settings to be overridden via kwargs (ini provides defaults)
+#define OVERRIDE_INT(field)                                                                                            \
+    if (kwargs && PyDict_GetItemString(kwargs, #field)) {                                                              \
+        conf.field = (int)unpack(kwargs, #field);                                                                      \
+    }
+#define OVERRIDE_FLOAT(field)                                                                                          \
+    if (kwargs && PyDict_GetItemString(kwargs, #field)) {                                                              \
+        conf.field = (float)unpack(kwargs, #field);                                                                    \
+    }
+
+    OVERRIDE_INT(render_mode);
+    OVERRIDE_INT(action_type);
+    OVERRIDE_INT(dynamics_model);
+    OVERRIDE_FLOAT(reward_vehicle_collision);
+    OVERRIDE_FLOAT(reward_offroad_collision);
+    OVERRIDE_FLOAT(reward_goal);
+    OVERRIDE_FLOAT(reward_goal_post_respawn);
+    OVERRIDE_INT(collision_behavior);
+    OVERRIDE_INT(offroad_behavior);
+    OVERRIDE_FLOAT(dt);
+    OVERRIDE_INT(termination_mode);
+    OVERRIDE_INT(init_mode);
+    OVERRIDE_INT(control_mode);
+    OVERRIDE_INT(goal_behavior);
+    OVERRIDE_FLOAT(goal_target_distance);
+    OVERRIDE_FLOAT(goal_radius);
+    OVERRIDE_FLOAT(goal_speed);
+    OVERRIDE_INT(max_controlled_agents);
+
+#undef OVERRIDE_INT
+#undef OVERRIDE_FLOAT
+
     env->action_type = conf.action_type;
     env->dynamics_model = conf.dynamics_model;
     if (PyDict_GetItemString(kwargs, "dynamics_model")) {
@@ -180,6 +213,7 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->goal_target_distance = (float)unpack(kwargs, "goal_target_distance");
     env->goal_radius = (float)unpack(kwargs, "goal_radius");
     env->goal_speed = (float)unpack(kwargs, "goal_speed");
+    env->render_mode = (int)unpack(kwargs, "render_mode");
     char *map_dir = unpack_str(kwargs, "map_dir");
     int map_id = unpack(kwargs, "map_id");
     int max_agents = unpack(kwargs, "max_agents");
@@ -204,6 +238,8 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "dnf_rate", log->dnf_rate);
     assign_to_dict(dict, "completion_rate", log->completion_rate);
     assign_to_dict(dict, "lane_alignment_rate", log->lane_alignment_rate);
+    assign_to_dict(dict, "perc_controlled", log->perc_controlled);
+    assign_to_dict(dict, "perc_other", log->perc_other);
     assign_to_dict(dict, "offroad_per_agent", log->offroad_per_agent);
     assign_to_dict(dict, "collisions_per_agent", log->collisions_per_agent);
     assign_to_dict(dict, "goals_sampled_this_episode", log->goals_sampled_this_episode);

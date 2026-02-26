@@ -4,16 +4,23 @@ import json
 import struct
 import os
 import pufferlib
+from enum import IntEnum
 from pufferlib.ocean.drive import binding
 import torch
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 
 
+class RenderView(IntEnum):
+    FULL_SIM_STATE = 0  # Orthographic top-down, fully observable simulator state
+    BEV_AGENT_OBS = 1  # Orthographic top-down, only show what the selected agent can observe
+    AGENT_PERSP = 2  # Third-person perspective following selected agent
+
+
 class Drive(pufferlib.PufferEnv):
     def __init__(
         self,
-        render_mode=None,
+        render_mode=RenderView.FULL_SIM_STATE,
         report_interval=1,
         width=1280,
         height=1024,
@@ -37,7 +44,6 @@ class Drive(pufferlib.PufferEnv):
         num_agents=512,
         action_type="discrete",
         dynamics_model="classic",
-        max_controlled_agents=-1,
         buf=None,
         seed=1,
         init_steps=0,
@@ -132,6 +138,7 @@ class Drive(pufferlib.PufferEnv):
             + (1 if self.discount_conditioned else 0)
         )
         self.dynamics_model = dynamics_model
+        self.max_controlled_agents = max_controlled_agents
 
         # Observation space calculation
         self.ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
@@ -192,6 +199,8 @@ class Drive(pufferlib.PufferEnv):
             self.control_mode = 2
         elif self.control_mode_str == "control_sdc_only":
             self.control_mode = 3
+        elif self.control_mode_str == "control_mixed_play":
+            self.control_mode = 4
         else:
             raise ValueError(
                 f"control_mode must be one of 'control_vehicles', 'control_tracks_to_predict', or 'control_agents'. Got: {self.control_mode_str}"
@@ -315,6 +324,8 @@ class Drive(pufferlib.PufferEnv):
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
                 map_dir=map_dir,
+                max_controlled_agents=self.max_controlled_agents,
+                render_mode=render_mode,
             )
             env_ids.append(env_id)
 
@@ -731,7 +742,9 @@ class Drive(pufferlib.PufferEnv):
             "heading": np.zeros((num_agents, self.scenario_length - self.init_steps), dtype=np.float32),
             "valid": np.zeros((num_agents, self.scenario_length - self.init_steps), dtype=np.int32),
             "id": np.zeros(num_agents, dtype=np.int32),
-            "scenario_id": np.zeros(num_agents, dtype=np.int32),
+            "is_vehicle": np.zeros(num_agents, dtype=bool),
+            "is_track_to_predict": np.zeros(num_agents, dtype=bool),
+            "scenario_id": np.zeros(num_agents, dtype="S16"),
         }
 
         binding.vec_get_global_ground_truth_trajectories(
@@ -742,11 +755,15 @@ class Drive(pufferlib.PufferEnv):
             trajectories["heading"],
             trajectories["valid"],
             trajectories["id"],
+            trajectories["is_vehicle"],
+            trajectories["is_track_to_predict"],
             trajectories["scenario_id"],
         )
 
         for key in trajectories:
             trajectories[key] = trajectories[key][:, None]
+
+        trajectories["scenario_id"] = trajectories["scenario_id"].astype(str)
 
         return trajectories
 
@@ -763,7 +780,7 @@ class Drive(pufferlib.PufferEnv):
             "x": np.zeros(total_points, dtype=np.float32),
             "y": np.zeros(total_points, dtype=np.float32),
             "lengths": np.zeros(num_polylines, dtype=np.int32),
-            "scenario_id": np.zeros(num_polylines, dtype=np.int32),
+            "scenario_id": np.zeros(num_polylines, dtype="S16"),
         }
 
         binding.vec_get_road_edge_polylines(
@@ -774,13 +791,20 @@ class Drive(pufferlib.PufferEnv):
             polylines["scenario_id"],
         )
 
+        polylines["scenario_id"] = polylines["scenario_id"].astype(str)
+
         return polylines
 
-    def render(self):
-        binding.vec_render(self.c_envs, 0)
+    def render(self, view_mode: RenderView = RenderView.FULL_SIM_STATE, draw_traces: bool = True, env_id: int = 0):
+        binding.vec_render(self.c_envs, int(view_mode), draw_traces, env_id)
 
     def close(self):
         binding.vec_close(self.c_envs)
+
+    @property
+    def scenario_ids(self) -> list[str]:
+        """Return scenario ID string for each env, stripping null padding."""
+        return [s.rstrip("\x00") for s in binding.vec_get_scenario_ids(self.c_envs)]
 
 
 def calculate_area(p1, p2, p3):
@@ -841,6 +865,10 @@ def save_map_binary(map_data, output_file, unique_map_id):
         metadata = map_data.get("metadata", {})
         sdc_track_index = metadata.get("sdc_track_index", -1)  # -1 as default if not found
         tracks_to_predict = metadata.get("tracks_to_predict", [])
+
+        # Write original scenario_id with fallback to placeholder
+        scenario_id = map_data.get("scenario_id", f"map_{unique_map_id:03d}")
+        f.write(struct.pack("16s", scenario_id.encode("utf-8")))
 
         # Write sdc_track_index
         f.write(struct.pack("i", sdc_track_index))
