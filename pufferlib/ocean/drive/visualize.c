@@ -65,9 +65,9 @@ void CloseVideo(VideoRecorder *recorder) {
     waitpid(recorder->pid, NULL, 0);
 }
 
-void renderTopDownView(Drive *env, Client *client, float map_width, float map_height, int obs, int lasers, int trajectories,
-                       int frame_count, float *path, int show_human_logs, int show_grid, int img_width, int img_height,
-                       int zoom_in, int current_scenario, int total_scenarios) {
+void renderTopDownView(Drive *env, Client *client, float map_width, float map_height, int obs, int lasers,
+                       int trajectories, int frame_count, float *path, int show_human_logs, int show_grid,
+                       int img_width, int img_height, int zoom_in, int current_scenario, int total_scenarios) {
     BeginDrawing();
 
     // Calculate map center
@@ -206,20 +206,10 @@ static int make_gif_from_frames(const char *pattern, int fps, const char *palett
 // num_agents: Number of agents to transform
 // ego_base_dim: Base ego features (7 for CLASSIC, 10 for JERK)
 // co_use_rc/ec/dc: Co-player conditioning flags (determines which features to insert)
-void transform_obs_for_coplayer(
-    float *src_obs,
-    float *dst_obs,
-    int num_agents,
-    int ego_obs_size,
-    int coplayer_obs_size,
-    int ego_base_dim,
-    int co_use_rc, int co_use_ec, int co_use_dc,
-    float collision_lb, float collision_ub,
-    float offroad_lb, float offroad_ub,
-    float goal_lb, float goal_ub,
-    float entropy_lb, float entropy_ub,
-    float discount_lb, float discount_ub
-) {
+void transform_obs_for_coplayer(float *src_obs, float *dst_obs, int num_agents, int ego_obs_size, int coplayer_obs_size,
+                                int ego_base_dim, int co_use_rc, int co_use_ec, int co_use_dc, float collision_lb,
+                                float collision_ub, float offroad_lb, float offroad_ub, float goal_lb, float goal_ub,
+                                float entropy_lb, float entropy_ub, float discount_lb, float discount_ub) {
     // Fixed sizes for partner and road features (from drive.h constants)
     int partner_features = (MAX_AGENTS - 1) * PARTNER_FEATURES;
     int road_features = MAX_ROAD_SEGMENT_OBSERVATIONS * ROAD_FEATURES;
@@ -258,8 +248,7 @@ void transform_obs_for_coplayer(
         }
 
         // Copy partner + road features, skipping over any source conditioning
-        memcpy(dst + ego_base_dim + dst_conditioning,
-               src + ego_base_dim + src_conditioning,
+        memcpy(dst + ego_base_dim + dst_conditioning, src + ego_base_dim + src_conditioning,
                partner_road_features * sizeof(float));
     }
 }
@@ -267,23 +256,12 @@ void transform_obs_for_coplayer(
 // Helper function for dual-policy forward pass
 // Runs ego policy on first num_ego_agents, co-player policy on the rest
 // Handles different observation sizes between ego and co-player policies
-void forward_population(
-    DriveNet *ego_net,
-    DriveNet *co_player_net,
-    float *observations,
-    int *actions,
-    int num_ego_agents,
-    int num_co_players,
-    int ego_obs_size,
-    int coplayer_obs_size,
-    int ego_base_dim,
-    int co_use_rc, int co_use_ec, int co_use_dc,
-    float co_collision_lb, float co_collision_ub,
-    float co_offroad_lb, float co_offroad_ub,
-    float co_goal_lb, float co_goal_ub,
-    float co_entropy_lb, float co_entropy_ub,
-    float co_discount_lb, float co_discount_ub
-) {
+void forward_population(DriveNet *ego_net, DriveNet *co_player_net, float *observations, int *actions,
+                        int num_ego_agents, int num_co_players, int ego_obs_size, int coplayer_obs_size,
+                        int ego_base_dim, int co_use_rc, int co_use_ec, int co_use_dc, float co_collision_lb,
+                        float co_collision_ub, float co_offroad_lb, float co_offroad_ub, float co_goal_lb,
+                        float co_goal_ub, float co_entropy_lb, float co_entropy_ub, float co_discount_lb,
+                        float co_discount_ub) {
     if (co_player_net == NULL || num_co_players == 0) {
         // Single policy mode - use ego net for all agents
         forward(ego_net, observations, actions);
@@ -303,16 +281,10 @@ void forward_population(
     memcpy(ego_obs, observations, num_ego_agents * ego_obs_size * sizeof(float));
 
     // Transform co-player observations (add conditioning features)
-    transform_obs_for_coplayer(
-        co_obs_raw, co_obs_transformed,
-        num_co_players, ego_obs_size, coplayer_obs_size,
-        ego_base_dim, co_use_rc, co_use_ec, co_use_dc,
-        co_collision_lb, co_collision_ub,
-        co_offroad_lb, co_offroad_ub,
-        co_goal_lb, co_goal_ub,
-        co_entropy_lb, co_entropy_ub,
-        co_discount_lb, co_discount_ub
-    );
+    transform_obs_for_coplayer(co_obs_raw, co_obs_transformed, num_co_players, ego_obs_size, coplayer_obs_size,
+                               ego_base_dim, co_use_rc, co_use_ec, co_use_dc, co_collision_lb, co_collision_ub,
+                               co_offroad_lb, co_offroad_ub, co_goal_lb, co_goal_ub, co_entropy_lb, co_entropy_ub,
+                               co_discount_lb, co_discount_ub);
 
     // Run forward on each network
     forward(ego_net, ego_obs, ego_actions);
@@ -331,8 +303,8 @@ void forward_population(
 
 int eval_gif(const char *map_name, const char *policy_name, int show_grid, int obs_only, int lasers,
              int show_human_logs, int frame_skip, const char *view_mode, const char *output_topdown,
-             const char *output_agent, int num_maps, int zoom_in, const char *ini_file,
-             int k_scenarios_cli, int max_controlled_agents_cli, const char *co_player_policy_name) {
+             const char *output_agent, int num_maps, int zoom_in, const char *ini_file, int k_scenarios_cli,
+             int max_controlled_agents_cli, const char *co_player_policy_name) {
 
     // Parse configuration from INI file
     env_init_config conf = {0};
@@ -499,7 +471,8 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
                              strcmp(conf.co_player_conditioning->type, "all") == 0);
             }
 
-            co_player_net = init_drivenet(co_weights, num_co_players, env.dynamics_model, co_use_rc, co_use_ec, co_use_dc);
+            co_player_net =
+                init_drivenet(co_weights, num_co_players, env.dynamics_model, co_use_rc, co_use_ec, co_use_dc);
             printf("Co-player policy loaded with conditioning: rc=%d, ec=%d, dc=%d\n", co_use_rc, co_use_ec, co_use_dc);
         } else {
             printf("Warning: Could not load co-player policy from %s. Using main policy for all agents.\n",
@@ -595,19 +568,21 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
 
     // Calculate observation sizes per agent
     // ego_base_dim: 7 for CLASSIC dynamics, 10 for JERK dynamics
-    int ego_base_dim = (env.dynamics_model == 1) ? 10 : 7;  // 1 = JERK
+    int ego_base_dim = (env.dynamics_model == 1) ? 10 : 7; // 1 = JERK
 
     // Ego observation size (environment generates observations without conditioning for ego)
-    int ego_obs_size = net->ego_dim + (MAX_AGENTS - 1) * PARTNER_FEATURES + MAX_ROAD_SEGMENT_OBSERVATIONS * ROAD_FEATURES;
+    int ego_obs_size =
+        net->ego_dim + (MAX_AGENTS - 1) * PARTNER_FEATURES + MAX_ROAD_SEGMENT_OBSERVATIONS * ROAD_FEATURES;
 
     // Co-player observation size (includes conditioning features)
     int coplayer_obs_size = ego_obs_size;
     if (co_player_net != NULL) {
-        coplayer_obs_size = co_player_net->ego_dim + (MAX_AGENTS - 1) * PARTNER_FEATURES + MAX_ROAD_SEGMENT_OBSERVATIONS * ROAD_FEATURES;
+        coplayer_obs_size = co_player_net->ego_dim + (MAX_AGENTS - 1) * PARTNER_FEATURES +
+                            MAX_ROAD_SEGMENT_OBSERVATIONS * ROAD_FEATURES;
     }
 
-    printf("Observation sizes: ego=%d, coplayer=%d, ego_base_dim=%d, coplayer_conditioning=%d\n",
-           ego_obs_size, coplayer_obs_size, ego_base_dim, coplayer_num_conditioning);
+    printf("Observation sizes: ego=%d, coplayer=%d, ego_base_dim=%d, coplayer_conditioning=%d\n", ego_obs_size,
+           coplayer_obs_size, ego_base_dim, coplayer_num_conditioning);
 
     if (render_topdown) {
         printf("Recording topdown view...\n");
@@ -615,20 +590,15 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
             // Calculate current scenario (1-indexed for display)
             int current_scenario = (i / scenario_length) + 1;
             if (i % frame_skip == 0) {
-                renderTopDownView(&env, client, map_width, map_height, 0, 0, 0, frame_count, NULL, show_human_logs, show_grid,
-                                  img_width, img_height, zoom_in, current_scenario, k_scenarios);
+                renderTopDownView(&env, client, map_width, map_height, 0, 0, 0, frame_count, NULL, show_human_logs,
+                                  show_grid, img_width, img_height, zoom_in, current_scenario, k_scenarios);
                 WriteFrame(&topdown_recorder, img_width, img_height);
                 rendered_frames++;
             }
-            forward_population(net, co_player_net, env.observations, (int *)env.actions,
-                               num_ego_agents, num_co_players,
-                               ego_obs_size, coplayer_obs_size,
-                               ego_base_dim, co_use_rc, co_use_ec, co_use_dc,
-                               co_collision_lb, co_collision_ub,
-                               co_offroad_lb, co_offroad_ub,
-                               co_goal_lb, co_goal_ub,
-                               co_entropy_lb, co_entropy_ub,
-                               co_discount_lb, co_discount_ub);
+            forward_population(net, co_player_net, env.observations, (int *)env.actions, num_ego_agents, num_co_players,
+                               ego_obs_size, coplayer_obs_size, ego_base_dim, co_use_rc, co_use_ec, co_use_dc,
+                               co_collision_lb, co_collision_ub, co_offroad_lb, co_offroad_ub, co_goal_lb, co_goal_ub,
+                               co_entropy_lb, co_entropy_ub, co_discount_lb, co_discount_ub);
             c_step(&env);
         }
     }
@@ -646,15 +616,10 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
                 WriteFrame(&agent_recorder, img_width, img_height);
                 rendered_frames++;
             }
-            forward_population(net, co_player_net, env.observations, (int *)env.actions,
-                               num_ego_agents, num_co_players,
-                               ego_obs_size, coplayer_obs_size,
-                               ego_base_dim, co_use_rc, co_use_ec, co_use_dc,
-                               co_collision_lb, co_collision_ub,
-                               co_offroad_lb, co_offroad_ub,
-                               co_goal_lb, co_goal_ub,
-                               co_entropy_lb, co_entropy_ub,
-                               co_discount_lb, co_discount_ub);
+            forward_population(net, co_player_net, env.observations, (int *)env.actions, num_ego_agents, num_co_players,
+                               ego_obs_size, coplayer_obs_size, ego_base_dim, co_use_rc, co_use_ec, co_use_dc,
+                               co_collision_lb, co_collision_ub, co_offroad_lb, co_offroad_ub, co_goal_lb, co_goal_ub,
+                               co_entropy_lb, co_entropy_ub, co_discount_lb, co_discount_ub);
             c_step(&env);
         }
     }
@@ -812,6 +777,7 @@ int main(int argc, char *argv[]) {
     }
 
     eval_gif(map_name, policy_name, show_grid, obs_only, lasers, show_human_logs, frame_skip, view_mode, output_topdown,
-             output_agent, num_maps, zoom_in, ini_file, k_scenarios_cli, max_controlled_agents_cli, co_player_policy_name);
+             output_agent, num_maps, zoom_in, ini_file, k_scenarios_cli, max_controlled_agents_cli,
+             co_player_policy_name);
     return 0;
 }

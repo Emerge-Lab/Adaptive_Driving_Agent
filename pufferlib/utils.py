@@ -40,7 +40,9 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             # Use evaluate_human_logs.py for adaptive agents with human replay
             # Get policy_architecture from train config section
             train_config = config.get("train", {})
-            policy_architecture = train_config.get("policy_architecture", config.get("policy_architecture", "Recurrent"))
+            policy_architecture = train_config.get(
+                "policy_architecture", config.get("policy_architecture", "Recurrent")
+            )
 
             cmd = [
                 sys.executable,
@@ -480,17 +482,29 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
 
         # Build command for human replay rendering
         cmd = [
-            "xvfb-run", "-a", "-s", "-screen 0 1280x720x24", "./visualize",
-            "--ini-file", "pufferlib/config/ocean/adaptive.ini",
-            "--policy-name", expected_weights_path,
-            "--max-controlled-agents", "1",  # Only 1 ego agent
-            "--k-scenarios", str(k_scenarios),
-            "--num-maps", str(num_maps),
+            "xvfb-run",
+            "-a",
+            "-s",
+            "-screen 0 1280x720x24",
+            "./visualize",
+            "--ini-file",
+            "pufferlib/config/ocean/adaptive.ini",
+            "--policy-name",
+            expected_weights_path,
+            "--max-controlled-agents",
+            "1",  # Only 1 ego agent
+            "--k-scenarios",
+            str(k_scenarios),
+            "--num-maps",
+            str(num_maps),
             "--log-trajectories",  # Show human trajectory logs
             "--zoom-in",
-            "--view", "both",
-            "--output-topdown", "resources/drive/output_topdown.mp4",
-            "--output-agent", "resources/drive/output_agent.mp4",
+            "--view",
+            "both",
+            "--output-topdown",
+            "resources/drive/output_topdown.mp4",
+            "--output-agent",
+            "resources/drive/output_agent.mp4",
         ]
 
         output_videos = []
