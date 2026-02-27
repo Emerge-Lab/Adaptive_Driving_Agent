@@ -304,13 +304,19 @@ void forward_population(DriveNet *ego_net, DriveNet *co_player_net, float *obser
 int eval_gif(const char *map_name, const char *policy_name, int show_grid, int obs_only, int lasers,
              int show_human_logs, int frame_skip, const char *view_mode, const char *output_topdown,
              const char *output_agent, int num_maps, int zoom_in, const char *ini_file, int k_scenarios_cli,
-             int max_controlled_agents_cli, const char *co_player_policy_name) {
+             int max_controlled_agents_cli, const char *co_player_policy_name, const char *map_dir_cli) {
 
     // Parse configuration from INI file
     env_init_config conf = {0};
     if (ini_parse(ini_file, handler, &conf) < 0) {
         fprintf(stderr, "Error: Could not load %s. Cannot determine environment configuration.\n", ini_file);
         return -1;
+    }
+
+    // Override map_dir if provided via CLI
+    if (map_dir_cli != NULL) {
+        strncpy(conf.map_dir, map_dir_cli, sizeof(conf.map_dir) - 1);
+        conf.map_dir[sizeof(conf.map_dir) - 1] = '\0';
     }
 
     char map_buffer[100];
@@ -666,6 +672,7 @@ int main(int argc, char *argv[]) {
     const char *output_topdown = NULL;
     const char *output_agent = NULL;
     const char *ini_file = "pufferlib/config/ocean/drive.ini";
+    const char *map_dir_cli = NULL;  // CLI override for map_dir
     int num_maps = 1;
     int scenario_length_cli = -1;
     int k_scenarios_cli = -1;
@@ -773,11 +780,19 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error: --co-player-policy option requires a file path\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--map-dir") == 0) {
+            if (i + 1 < argc) {
+                map_dir_cli = argv[i + 1];
+                i++;
+            } else {
+                fprintf(stderr, "Error: --map-dir option requires a directory path\n");
+                return 1;
+            }
         }
     }
 
     eval_gif(map_name, policy_name, show_grid, obs_only, lasers, show_human_logs, frame_skip, view_mode, output_topdown,
              output_agent, num_maps, zoom_in, ini_file, k_scenarios_cli, max_controlled_agents_cli,
-             co_player_policy_name);
+             co_player_policy_name, map_dir_cli);
     return 0;
 }

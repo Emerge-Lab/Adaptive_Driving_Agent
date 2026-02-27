@@ -262,10 +262,17 @@ class Drive(pufferlib.PufferEnv):
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=co_player_atn_space.dtype)
             else:
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=np.int32)
+        import sys
+        import time
+        _pid = os.getpid()
+        print(f"[{_pid}] Drive.__init__ starting env_init loop, num_envs={self.num_envs}", flush=True, file=sys.stderr)
+        _init_start = time.time()
         env_ids = []
         for i in range(self.num_envs):
             cur = self.agent_offsets[i]
             nxt = self.agent_offsets[i + 1]
+            _env_start = time.time()
+            print(f"[{_pid}] env_init {i}/{self.num_envs} map_id={self.map_ids[i]} starting...", flush=True, file=sys.stderr)
             env_id = binding.env_init(
                 self.observations[cur:nxt],
                 self.actions[cur:nxt],
@@ -317,16 +324,25 @@ class Drive(pufferlib.PufferEnv):
                 map_dir=map_dir,
             )
             env_ids.append(env_id)
+            print(f"[{_pid}] env_init {i}/{self.num_envs} done in {time.time()-_env_start:.2f}s", flush=True, file=sys.stderr)
 
+        print(f"[{_pid}] env_init loop done in {time.time()-_init_start:.2f}s, calling vectorize...", flush=True, file=sys.stderr)
         self.c_envs = binding.vectorize(*env_ids)
+        print(f"[{_pid}] vectorize done, total init time: {time.time()-_init_start:.2f}s", flush=True, file=sys.stderr)
 
     def reset(self, seed=0):
+        import sys, time
+        _pid = os.getpid()
+        print(f"[{_pid}] Drive.reset() called", flush=True, file=sys.stderr)
+        _start = time.time()
         binding.vec_reset(self.c_envs, seed)
+        print(f"[{_pid}] Drive.reset() vec_reset done in {time.time()-_start:.3f}s", flush=True, file=sys.stderr)
         info = []
         if self.population_play:
             info.append(self.ego_ids)
             self._reset_co_player_state()
         self.tick = 0
+        print(f"[{_pid}] Drive.reset() returning", flush=True, file=sys.stderr)
         return self.observations, info
 
     def _set_env_variables(self):
@@ -561,6 +577,11 @@ class Drive(pufferlib.PufferEnv):
         return delta_metrics
 
     def step(self, actions):
+        import sys, time
+        _pid = os.getpid()
+        if self.tick % 50 == 0:
+            print(f"[{_pid}] Drive.step() tick={self.tick}", flush=True, file=sys.stderr)
+        _start = time.time()
         self.terminals[:] = 0
 
         self.actions[self.ego_ids] = actions
@@ -572,6 +593,8 @@ class Drive(pufferlib.PufferEnv):
         binding.vec_step(self.c_envs)
 
         self.tick += 1
+        if self.tick % 50 == 0:
+            print(f"[{_pid}] Drive.step() done in {time.time()-_start:.3f}s", flush=True, file=sys.stderr)
         info = []
 
         if self.tick % self.report_interval == 0:

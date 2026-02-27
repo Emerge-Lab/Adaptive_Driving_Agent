@@ -359,9 +359,14 @@ class PuffeRL:
                 self.transformer_position[k] = torch.zeros(1, dtype=torch.long, device=device)
 
         self.full_rows = 0
+        _pid = os.getpid()
+        print(f"[{_pid}] evaluate() starting, segments={self.segments}", flush=True, file=sys.stderr)
         while self.full_rows < self.segments:
+            print(f"[{_pid}] evaluate() loop iter, full_rows={self.full_rows}/{self.segments}, calling recv()...", flush=True, file=sys.stderr)
+            _recv_start = time.time()
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            print(f"[{_pid}] evaluate() recv() done in {time.time()-_recv_start:.3f}s", flush=True, file=sys.stderr)
             # print(f"o shape is {o.shape}", flush = True)
             if self.population_play:
                 batch_size = self.vecenv.batch_size
@@ -509,8 +514,12 @@ class PuffeRL:
                         self.stats[k].append(v)
 
             profile("env", epoch)
+            print(f"[{_pid}] evaluate() calling send()...", flush=True, file=sys.stderr)
+            _send_start = time.time()
             self.vecenv.send(action)
+            print(f"[{_pid}] evaluate() send() done in {time.time()-_send_start:.3f}s", flush=True, file=sys.stderr)
 
+        print(f"[{_pid}] evaluate() loop finished", flush=True, file=sys.stderr)
         profile("eval_misc", epoch)
         self.free_idx = self.total_agents
 
@@ -526,6 +535,8 @@ class PuffeRL:
 
     @record
     def train(self):
+        _pid = os.getpid()
+        print(f"[{_pid}] train() starting, epoch={self.epoch}", flush=True, file=sys.stderr)
         profile = self.profile
         epoch = self.epoch
         profile("train", epoch)
@@ -537,7 +548,8 @@ class PuffeRL:
         a = config["prio_alpha"]
         clip_coef = config["clip_coef"]
         vf_clip = config["vf_clip_coef"]
-        anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
+        print(f"[{_pid}] train() total_epochs={self.total_epochs}", flush=True, file=sys.stderr)
+        anneal_beta = b0 + (1 - b0) * a * self.epoch / max(self.total_epochs, 1)  # Avoid div by zero
         self.ratio[:] = 1
 
         for mb in range(self.total_minibatches):
@@ -1290,14 +1302,25 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     train_config = dict(**args["train"], env=env_name, eval=args.get("eval", {}), env_config=args.get("env", {}))
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
+    _pid = os.getpid()
+    print(f"[{_pid}] MAIN LOOP starting, total_timesteps={train_config['total_timesteps']}", flush=True, file=sys.stderr)
     all_logs = []
+    _loop_iter = 0
     while pufferl.global_step < train_config["total_timesteps"]:
+        print(f"[{_pid}] MAIN LOOP iter={_loop_iter}, global_step={pufferl.global_step}", flush=True, file=sys.stderr)
+        _loop_iter += 1
         if train_config["device"] == "cuda":
             torch.compiler.cudagraph_mark_step_begin()
+        print(f"[{_pid}] MAIN LOOP calling evaluate()...", flush=True, file=sys.stderr)
+        _eval_start = time.time()
         pufferl.evaluate()
+        print(f"[{_pid}] MAIN LOOP evaluate() done in {time.time()-_eval_start:.2f}s", flush=True, file=sys.stderr)
         if train_config["device"] == "cuda":
             torch.compiler.cudagraph_mark_step_begin()
+        print(f"[{_pid}] MAIN LOOP calling train()...", flush=True, file=sys.stderr)
+        _train_start = time.time()
         logs = pufferl.train()
+        print(f"[{_pid}] MAIN LOOP train() done in {time.time()-_train_start:.2f}s", flush=True, file=sys.stderr)
 
         if logs is not None:
             if pufferl.global_step > 0.20 * train_config["total_timesteps"]:

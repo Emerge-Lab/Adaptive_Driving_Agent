@@ -479,6 +479,7 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
         # Get env config
         env_config = config.get("env_config", config.get("env", {}))
         k_scenarios = env_config.get("k_scenarios", 2)
+        map_dir = env_config.get("map_dir", None)
 
         # Build command for human replay rendering
         cmd = [
@@ -506,6 +507,10 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
             "--output-agent",
             "resources/drive/output_agent.mp4",
         ]
+
+        # Add map_dir override if specified (for NuPlan or other datasets)
+        if map_dir:
+            cmd.extend(["--map-dir", map_dir])
 
         output_videos = []
         videos_to_log_world = []

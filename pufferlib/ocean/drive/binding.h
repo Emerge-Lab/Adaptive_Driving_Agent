@@ -2,6 +2,7 @@
 #include "../env_binding.h"
 
 static PyObject *my_shared_self_play(PyObject *self, PyObject *args, PyObject *kwargs) {
+    fprintf(stderr, "[C:%d] my_shared_self_play starting\n", getpid()); fflush(stderr);
     char *map_dir = unpack_str(kwargs, "map_dir");
     int num_agents = unpack(kwargs, "num_agents");
     int num_maps = unpack(kwargs, "num_maps");
@@ -15,6 +16,7 @@ static PyObject *my_shared_self_play(PyObject *self, PyObject *args, PyObject *k
     printf("Generating environments for %d agents using %s maps from %s, num maps %d \n", num_agents,
            use_all_maps ? "all" : "random", map_dir, num_maps);
     fflush(stdout);
+    fprintf(stderr, "[C:%d] my_shared_self_play args parsed\n", getpid()); fflush(stderr);
     // Use current time and pid for randomness
     clock_gettime(CLOCK_REALTIME, &ts);
     srand((unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ getpid()));
