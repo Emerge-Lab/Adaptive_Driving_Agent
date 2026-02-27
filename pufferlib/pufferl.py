@@ -79,11 +79,8 @@ class PuffeRL:
             # For adaptive driving, horizon equals episode_length
             config["horizon"] = vecenv.driver_env.episode_length
 
-        # Set horizon for all cases
-        if config.get("rnn_name", "Recurrent") == "Transformer":
-            self.horizon = config.get("horizon", vecenv.driver_env.episode_length)
-        else:
-            self.horizon = config.get("horizon", 32)
+        # Set horizon for all cases (default to episode_length for full context)
+        self.horizon = config.get("horizon", vecenv.driver_env.episode_length)
 
         vecenv.async_reset(seed)
         obs_space = vecenv.single_observation_space
@@ -1673,16 +1670,45 @@ def load_policy(args, vecenv, env_name=""):
     env_module = importlib.import_module(module_name)
 
     device = args["train"]["device"]
+
+    # Detect architecture from checkpoint if loading a model
+    rnn_name = args.get("rnn_name")
+    load_path = args["load_model_path"]
+    if load_path == "latest":
+        load_path = max(glob.glob(f"experiments/{env_name}*.pt"), key=os.path.getctime)
+
+    load_id = args["load_id"]
+    state_dict = None
+
+    if load_path is not None:
+        state_dict = torch.load(load_path, map_location=device)
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    elif load_id is not None:
+        if args["neptune"]:
+            path = NeptuneLogger(args, load_id, mode="read-only").download()
+        elif args["wandb"]:
+            path = WandbLogger(args, load_id).download()
+        else:
+            raise pufferlib.APIUsageError("No run id provided for eval")
+        state_dict = torch.load(path, map_location=device)
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+
+    # Auto-detect architecture from state_dict keys
+    if state_dict is not None:
+        if "positional_embedding" in state_dict:
+            rnn_name = "Transformer"
+        elif "lstm.weight_ih_l0" in state_dict:
+            rnn_name = "Recurrent"
+
     policy_cls = getattr(env_module.torch, args["policy_name"])
     policy = policy_cls(vecenv.driver_env, **args["policy"])
 
     # Handle both RNN and Transformer wrappers via rnn_name
-    rnn_name = args.get("rnn_name")
-
     if rnn_name == "Transformer":
         # Load transformer wrapper
         transformer_cls = getattr(env_module.torch, rnn_name)
-        args["transformer"]["horizon"] = vecenv.driver_env.episode_length
+        # Use config horizon, fallback to episode_length
+        args["transformer"]["horizon"] = args["train"].get("horizon", vecenv.driver_env.episode_length)
         policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
     elif rnn_name is not None:
         # Load RNN wrapper (Recurrent)
@@ -1691,30 +1717,9 @@ def load_policy(args, vecenv, env_name=""):
 
     policy = policy.to(device)
 
-    load_id = args["load_id"]
-    if load_id is not None:
-        if args["neptune"]:
-            path = NeptuneLogger(args, load_id, mode="read-only").download()
-        elif args["wandb"]:
-            path = WandbLogger(args, load_id).download()
-        else:
-            raise pufferlib.APIUsageError("No run id provided for eval")
-
-        state_dict = torch.load(path, map_location=device)
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    # Load the state dict if we have one
+    if state_dict is not None:
         policy.load_state_dict(state_dict)
-
-    load_path = args["load_model_path"]
-    if load_path == "latest":
-        load_path = max(glob.glob(f"experiments/{env_name}*.pt"), key=os.path.getctime)
-
-    if load_path is not None:
-        state_dict = torch.load(load_path, map_location=device)
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        policy.load_state_dict(state_dict)
-        # state_path = os.path.join(*load_path.split('/')[:-1], 'state.pt')
-        # optim_state = torch.load(state_path)['optimizer_state_dict']
-        # pufferl.optimizer.load_state_dict(optim_state)
 
     return policy
 
