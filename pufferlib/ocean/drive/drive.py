@@ -223,11 +223,11 @@ class Drive(pufferlib.PufferEnv):
 
         self._action_type_flag = 0 if action_type == "discrete" else 1
 
-        # Check if resources directory exists
-        binary_path = f"{map_dir}/map_000.bin"
+        # Check if resources directory exists (check map_001 since some datasets start at 001)
+        binary_path = f"{map_dir}/map_001.bin"
         if not os.path.exists(binary_path):
             raise FileNotFoundError(
-                f"Required directory {binary_path} not found. Please ensure the Drive maps are downloaded and installed correctly per docs."
+                f"Required file {binary_path} not found. Please ensure the Drive maps are downloaded and installed correctly per docs."
             )
 
         # Check maps availability
@@ -872,7 +872,11 @@ def save_map_binary(map_data, output_file, unique_map_id):
             elif obj_type == "cyclist":
                 obj_type = 3
             f.write(struct.pack("i", obj_type))  # type
-            f.write(struct.pack("i", obj.get("id", 0)))  # id
+            # Truncate large IDs to fit in int32 range
+            obj_id = obj.get("id", 0)
+            if isinstance(obj_id, int) and (obj_id > 2147483647 or obj_id < -2147483648):
+                obj_id = obj_id % 2147483647
+            f.write(struct.pack("i", obj_id))  # id
             f.write(struct.pack("i", trajectory_length))  # array_size
             # Write position arrays
             positions = obj.get("position", [])
@@ -952,7 +956,11 @@ def save_map_binary(map_data, output_file, unique_map_id):
                 road_type = 10
             # Write base entity data
             f.write(struct.pack("i", road_type))  # type
-            f.write(struct.pack("i", road.get("id", 0)))  # id
+            # Truncate large IDs to fit in int32 range
+            road_id = road.get("id", 0)
+            if isinstance(road_id, int) and (road_id > 2147483647 or road_id < -2147483648):
+                road_id = road_id % 2147483647
+            f.write(struct.pack("i", road_id))  # id
             f.write(struct.pack("i", size))  # array_size
 
             # Write position arrays
