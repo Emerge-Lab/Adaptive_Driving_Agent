@@ -79,6 +79,9 @@ class Drive(pufferlib.PufferEnv):
 
         if episode_length != None:
             self.scenario_length = episode_length
+        # Only set episode_length if not already set (adaptive.py sets it before calling super())
+        if not hasattr(self, 'episode_length'):
+            self.episode_length = self.scenario_length
 
         # Adaptive driving agent setup
         self.adaptive_driving_agent = int(adaptive_driving_agent)

@@ -638,7 +638,7 @@ class HumanReplayEvaluator:
         the policy is with (static) human partners.
 
         Args:
-            args: Config dict with train settings (device, use_rnn, policy_architecture, etc.)
+            args: Config dict with train settings (device, rnn_name, etc.)
             puffer_env: PufferLib environment wrapper
             policy: Trained policy to evaluate
 
@@ -654,18 +654,19 @@ class HumanReplayEvaluator:
 
         obs, info = puffer_env.reset()
 
-        policy_architecture = args["train"].get("policy_architecture", "Recurrent")
+        rnn_name = args.get("rnn_name", "Recurrent")
         k_scenarios = args["env"].get("k_scenarios", 1)
 
-        if policy_architecture == "Recurrent":
+        if rnn_name == "Recurrent":
             state = dict(
                 lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
                 lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
             )
-        elif policy_architecture == "Transformer":
-            context_length = args["train"].get("context_window", 182)
+        elif rnn_name == "Transformer":
+            # Get horizon from the policy (TransformerWrapper stores it)
+            horizon = getattr(policy, 'horizon', args.get("transformer", {}).get("horizon", 182))
             state = dict(
-                transformer_context=torch.zeros(num_agents, context_length, policy.hidden_size, device=device),
+                transformer_context=torch.zeros(num_agents, horizon, policy.hidden_size, device=device),
                 transformer_position=torch.zeros(1, dtype=torch.long, device=device),
             )
         else:
@@ -690,7 +691,7 @@ class HumanReplayEvaluator:
                 obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
 
                 # Reset transformer context on mid-scenario terminations (not at scenario boundaries)
-                if policy_architecture == "Transformer":
+                if rnn_name == "Transformer":
                     is_last_step = time_idx == self.sim_steps - 1
                     if not is_last_step:
                         done_mask = dones | truncs

@@ -57,7 +57,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_drive --wandb --tag coplayer_womd_recurrent \
+   puffer train puffer_drive --wandb --wandb-project ada_new_coplayers --tag coplayer_womd_recurrent \
      --env.num-maps 10000 \
      --env.conditioning.type $CONDITION_TYPE \
      --env.conditioning.entropy-weight-lb $ENTROPY_LB \
