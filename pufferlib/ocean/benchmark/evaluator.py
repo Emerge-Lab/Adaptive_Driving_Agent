@@ -657,8 +657,8 @@ class HumanReplayEvaluator:
         k_scenarios = args["env"].get("k_scenarios", 1)
 
         # Detect architecture from policy object
-        is_transformer = hasattr(policy, 'horizon') and hasattr(policy, 'transformer')
-        is_recurrent = hasattr(policy, 'lstm')
+        is_transformer = hasattr(policy, "horizon") and hasattr(policy, "transformer")
+        is_recurrent = hasattr(policy, "lstm")
 
         if is_recurrent:
             state = dict(

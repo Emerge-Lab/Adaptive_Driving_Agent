@@ -75,7 +75,6 @@ singularity exec --nv \
      --env.co-player-policy.conditioning.entropy-weight-lb $ENTROPY_LB \
      --env.co-player-policy.conditioning.entropy-weight-ub $ENTROPY_UB \
      --rnn-name Transformer \
-     --train.policy-architecture Transformer \
 
    kill \$HEARTBEAT_PID
  "

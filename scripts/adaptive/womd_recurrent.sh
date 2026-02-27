@@ -68,8 +68,7 @@ singularity exec --nv \
      --env.co-player-policy.conditioning.discount-weight-ub $DISCOUNT_UB \
      --env.co-player-policy.conditioning.entropy-weight-lb $ENTROPY_LB \
      --env.co-player-policy.conditioning.entropy-weight-ub $ENTROPY_UB \
-     --rnn-name Recurrent \
-     --train.policy-architecture Recurrent
+     --rnn-name Recurrent
 
    kill \$HEARTBEAT_PID
  "

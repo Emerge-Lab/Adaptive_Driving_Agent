@@ -672,7 +672,7 @@ int main(int argc, char *argv[]) {
     const char *output_topdown = NULL;
     const char *output_agent = NULL;
     const char *ini_file = "pufferlib/config/ocean/drive.ini";
-    const char *map_dir_cli = NULL;  // CLI override for map_dir
+    const char *map_dir_cli = NULL; // CLI override for map_dir
     int num_maps = 1;
     int scenario_length_cli = -1;
     int k_scenarios_cli = -1;

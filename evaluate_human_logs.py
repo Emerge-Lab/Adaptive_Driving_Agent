@@ -104,7 +104,7 @@ def main():
     print("Beginning human evaluations using HumanReplayEvaluator")
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy-path", type=str, required=True)
-    parser.add_argument("--policy-architecture", type=str, default="Recurrent")
+    parser.add_argument("--rnn-name", type=str, default="Recurrent")
     parser.add_argument("--num-maps", type=int, default=10)
     parser.add_argument("--num-rollouts", type=int, default=100)
     parser.add_argument("--num-agents", type=int, default=64)
@@ -119,7 +119,7 @@ def main():
 
     print(f"Evaluation Configuration:")
     print(f"  Policy: {args_parsed.policy_path}")
-    print(f"  Policy Architecture: {args_parsed.policy_architecture}")
+    print(f"  RNN Name: {args_parsed.rnn_name}")
     print(f"  Num maps: {args_parsed.num_maps}")
     print(f"  Total rollouts: {args_parsed.num_rollouts}")
     print(f"  Num agents per env: {args_parsed.num_agents}")
@@ -133,14 +133,13 @@ def main():
     make_env = env_creator(env_name)
 
     scenario_length = 91
-    context_length = args_parsed.k_scenarios * scenario_length
+    horizon = args_parsed.k_scenarios * scenario_length
 
     args = {
+        "rnn_name": args_parsed.rnn_name,
         "train": {
             "device": args_parsed.device,
-            "use_rnn": args_parsed.policy_architecture == "Recurrent",
-            "policy_architecture": args_parsed.policy_architecture,
-            "context_window": context_length,
+            "horizon": horizon,
         },
         "env": {
             "num_agents": args_parsed.num_agents,
@@ -176,10 +175,10 @@ def main():
     print("Loading policy...")
     temp_env = make_env(**args["env"])
 
-    if args_parsed.policy_architecture == "Recurrent":
+    if args_parsed.rnn_name == "Recurrent":
         base_policy = Drive(temp_env, input_size=64, hidden_size=256)
         policy = Recurrent(temp_env, base_policy, input_size=256, hidden_size=256).to(args_parsed.device)
-    elif args_parsed.policy_architecture == "Transformer":
+    elif args_parsed.rnn_name == "Transformer":
         base_policy = Drive(temp_env, input_size=128, hidden_size=256)
         policy = Transformer(
             temp_env,
@@ -188,7 +187,7 @@ def main():
             hidden_size=256,
             num_layers=2,
             num_heads=4,
-            context_length=context_length,
+            horizon=horizon,
         ).to(args_parsed.device)
 
     state_dict = torch.load(args_parsed.policy_path, map_location=args_parsed.device)

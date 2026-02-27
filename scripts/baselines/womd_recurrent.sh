@@ -31,8 +31,7 @@ singularity exec --nv \
      --env.conditioning.type none \
      --env.co-player-enabled 0 \
      --train.seed 42 \
-     --rnn-name Recurrent \
-     --train.policy-architecture Recurrent
+     --rnn-name Recurrent
 
    kill \$HEARTBEAT_PID
  "

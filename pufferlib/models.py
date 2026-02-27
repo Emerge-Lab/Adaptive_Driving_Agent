@@ -313,11 +313,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             context = state["transformer_context"]
             pos = state.get("transformer_position", torch.zeros(1, dtype=torch.long, device=device))
 
-            if (
-                context.shape[-1] != self.hidden_size
-                or context.shape[0] != B
-                or context.shape[1] != self.horizon
-            ):
+            if context.shape[-1] != self.hidden_size or context.shape[0] != B or context.shape[1] != self.horizon:
                 context = torch.zeros(B, self.horizon, self.hidden_size, device=device)
                 pos = torch.zeros(1, dtype=torch.long, device=device)
 

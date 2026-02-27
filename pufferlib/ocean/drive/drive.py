@@ -80,7 +80,7 @@ class Drive(pufferlib.PufferEnv):
         if episode_length != None:
             self.scenario_length = episode_length
         # Only set episode_length if not already set (adaptive.py sets it before calling super())
-        if not hasattr(self, 'episode_length'):
+        if not hasattr(self, "episode_length"):
             self.episode_length = self.scenario_length
 
         # Adaptive driving agent setup
@@ -410,7 +410,10 @@ class Drive(pufferlib.PufferEnv):
             self.agent_offsets, self.map_ids, self.num_envs = my_shared_tuple
             self.ego_ids = [i for i in range(self.agent_offsets[-1])]
             if len(self.ego_ids) != self.num_agents:
-                print(f"Warning: requested {self.num_agents} agents but maps contain {len(self.ego_ids)} valid agents. Adjusting.", flush=True)
+                print(
+                    f"Warning: requested {self.num_agents} agents but maps contain {len(self.ego_ids)} valid agents. Adjusting.",
+                    flush=True,
+                )
                 self.num_agents = len(self.ego_ids)
             self.local_co_player_ids = [[] for i in range(self.num_envs)]
             self.local_ego_ids = [[0] for i in range(self.num_envs)]

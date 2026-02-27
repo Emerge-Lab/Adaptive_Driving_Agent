@@ -65,8 +65,7 @@ singularity exec --nv \
      --env.conditioning.discount-weight-lb $DISCOUNT_LB \
      --env.conditioning.discount-weight-ub $DISCOUNT_UB \
      --rnn-name Transformer \
-     --train.checkpoint-interval 50 \
-     --train.policy-architecture Transformer
+     --train.checkpoint-interval 50
 
    kill \$HEARTBEAT_PID
  "

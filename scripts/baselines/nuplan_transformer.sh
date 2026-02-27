@@ -39,7 +39,6 @@ singularity exec --nv \
      --env.co-player-enabled 0 \
      --train.seed 42 \
      --rnn-name Transformer \
-     --train.policy-architecture Transformer \
 
    kill \$HEARTBEAT_PID
  "

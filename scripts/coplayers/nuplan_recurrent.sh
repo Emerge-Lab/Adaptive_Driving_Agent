@@ -71,8 +71,7 @@ singularity exec --nv \
      --env.conditioning.discount-weight-lb $DISCOUNT_LB \
      --env.conditioning.discount-weight-ub $DISCOUNT_UB \
      --rnn-name Recurrent \
-     --train.checkpoint-interval 50 \
-     --train.policy-architecture Recurrent
+     --train.checkpoint-interval 50
 
    kill \$HEARTBEAT_PID
  "

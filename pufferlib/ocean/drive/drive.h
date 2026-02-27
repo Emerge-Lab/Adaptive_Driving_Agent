@@ -576,8 +576,7 @@ Entity *load_map_binary(const char *filename, Drive *env) {
     for (int i = 0; i < env->num_entities; i++) {
         // Read base entity data
         if (fread(&entities[i].scenario_id, sizeof(int), 1, file) != 1 ||
-            fread(&entities[i].type, sizeof(int), 1, file) != 1 ||
-            fread(&entities[i].id, sizeof(int), 1, file) != 1 ||
+            fread(&entities[i].type, sizeof(int), 1, file) != 1 || fread(&entities[i].id, sizeof(int), 1, file) != 1 ||
             fread(&entities[i].array_size, sizeof(int), 1, file) != 1) {
             // File truncated - adjust entity count and break
             env->num_entities = i;
