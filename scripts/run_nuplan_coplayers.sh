@@ -78,7 +78,7 @@ singularity exec --nv \
      --env.conditioning.entropy-weight-lb $ENTROPY_LB \
      --env.conditioning.entropy-weight-ub $ENTROPY_UB \
      --env.conditioning.discount-weight-lb $DISCOUNT_LB \
-     --env.conditioning.discount-weight-ub $DISCOUNT_UB
+     --env.conditioning.discount-weight-ub $DISCOUNT_UB \
 
    kill \$HEARTBEAT_PID
  "

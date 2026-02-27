@@ -54,7 +54,7 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
                 "--adaptive-driving-agent",
                 "1",
                 "--k-scenarios",
-                str(env_config.get("k_scenarios", 2)),
+                str(env_config.get("k_scenarios", 1)),
                 "--num-agents",
                 str(eval_config.get("human_replay_num_agents", 32)),
                 "--num-maps",
@@ -478,8 +478,8 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
 
         # Get env config
         env_config = config.get("env_config", config.get("env", {}))
-        k_scenarios = env_config.get("k_scenarios", 2)
-        map_dir = env_config.get("map_dir", None)
+        k_scenarios = env_config.get("k_scenarios", env_config.get("k-scenarios", 1))
+        map_dir = env_config.get("map_dir", env_config.get("map-dir", None))
 
         # Build command for human replay rendering
         cmd = [
@@ -516,12 +516,20 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
         videos_to_log_world = []
         videos_to_log_agent = []
 
+        print(f"[Human Replay Render] Starting render for {num_maps} maps, map_dir={map_dir}", flush=True)
+        print(f"[Human Replay Render] Command: {' '.join(cmd)}", flush=True)
+
         for map_idx in range(num_maps):
+            print(f"[Human Replay Render] Rendering map {map_idx}...", flush=True)
             result = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True, text=True, timeout=600, env=env_vars)
+            print(f"[Human Replay Render] Return code: {result.returncode}", flush=True)
+            if result.stderr:
+                print(f"[Human Replay Render] stderr: {result.stderr[:500]}", flush=True)
 
             vids_exist = os.path.exists("resources/drive/output_topdown.mp4") and os.path.exists(
                 "resources/drive/output_agent.mp4"
             )
+            print(f"[Human Replay Render] Videos exist: {vids_exist}", flush=True)
 
             if result.returncode == 0 or (result.returncode == 1 and vids_exist):
                 videos = [

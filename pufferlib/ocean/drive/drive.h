@@ -1616,22 +1616,14 @@ void assign_ego_and_coplayer_roles(Drive *env) {
 }
 
 void init(Drive *env) {
-    fprintf(stderr, "[C:%d] init() starting for map %s\n", getpid(), env->map_name); fflush(stderr);
     env->human_agent_idx = 0;
     env->timestep = 0;
-    fprintf(stderr, "[C:%d] load_map_binary...\n", getpid()); fflush(stderr);
     env->entities = load_map_binary(env->map_name, env);
-    fprintf(stderr, "[C:%d] load_map_binary done, entities=%d\n", getpid(), env->num_entities); fflush(stderr);
     set_means(env);
-    fprintf(stderr, "[C:%d] init_grid_map...\n", getpid()); fflush(stderr);
     init_grid_map(env);
-    fprintf(stderr, "[C:%d] init_grid_map done\n", getpid()); fflush(stderr);
     env->grid_map->vision_range = 21; // TODO: Why is this hardcoded?
-    fprintf(stderr, "[C:%d] init_neighbor_offsets...\n", getpid()); fflush(stderr);
     init_neighbor_offsets(env);
-    fprintf(stderr, "[C:%d] cache_neighbor_offsets grid=%dx%d...\n", getpid(), env->grid_map->grid_cols, env->grid_map->grid_rows); fflush(stderr);
     cache_neighbor_offsets(env);
-    fprintf(stderr, "[C:%d] cache done\n", getpid()); fflush(stderr);
     env->logs_capacity = 0;
     set_active_agents(env);
     env->logs_capacity = env->active_agent_count;
@@ -1639,7 +1631,6 @@ void init(Drive *env) {
     set_start_position(env);
     init_goal_positions(env);
     assign_ego_and_coplayer_roles(env);
-    fprintf(stderr, "[C:%d] init() done, active_agents=%d\n", getpid(), env->active_agent_count); fflush(stderr);
     env->logs = (Log *)calloc(env->active_agent_count, sizeof(Log));
 
     // Always allocate weight arrays for consistency

@@ -62,7 +62,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_drive --wandb --tag coplayer_nuplan_transformer \
+   puffer train puffer_drive --wandb --wandb-project ada_new_coplayers --tag coplayer_nuplan_transformer \
      --env.map-dir resources/drive/binaries/nuplan \
      --env.num-maps $NUPLAN_NUM_MAPS \
      --env.conditioning.type $CONDITION_TYPE \

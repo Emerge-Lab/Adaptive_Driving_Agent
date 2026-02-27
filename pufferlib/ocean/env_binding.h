@@ -616,12 +616,18 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     float n = aggregate.n;
     // Average across EGO agents only
     if (n > 0) {
+        // Compute completion_rate from raw totals BEFORE averaging
+        float total_goals_reached = aggregate.goals_reached_this_episode;
+        float total_goals_sampled = aggregate.goals_sampled_this_episode;
+        if (total_goals_sampled > 0) {
+            aggregate.completion_rate = total_goals_reached / total_goals_sampled;
+        } else {
+            aggregate.completion_rate = 0.0f;
+        }
+
         for (int i = 0; i < num_keys; i++) {
             ((float *)&aggregate)[i] /= n;
         }
-
-        // Compute completion_rate from aggregated counts
-        aggregate.completion_rate = aggregate.goals_reached_this_episode / aggregate.goals_sampled_this_episode;
     }
 
     // User populates dict
@@ -632,14 +638,19 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     if (has_co_players && co_player_aggregate.n > 0.0f) {
         float co_player_n = co_player_aggregate.n;
 
+        // Compute co-player completion rate from raw totals BEFORE averaging
+        float co_total_goals_reached = co_player_aggregate.goals_reached_this_episode;
+        float co_total_goals_sampled = co_player_aggregate.goals_sampled_this_episode;
+        if (co_total_goals_sampled > 0) {
+            co_player_aggregate.completion_rate = co_total_goals_reached / co_total_goals_sampled;
+        } else {
+            co_player_aggregate.completion_rate = 0.0f;
+        }
+
         // Average co-player metrics across CO-PLAYER agents only
         for (int i = 0; i < num_keys; i++) {
             ((float *)&co_player_aggregate)[i] /= co_player_n;
         }
-
-        // Compute co-player completion rate
-        co_player_aggregate.completion_rate =
-            co_player_aggregate.goals_reached_this_episode / co_player_aggregate.goals_sampled_this_episode;
 
         // Add co-player metrics to dict with co_player_ prefix
         assign_to_dict(dict, "ego_co_player_ratio", n / co_player_n);
