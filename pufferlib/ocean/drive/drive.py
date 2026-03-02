@@ -609,6 +609,10 @@ class Drive(pufferlib.PufferEnv):
 
             self.current_scenario = (self.current_scenario + 1) % self.k_scenarios
 
+            # Reset coplayer LSTM state at scenario boundary so coplayer behaves consistently
+            if self.population_play:
+                self._reset_co_player_state()
+
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             will_resample = 1
