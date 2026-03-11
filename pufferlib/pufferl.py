@@ -85,10 +85,8 @@ class PuffeRL:
                 )  ## this is used downstream so you need to define it too
         else:
             if config.get("policy_architecture", "Recurrent") == "Transformer":
-                self.context_length  = config["context_length"]
-                config["bptt_horizon"] = (
-                    config["context_length"]
-                ) 
+                self.context_length = config["context_length"]
+                config["bptt_horizon"] = config["context_length"]
 
         vecenv.async_reset(seed)
         obs_space = vecenv.single_observation_space
@@ -432,7 +430,7 @@ class PuffeRL:
                     state["transformer_context"] = self.transformer_context[state_key]
                     state["transformer_position"] = self.transformer_position[state_key]
                     # Note: terminals not needed for eval since we're doing single-step inference
-                print(f"o_device shape: {o_device.shape}", flush = True) 
+                print(f"o_device shape: {o_device.shape}", flush=True)
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
@@ -1261,7 +1259,13 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     elif args["wandb"]:
         logger = WandbLogger(args)
 
-    train_config = dict(**args["train"], env=env_name, eval=args.get("eval", {}), env_config=args.get("env", {}),policy_architecture=args.get("policy_architecture", "Recurrent"))
+    train_config = dict(
+        **args["train"],
+        env=env_name,
+        eval=args.get("eval", {}),
+        env_config=args.get("env", {}),
+        policy_architecture=args.get("policy_architecture", "Recurrent"),
+    )
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
@@ -1681,8 +1685,8 @@ def load_policy(args, vecenv, env_name=""):
 
     # Handle both RNN and Transformer wrappers
     policy_architecture = args.get("policy_architecture", "Recurrent")
-    
-    if policy_architecture == "Transformer": # Load transformer wrapper
+
+    if policy_architecture == "Transformer":  # Load transformer wrapper
         transformer_cls = getattr(env_module.torch, policy_architecture)
         if args.get("env_name") == "puffer_drive":
             args["transformer"]["context_length"] = args["train"]["context_length"]
