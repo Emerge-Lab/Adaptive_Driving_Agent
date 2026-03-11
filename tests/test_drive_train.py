@@ -27,7 +27,7 @@ def test_drive_training():
                 "compile": False,
                 "total_timesteps": 100000,
                 "batch_size": 64,
-                "bptt_horizon": 8,
+                "horizon": 8,
                 "minibatch_size": 64,
                 "max_minibatch_size": 64,
                 "update_epochs": 1,

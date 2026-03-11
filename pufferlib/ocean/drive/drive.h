@@ -549,10 +549,16 @@ Entity *load_map_binary(const char *filename, Drive *env) {
         return NULL;
 
     // Read sdc_track_index
-    fread(&env->sdc_track_index, sizeof(int), 1, file);
+    if (fread(&env->sdc_track_index, sizeof(int), 1, file) != 1) {
+        fclose(file);
+        return NULL;
+    }
 
     // Read tracks_to_predict
-    fread(&env->num_tracks_to_predict, sizeof(int), 1, file);
+    if (fread(&env->num_tracks_to_predict, sizeof(int), 1, file) != 1) {
+        fclose(file);
+        return NULL;
+    }
     if (env->num_tracks_to_predict > 0) {
         env->tracks_to_predict_indices = (int *)malloc(env->num_tracks_to_predict * sizeof(int));
 
@@ -569,10 +575,22 @@ Entity *load_map_binary(const char *filename, Drive *env) {
     Entity *entities = (Entity *)malloc(env->num_entities * sizeof(Entity));
     for (int i = 0; i < env->num_entities; i++) {
         // Read base entity data
-        fread(&entities[i].scenario_id, sizeof(int), 1, file);
-        fread(&entities[i].type, sizeof(int), 1, file);
-        fread(&entities[i].id, sizeof(int), 1, file);
-        fread(&entities[i].array_size, sizeof(int), 1, file);
+        if (fread(&entities[i].scenario_id, sizeof(int), 1, file) != 1 ||
+            fread(&entities[i].type, sizeof(int), 1, file) != 1 || fread(&entities[i].id, sizeof(int), 1, file) != 1 ||
+            fread(&entities[i].array_size, sizeof(int), 1, file) != 1) {
+            // File truncated - adjust entity count and break
+            env->num_entities = i;
+            env->num_objects = (i < env->num_objects) ? i : env->num_objects;
+            env->num_roads = env->num_entities - env->num_objects;
+            break;
+        }
+        // Validate array_size is reasonable (max 1000 timesteps = 100s at 0.1s dt)
+        if (entities[i].array_size <= 0 || entities[i].array_size > 1000) {
+            env->num_entities = i;
+            env->num_objects = (i < env->num_objects) ? i : env->num_objects;
+            env->num_roads = env->num_entities - env->num_objects;
+            break;
+        }
         // Allocate arrays based on type
         int size = entities[i].array_size;
         entities[i].traj_x = (float *)malloc(size * sizeof(float));
@@ -773,12 +791,14 @@ void init_grid_map(Drive *env) {
                 float x_center = (env->entities[i].traj_x[j] + env->entities[i].traj_x[j + 1]) / 2;
                 float y_center = (env->entities[i].traj_y[j] + env->entities[i].traj_y[j + 1]) / 2;
                 int grid_index = getGridIndex(env, x_center, y_center);
-                env->grid_map->cell_entities_count[grid_index]++;
+                if (grid_index != -1) {
+                    env->grid_map->cell_entities_count[grid_index]++;
+                }
             }
         }
     }
-    int cell_entities_insert_index[grid_cell_count]; // Helper array for insertion index
-    memset(cell_entities_insert_index, 0, grid_cell_count * sizeof(int));
+    // Use heap allocation instead of VLA to avoid stack overflow on large maps
+    int *cell_entities_insert_index = (int *)calloc(grid_cell_count, sizeof(int));
 
     // Initialize grid cells
     for (int grid_index = 0; grid_index < grid_cell_count; grid_index++) {
@@ -804,6 +824,7 @@ void init_grid_map(Drive *env) {
             }
         }
     }
+    free(cell_entities_insert_index);
 }
 
 void init_neighbor_offsets(Drive *env) {

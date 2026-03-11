@@ -184,7 +184,7 @@ class PuffeRL:
             ensure_drive_binary()
 
         # LSTM
-        if config.get("policy_architecture", "Recurrent") == "Recurrent":
+        if config.get("rnn_name", "Recurrent") == "Recurrent":
             h = policy.hidden_size
             if self.population_play:
                 n = vecenv.ego_agents_per_batch  # Use ego agents per batch
@@ -197,7 +197,7 @@ class PuffeRL:
                 self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
 
         # TRANSFORMER
-        if config.get("policy_architecture", "Recurrent") == "Transformer":
+        if config.get("rnn_name", "Recurrent") == "Transformer":
             h = policy.hidden_size
 
             if self.population_play:
@@ -349,17 +349,17 @@ class PuffeRL:
         device = config["device"]
 
         # Reset hidden states for both RNN and Transformer
-        if config.get("policy_architecture", "Recurrent") == "Recurrent":
+        if config.get("rnn_name", "Recurrent") == "Recurrent":
             for k in self.lstm_h:
                 self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
 
-        if config.get("policy_architecture", "Recurrent") == "Transformer":
+        if config.get("rnn_name", "Recurrent") == "Transformer":
             h = self.policy.hidden_size
             for k in self.transformer_context:
                 n = self.transformer_context[k].shape[0]
                 # Pre-allocate full buffer instead of empty
-                self.transformer_context[k] = torch.zeros(n, self.context_length, h, device=device)
+                self.transformer_context[k] = torch.zeros(n, self.horizon, h, device=device)
                 self.transformer_position[k] = torch.zeros(1, dtype=torch.long, device=device)
 
         self.full_rows = 0
@@ -422,11 +422,11 @@ class PuffeRL:
                     batch_size = self.vecenv.agents_per_batch
                 state_key = (env_id.start // batch_size) * batch_size
 
-                if config.get("policy_architecture", "Recurrent") == "Recurrent":
+                if config.get("rnn_name", "Recurrent") == "Recurrent":
                     state["lstm_h"] = self.lstm_h[state_key]
                     state["lstm_c"] = self.lstm_c[state_key]
 
-                if config.get("policy_architecture", "Recurrent") == "Transformer":
+                if config.get("rnn_name", "Recurrent") == "Transformer":
                     state["transformer_context"] = self.transformer_context[state_key]
                     state["transformer_position"] = self.transformer_position[state_key]
                     # Note: terminals not needed for eval since we're doing single-step inference
@@ -438,7 +438,7 @@ class PuffeRL:
             profile("eval_copy", epoch)
             with torch.no_grad():
                 # Update hidden states after forward pass
-                if config.get("policy_architecture", "Recurrent") == "Recurrent":
+                if config.get("rnn_name", "Recurrent") == "Recurrent":
                     if self.population_play:
                         batch_size = self.vecenv.ego_agents_per_batch
                     else:
@@ -448,7 +448,7 @@ class PuffeRL:
                     self.lstm_h[lstm_key] = state["lstm_h"]
                     self.lstm_c[lstm_key] = state["lstm_c"]
 
-                if config.get("policy_architecture", "Recurrent") == "Transformer":
+                if config.get("rnn_name", "Recurrent") == "Transformer":
                     if self.population_play:
                         batch_size = self.vecenv.ego_agents_per_batch
                     else:
@@ -601,8 +601,8 @@ class PuffeRL:
 
             # Handle observation reshaping based on model type
             if (
-                not config.get("policy_architecture", "Recurrent") == "Recurrent"
-                and not config.get("policy_architecture", "Recurrent") == "Transformer"
+                not config.get("rnn_name", "Recurrent") == "Recurrent"
+                and not config.get("rnn_name", "Recurrent") == "Transformer"
             ):
                 # Flatten for non-recurrent models
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
@@ -612,10 +612,10 @@ class PuffeRL:
             )
 
             # Add appropriate state based on model type
-            if config.get("policy_architecture", "Recurrent") == "Recurrent":
+            if config.get("rnn_name", "Recurrent") == "Recurrent":
                 state["lstm_h"] = None
                 state["lstm_c"] = None
-            elif config.get("policy_architecture", "Recurrent") == "Transformer":
+            elif config.get("rnn_name", "Recurrent") == "Transformer":
                 state["transformer_context"] = None
                 state["transformer_position"] = None
                 state["terminals"] = mb_terminals  # For episode boundary masking
@@ -624,8 +624,8 @@ class PuffeRL:
 
             # Handle action sampling based on observation shape
             if (
-                config.get("policy_architecture", "Recurrent") == "Recurrent"
-                or config.get("policy_architecture", "Recurrent") == "Transformer"
+                config.get("rnn_name", "Recurrent") == "Recurrent"
+                or config.get("rnn_name", "Recurrent") == "Transformer"
             ):
                 # Add this right before calling sample_logits
                 if isinstance(logits, tuple):
@@ -792,6 +792,38 @@ class PuffeRL:
             self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training
         ):
             pufferlib.utils.run_human_replay_eval_in_subprocess(self.config, self.logger, self.global_step)
+
+        # Eval rendering (ego vs human logs)
+        if self.config["eval"].get("human_replay_eval", False):
+            if self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training:
+                model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
+                model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
+
+                if model_files:
+                    latest_cpt = max(model_files, key=os.path.getctime)
+                    bin_path = f"{model_dir}.bin"
+
+                    try:
+                        export_args = {"env_name": self.config["env"], "load_model_path": latest_cpt, **self.config}
+                        export(
+                            args=export_args,
+                            env_name=self.config["env"],
+                            vecenv=self.vecenv,
+                            policy=self.uncompiled_policy,
+                            path=bin_path,
+                            silent=True,
+                        )
+                        eval_video_dir = os.path.join(model_dir, "eval_videos")
+                        pufferlib.utils.render_human_replay_videos(
+                            config=self.config,
+                            policy_bin_path=bin_path,
+                            output_dir=eval_video_dir,
+                            num_maps=self.config["eval"].get("human_replay_render_num_maps", 3),
+                            logger=self.logger,
+                            global_step=self.global_step,
+                        )
+                    except Exception as e:
+                        print(f"Failed to render eval videos: {e}")
 
     def mean_and_log(self):
         config = self.config
@@ -1680,8 +1712,6 @@ def load_policy(args, vecenv, env_name=""):
     env_module = importlib.import_module(module_name)
 
     device = args["train"]["device"]
-    policy_cls = getattr(env_module.torch, args["policy_name"])
-    policy = policy_cls(vecenv.driver_env, **args["policy"])
 
     # Handle both RNN and Transformer wrappers
     policy_architecture = args.get("policy_architecture", "Recurrent")
@@ -1701,29 +1731,48 @@ def load_policy(args, vecenv, env_name=""):
     policy = policy.to(device)
 
     load_id = args["load_id"]
-    if load_id is not None:
+    state_dict = None
+
+    if load_path is not None:
+        state_dict = torch.load(load_path, map_location=device)
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    elif load_id is not None:
         if args["neptune"]:
             path = NeptuneLogger(args, load_id, mode="read-only").download()
         elif args["wandb"]:
             path = WandbLogger(args, load_id).download()
         else:
             raise pufferlib.APIUsageError("No run id provided for eval")
-
         state_dict = torch.load(path, map_location=device)
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        policy.load_state_dict(state_dict)
 
-    load_path = args["load_model_path"]
-    if load_path == "latest":
-        load_path = max(glob.glob(f"experiments/{env_name}*.pt"), key=os.path.getctime)
+    # Auto-detect architecture from state_dict keys
+    if state_dict is not None:
+        if "positional_embedding" in state_dict:
+            rnn_name = "Transformer"
+        elif "lstm.weight_ih_l0" in state_dict:
+            rnn_name = "Recurrent"
 
-    if load_path is not None:
-        state_dict = torch.load(load_path, map_location=device)
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    policy_cls = getattr(env_module.torch, args["policy_name"])
+    policy = policy_cls(vecenv.driver_env, **args["policy"])
+
+    # Handle both RNN and Transformer wrappers via rnn_name
+    if rnn_name == "Transformer":
+        # Load transformer wrapper
+        transformer_cls = getattr(env_module.torch, rnn_name)
+        # Use config horizon, fallback to episode_length
+        args["transformer"]["horizon"] = args["train"].get("horizon", vecenv.driver_env.episode_length)
+        policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
+    elif rnn_name is not None:
+        # Load RNN wrapper (Recurrent)
+        rnn_cls = getattr(env_module.torch, rnn_name)
+        policy = rnn_cls(vecenv.driver_env, policy, **args["rnn"])
+
+    policy = policy.to(device)
+
+    # Load the state dict if we have one
+    if state_dict is not None:
         policy.load_state_dict(state_dict)
-        # state_path = os.path.join(*load_path.split('/')[:-1], 'state.pt')
-        # optim_state = torch.load(state_path)['optimizer_state_dict']
-        # pufferl.optimizer.load_state_dict(optim_state)
 
     return policy
 

@@ -79,6 +79,9 @@ class Drive(pufferlib.PufferEnv):
 
         if episode_length != None:
             self.scenario_length = episode_length
+        # Only set episode_length if not already set (adaptive.py sets it before calling super())
+        if not hasattr(self, "episode_length"):
+            self.episode_length = self.scenario_length
 
         # Adaptive driving agent setup
         self.adaptive_driving_agent = int(adaptive_driving_agent)
@@ -223,11 +226,11 @@ class Drive(pufferlib.PufferEnv):
 
         self._action_type_flag = 0 if action_type == "discrete" else 1
 
-        # Check if resources directory exists
-        binary_path = f"{map_dir}/map_000.bin"
+        # Check if resources directory exists (check map_001 since some datasets start at 001)
+        binary_path = f"{map_dir}/map_001.bin"
         if not os.path.exists(binary_path):
             raise FileNotFoundError(
-                f"Required directory {binary_path} not found. Please ensure the Drive maps are downloaded and installed correctly per docs."
+                f"Required file {binary_path} not found. Please ensure the Drive maps are downloaded and installed correctly per docs."
             )
 
         # Check maps availability
@@ -407,9 +410,11 @@ class Drive(pufferlib.PufferEnv):
             self.agent_offsets, self.map_ids, self.num_envs = my_shared_tuple
             self.ego_ids = [i for i in range(self.agent_offsets[-1])]
             if len(self.ego_ids) != self.num_agents:
-                raise ValueError(
-                    f"mismatch between number of ego agents {len(self.ego_ids)} and number of agents {self.num_agents}"
+                print(
+                    f"Warning: requested {self.num_agents} agents but maps contain {len(self.ego_ids)} valid agents. Adjusting.",
+                    flush=True,
                 )
+                self.num_agents = len(self.ego_ids)
             self.local_co_player_ids = [[] for i in range(self.num_envs)]
             self.local_ego_ids = [[0] for i in range(self.num_envs)]
 
@@ -872,7 +877,11 @@ def save_map_binary(map_data, output_file, unique_map_id):
             elif obj_type == "cyclist":
                 obj_type = 3
             f.write(struct.pack("i", obj_type))  # type
-            f.write(struct.pack("i", obj.get("id", 0)))  # id
+            # Truncate large IDs to fit in int32 range
+            obj_id = obj.get("id", 0)
+            if isinstance(obj_id, int) and (obj_id > 2147483647 or obj_id < -2147483648):
+                obj_id = obj_id % 2147483647
+            f.write(struct.pack("i", obj_id))  # id
             f.write(struct.pack("i", trajectory_length))  # array_size
             # Write position arrays
             positions = obj.get("position", [])
@@ -952,7 +961,11 @@ def save_map_binary(map_data, output_file, unique_map_id):
                 road_type = 10
             # Write base entity data
             f.write(struct.pack("i", road_type))  # type
-            f.write(struct.pack("i", road.get("id", 0)))  # id
+            # Truncate large IDs to fit in int32 range
+            road_id = road.get("id", 0)
+            if isinstance(road_id, int) and (road_id > 2147483647 or road_id < -2147483648):
+                road_id = road_id % 2147483647
+            f.write(struct.pack("i", road_id))  # id
             f.write(struct.pack("i", size))  # array_size
 
             # Write position arrays
@@ -1084,7 +1097,8 @@ def test_performance(timeout=10, atn_cache=1024, num_agents=1024):
 if __name__ == "__main__":
     # test_performance()
     # Process the train dataset
-    process_all_maps(data_folder="/data/processed/training")
+    # process_all_maps(data_folder="/data/processed/training")
+    process_all_maps(data_folder="/data/nuplan_gpudrive/nuplan")
     # Process the validation/test dataset
     # process_all_maps(data_folder="data/processed/validation")
     # # Process the validation_interactive dataset

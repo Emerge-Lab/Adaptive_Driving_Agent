@@ -20,7 +20,7 @@ def run_training_test(env_name, config_overrides, target_steps=10000, test_name=
                 "compile": False,
                 "total_timesteps": 100000,
                 "batch_size": 64,
-                "bptt_horizon": 8,
+                "horizon": 8,
                 "minibatch_size": 64,
                 "max_minibatch_size": 64,
                 "update_epochs": 1,

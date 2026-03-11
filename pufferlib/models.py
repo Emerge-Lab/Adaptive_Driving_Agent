@@ -208,7 +208,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         hidden_size=128,
         num_layers=4,
         num_heads=8,
-        context_length=512,
+        horizon=512,
         dropout=0.0,
     ):
         """Wraps your policy with a Transformer for temporal modeling.
@@ -220,7 +220,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             hidden_size: Transformer hidden dimension
             num_layers: Number of transformer layers
             num_heads: Number of attention heads
-            context_length: Maximum sequence length to attend over
+            horizon: Maximum sequence length to attend over
             dropout: Dropout probability
         """
         super().__init__()
@@ -228,7 +228,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         self.policy = policy
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.context_length = context_length
+        self.horizon = horizon
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.is_continuous = self.policy.is_continuous
@@ -240,7 +240,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             self.input_projection = nn.Identity()
 
         # Learnable positional embeddings
-        self.positional_embedding = nn.Parameter(torch.zeros(1, context_length, hidden_size))
+        self.positional_embedding = nn.Parameter(torch.zeros(1, horizon, hidden_size))
         nn.init.normal_(self.positional_embedding, std=0.02)
 
         # Transformer encoder
@@ -307,33 +307,29 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         hidden = self.input_projection(hidden)
 
         if "transformer_context" not in state or state["transformer_context"] is None:
-            context = torch.zeros(B, self.context_length, self.hidden_size, device=device)
+            context = torch.zeros(B, self.horizon, self.hidden_size, device=device)
             pos = torch.zeros(1, dtype=torch.long, device=device)
         else:
             context = state["transformer_context"]
             pos = state.get("transformer_position", torch.zeros(1, dtype=torch.long, device=device))
 
-            if (
-                context.shape[-1] != self.hidden_size
-                or context.shape[0] != B
-                or context.shape[1] != self.context_length
-            ):
-                context = torch.zeros(B, self.context_length, self.hidden_size, device=device)
+            if context.shape[-1] != self.hidden_size or context.shape[0] != B or context.shape[1] != self.horizon:
+                context = torch.zeros(B, self.horizon, self.hidden_size, device=device)
                 pos = torch.zeros(1, dtype=torch.long, device=device)
 
-        write_idx = (pos % self.context_length).long()
+        write_idx = (pos % self.horizon).long()
         context[:, write_idx, :] = hidden.unsqueeze(1)
         pos = pos + 1
 
-        pos_embed = self.positional_embedding[:, : self.context_length]
+        pos_embed = self.positional_embedding[:, : self.horizon]
         context_with_pos = context + pos_embed
 
-        causal_mask = self.get_causal_mask(self.context_length, device)
+        causal_mask = self.get_causal_mask(self.horizon, device)
 
         output = self.transformer(context_with_pos, mask=causal_mask, is_causal=True)
         output = self.output_norm(output)
 
-        read_idx = ((pos - 1) % self.context_length).long()
+        read_idx = ((pos - 1) % self.horizon).long()
         hidden_out = output[:, read_idx, :].squeeze(1)
 
         state["transformer_context"] = context
@@ -361,7 +357,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         hidden = self.input_projection(hidden)
 
         # Remove dynamic truncation - use clamp instead of if
-        T_actual = min(T, self.context_length)  # Python int, fine
+        T_actual = min(T, self.horizon)  # Python int, fine
         if T_actual < T:
             hidden = hidden[:, -T_actual:]
             T = T_actual
@@ -390,7 +386,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         values = values.view(B, T)
 
         # Use Python int for context_len - no sync
-        context_len = min(T, self.context_length)
+        context_len = min(T, self.horizon)
         state["hidden"] = hidden
         state["transformer_context"] = hidden[:, -context_len:].detach()
         state["transformer_position"] = torch.full((B,), context_len - 1, dtype=torch.long, device=device)

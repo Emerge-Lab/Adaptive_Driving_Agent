@@ -34,20 +34,18 @@ void test_drivenet() {
 void demo() {
 
     // Note: The settings below are hardcoded for demo purposes. Since the policy was
-    // trained with these exact settings, that changing them may lead to
-    // weird behavior.
+    // trained with these exact settings, changing them may lead to weird behavior.
     Drive env = {
         .human_agent_idx = 0,
-        .dynamics_model = conf.dynamics_model,
-        .reward_vehicle_collision = conf.reward_vehicle_collision,
-        .reward_offroad_collision = conf.reward_offroad_collision,
-        .reward_ade = conf.reward_ade,
-        .goal_radius = conf.goal_radius,
-        .dt = conf.dt,
+        .dynamics_model = CLASSIC,
+        .reward_vehicle_collision = -1.0f,
+        .reward_offroad_collision = -1.0f,
+        .goal_radius = 2.0f,
+        .dt = 0.1f,
         .map_name = "resources/drive/binaries/training/map_000.bin",
-        .init_steps = conf.init_steps,
-        .collision_behavior = conf.collision_behavior,
-        .offroad_behavior = conf.offroad_behavior,
+        .init_steps = 0,
+        .collision_behavior = 0,
+        .offroad_behavior = 0,
     };
     allocate(&env);
     c_reset(&env);
