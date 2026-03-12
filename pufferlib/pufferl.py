@@ -76,11 +76,17 @@ class PuffeRL:
         # Vecenv info
         self.adaptive_driving_agent = getattr(vecenv.driver_env, "env_name", None) == "adaptive_drive"
         if self.adaptive_driving_agent:
-            # For adaptive driving, horizon equals episode_length
-            config["horizon"] = vecenv.driver_env.episode_length
-
-        # Set horizon for all cases (default to episode_length for full context)
-        self.horizon = config.get("horizon", vecenv.driver_env.episode_length)
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
+                config["bptt_horizon"] = vecenv.driver_env.episode_length
+            if config.get("policy_architecture", "Recurrent") == "Transformer":
+                config["context_length"] = self.context_length = vecenv.driver_env.episode_length
+                config["bptt_horizon"] = (
+                    vecenv.driver_env.episode_length
+                )  ## this is used downstream so you need to define it too
+        else:
+            if config.get("policy_architecture", "Recurrent") == "Transformer":
+                self.context_length = config["context_length"]
+                config["bptt_horizon"] = config["context_length"]
 
         vecenv.async_reset(seed)
         obs_space = vecenv.single_observation_space
@@ -90,8 +96,10 @@ class PuffeRL:
         if self.population_play:
             total_ego_agents = vecenv.num_ego_agents
             agents_for_calc = total_ego_agents
-            # Both Recurrent and Transformer use horizon for batch calculation
-            batch_size = vecenv.driver_env.num_ego_agents * config["horizon"] * vecenv.num_workers
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
+                batch_size = vecenv.driver_env.num_ego_agents * config["bptt_horizon"] * vecenv.num_workers
+            if config.get("policy_architecture", "Recurrent") == "Transformer":
+                batch_size = vecenv.driver_env.num_ego_agents * config["context_length"] * vecenv.num_workers
             config["batch_size"] = batch_size  ## this is dynamic and based on ego agents
         else:
             agents_for_calc = total_agents
@@ -100,15 +108,39 @@ class PuffeRL:
         self.total_agents = total_agents
 
         # Experience
-        if config["batch_size"] == "auto" and config.get("horizon", "auto") == "auto":
-            raise pufferlib.APIUsageError("Must specify batch_size or horizon")
+        if (
+            config["batch_size"] == "auto"
+            and config.get("bptt_horizon", "auto") == "auto"
+            and config.get("context_length", "auto") == "auto"
+        ):
+            raise pufferlib.APIUsageError("Must specify batch_size, bptt_horizon, or context_length")
         elif config["batch_size"] == "auto":
-            config["batch_size"] = agents_for_calc * config["horizon"]
-        elif config.get("horizon", "auto") == "auto":
-            config["horizon"] = config["batch_size"] // agents_for_calc
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
+                config["batch_size"] = agents_for_calc * config["bptt_horizon"]
+            elif config.get("policy_architecture", "Recurrent") == "Transformer":
+                config["batch_size"] = agents_for_calc * config["context_length"]
+        elif (
+            config.get("bptt_horizon", "auto") == "auto"
+            and config.get("policy_architecture", "Recurrent") == "Recurrent"
+        ):
+            config["bptt_horizon"] = config["batch_size"] // agents_for_calc
+        elif (
+            config.get("context_length", "auto") == "auto"
+            and config.get("policy_architecture", "Recurrent") == "Transformer"
+        ):
+            config["context_length"] = config["batch_size"] // agents_for_calc
 
         batch_size = config["batch_size"]
-        horizon = config["horizon"]
+
+        # Set horizon based on model type
+        if config.get("policy_architecture", "Recurrent") == "Recurrent":
+            horizon = config["bptt_horizon"]
+        elif config.get("policy_architecture", "Recurrent") == "Transformer":
+            horizon = config["context_length"]
+        else:
+            horizon = config.get("bptt_horizon", config.get("context_length", 1))
+
+        config["bptt_horizon"] = horizon  # For backward compatibility
 
         segments = batch_size // horizon
         self.segments = segments
@@ -398,7 +430,7 @@ class PuffeRL:
                     state["transformer_context"] = self.transformer_context[state_key]
                     state["transformer_position"] = self.transformer_position[state_key]
                     # Note: terminals not needed for eval since we're doing single-step inference
-
+                print(f"o_device shape: {o_device.shape}", flush=True)
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
@@ -453,8 +485,13 @@ class PuffeRL:
 
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
-                # Use horizon (unified for both Recurrent and Transformer)
-                if l + 1 >= config["horizon"]:
+                # Use appropriate horizon based on model type
+                horizon = (
+                    config.get("context_length")
+                    if config.get("policy_architecture", "Recurrent") == "Transformer"
+                    else config["bptt_horizon"]
+                )
+                if l + 1 >= horizon:
                     num_full = env_id.stop - env_id.start
                     self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config["device"]).int()
                     self.ep_lengths[env_id] = 0
@@ -1254,8 +1291,13 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     elif args["wandb"]:
         logger = WandbLogger(args)
 
-    train_config = dict(**args["train"], env=env_name, eval=args.get("eval", {}), env_config=args.get("env", {}))
-    # horizon is set in config; for adaptive driving, PuffeRL.__init__ will override to episode_length
+    train_config = dict(
+        **args["train"],
+        env=env_name,
+        eval=args.get("eval", {}),
+        env_config=args.get("env", {}),
+        policy_architecture=args.get("policy_architecture", "Recurrent"),
+    )
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
@@ -1671,11 +1713,22 @@ def load_policy(args, vecenv, env_name=""):
 
     device = args["train"]["device"]
 
-    # Detect architecture from checkpoint if loading a model
-    rnn_name = args.get("rnn_name")
-    load_path = args["load_model_path"]
-    if load_path == "latest":
-        load_path = max(glob.glob(f"experiments/{env_name}*.pt"), key=os.path.getctime)
+    # Handle both RNN and Transformer wrappers
+    policy_architecture = args.get("policy_architecture", "Recurrent")
+
+    if policy_architecture == "Transformer":  # Load transformer wrapper
+        transformer_cls = getattr(env_module.torch, policy_architecture)
+        if args.get("env_name") == "puffer_drive":
+            args["transformer"]["context_length"] = args["train"]["context_length"]
+        elif agrs.get("env_name") == "puffer_adaptive_drive":
+            args["transformer"]["context_length"] = vecenv.driver_env.episode_length
+        policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
+    elif policy_architecture == "Recurrent":
+        # Load RNN wrapper
+        rnn_cls = getattr(env_module.torch, policy_architecture)
+        policy = rnn_cls(vecenv.driver_env, policy, **args["rnn"])
+
+    policy = policy.to(device)
 
     load_id = args["load_id"]
     state_dict = None

@@ -665,9 +665,8 @@ class HumanReplayEvaluator:
                 lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
                 lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
             )
-        elif is_transformer:
-            # Get horizon from the policy (TransformerWrapper stores it)
-            horizon = policy.horizon
+        elif policy_architecture == "Transformer":
+            context_length = args["train"].get("context_length", 182)
             state = dict(
                 transformer_context=torch.zeros(num_agents, horizon, policy.hidden_size, device=device),
                 transformer_position=torch.zeros(1, dtype=torch.long, device=device),
