@@ -241,6 +241,13 @@ def main():
             values = [r.get(key, 0) for r in all_results]
             aggregated[key] = float(np.mean(values))
 
+    # Aggregate scenario-specific metrics (scenario_0_*, scenario_1_*, etc.)
+    scenario_keys = [k for k in all_keys if k.startswith("scenario_")]
+    for key in scenario_keys:
+        values = [r.get(key, 0) for r in all_results]
+        aggregated[key] = float(np.mean(values))
+
+    if delta_keys:
         # Derive last scenario metrics from first + delta
         # Extract first scenario metrics
         first_scenario_keys = [k for k in metric_keys if k not in ["n"]]
@@ -271,24 +278,22 @@ def main():
         json.dump(aggregated, f, indent=2)
 
     # Print results
-    if args_parsed.adaptive_driving_agent and delta_keys:
-        print(f"\n0-Shot Performance (First Scenario):")
-        print(f"  Score: {aggregated.get('first_scenario_score', float('nan')):.3f}")
-        print(f"  Collision: {aggregated.get('first_scenario_collision_rate', float('nan')):.3f}")
-        print(f"  Offroad: {aggregated.get('first_scenario_offroad_rate', float('nan')):.3f}")
-        print(f"  Return: {aggregated.get('first_scenario_episode_return', float('nan')):.2f}")
+    if args_parsed.adaptive_driving_agent:
+        # Print per-scenario metrics
+        for i in range(args_parsed.k_scenarios):
+            label = "0-Shot" if i == 0 else f"Scenario {i}"
+            print(f"\n{label} Performance:")
+            print(f"  Score: {aggregated.get(f'scenario_{i}_score', float('nan')):.3f}")
+            print(f"  Collision: {aggregated.get(f'scenario_{i}_collision_rate', float('nan')):.3f}")
+            print(f"  Offroad: {aggregated.get(f'scenario_{i}_offroad_rate', float('nan')):.3f}")
+            print(f"  Return: {aggregated.get(f'scenario_{i}_episode_return', float('nan')):.2f}")
 
-        print(f"\nAdapted Performance (Last Scenario):")
-        print(f"  Score: {aggregated.get('last_scenario_score', float('nan')):.3f}")
-        print(f"  Collision: {aggregated.get('last_scenario_collision_rate', float('nan')):.3f}")
-        print(f"  Offroad: {aggregated.get('last_scenario_offroad_rate', float('nan')):.3f}")
-        print(f"  Return: {aggregated.get('last_scenario_episode_return', float('nan')):.2f}")
-
-        print(f"\nAdaptive Metrics (Delta):")
-        print(f"  Score: {aggregated.get('ada_delta_score', float('nan')):.4f}")
-        print(f"  Collision rate: {aggregated.get('ada_delta_collision_rate', float('nan')):.4f}")
-        print(f"  Offroad rate: {aggregated.get('ada_delta_offroad_rate', float('nan')):.4f}")
-        print(f"  Episode return: {aggregated.get('ada_delta_episode_return', float('nan')):.4f}")
+        if delta_keys:
+            print(f"\nAdaptive Metrics (Delta: Last - First):")
+            print(f"  Score: {aggregated.get('ada_delta_score', float('nan')):.4f}")
+            print(f"  Collision rate: {aggregated.get('ada_delta_collision_rate', float('nan')):.4f}")
+            print(f"  Offroad rate: {aggregated.get('ada_delta_offroad_rate', float('nan')):.4f}")
+            print(f"  Episode return: {aggregated.get('ada_delta_episode_return', float('nan')):.4f}")
 
     print(f"\nSaved to {args_parsed.output}")
     import sys

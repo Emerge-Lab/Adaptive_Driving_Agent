@@ -598,6 +598,10 @@ class Drive(pufferlib.PufferEnv):
                 scenario_log["scenario_id"] = self.current_scenario
                 self.scenario_metrics.append(scenario_log)
 
+                # Log metrics for all scenarios with scenario-specific prefixes
+                prefixed_log = {f"scenario_{self.current_scenario}_{k}": v for k, v in scenario_log.items() if k != "scenario_id"}
+                info.append(prefixed_log)
+
                 if self.current_scenario == self.k_scenarios - 1:
                     delta_metrics = self._compute_delta_metrics()
                     if delta_metrics:

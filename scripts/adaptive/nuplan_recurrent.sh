@@ -19,27 +19,26 @@
 
 # Co-player policies trained with scripts/coplayers/nuplan_recurrent.sh
 # Each entry: "policy_path entropy_weight_ub discount_weight_lb"
-# TODO: Update paths after training co-players
 ZIPPED_RUNS=(
-  "TODO_COPLAYER_PATH 0.5 0.8"
-  "TODO_COPLAYER_PATH 0.1 0.8"
-  "TODO_COPLAYER_PATH 0.01 0.8"
-  "TODO_COPLAYER_PATH 0 0.8"
+  "experiments/puffer_drive_mwiatx5g.pt 0.5 0.8"
+  "experiments/puffer_drive_old90mw2.pt 0.1 0.8"
+  "TODO_FAILED 0.01 0.8"
+  "TODO_FAILED 0 0.8"
 
-  "TODO_COPLAYER_PATH 0.5 0.6"
-  "TODO_COPLAYER_PATH 0.1 0.6"
-  "TODO_COPLAYER_PATH 0.01 0.6"
-  "TODO_COPLAYER_PATH 0 0.6"
+  "experiments/puffer_drive_hous32qj.pt 0.5 0.6"
+  "experiments/puffer_drive_dhxoorxc.pt 0.1 0.6"
+  "experiments/puffer_drive_0h5radmw.pt 0.01 0.6"
+  "experiments/puffer_drive_elet1zj8.pt 0 0.6"
 
-  "TODO_COPLAYER_PATH 0.5 0.4"
-  "TODO_COPLAYER_PATH 0.1 0.4"
-  "TODO_COPLAYER_PATH 0.01 0.4"
-  "TODO_COPLAYER_PATH 0 0.4"
+  "experiments/puffer_drive_a57umusk.pt 0.5 0.4"
+  "experiments/puffer_drive_zozl26ek.pt 0.1 0.4"
+  "experiments/puffer_drive_jco8adma.pt 0.01 0.4"
+  "experiments/puffer_drive_5hhwfmmt.pt 0 0.4"
 
-  "TODO_COPLAYER_PATH 0.5 0.2"
-  "TODO_COPLAYER_PATH 0.1 0.2"
-  "TODO_COPLAYER_PATH 0.01 0.2"
-  "TODO_COPLAYER_PATH 0 0.2"
+  "experiments/puffer_drive_a56dgt1x.pt 0.5 0.2"
+  "experiments/puffer_drive_dqzqt7qx.pt 0.1 0.2"
+  "experiments/puffer_drive_qetoozcn.pt 0.01 0.2"
+  "experiments/puffer_drive_q30rjcbu.pt 0 0.2"
 )
 
 read -r COPLAYER_PATH ENTROPY_UB DISCOUNT_LB <<< "${ZIPPED_RUNS[$SLURM_ARRAY_TASK_ID]}"
@@ -63,7 +62,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_adaptive_drive --wandb --tag adaptive_nuplan_recurrent \
+   puffer train puffer_adaptive_drive --wandb --tag adaptive_nuplan_recurrent_k2 \
      --env.map-dir resources/drive/binaries/nuplan \
      --env.num-maps $NUPLAN_NUM_MAPS \
      --env.conditioning.type none \

@@ -19,27 +19,26 @@
 
 # Co-player policies trained with scripts/coplayers/nuplan_transformer.sh
 # Each entry: "policy_path entropy_weight_ub discount_weight_lb"
-# TODO: Update paths after training co-players
 ZIPPED_RUNS=(
-  "TODO_COPLAYER_PATH 0.5 0.8"
-  "TODO_COPLAYER_PATH 0.1 0.8"
-  "TODO_COPLAYER_PATH 0.01 0.8"
-  "TODO_COPLAYER_PATH 0 0.8"
+  "experiments/puffer_drive_4nd35ic5.pt 0.5 0.8"
+  "experiments/puffer_drive_zldh9cp8.pt 0.1 0.8"
+  "experiments/puffer_drive_71mz4gzn.pt 0.01 0.8"
+  "experiments/puffer_drive_9kzdmusb.pt 0 0.8"
 
-  "TODO_COPLAYER_PATH 0.5 0.6"
-  "TODO_COPLAYER_PATH 0.1 0.6"
-  "TODO_COPLAYER_PATH 0.01 0.6"
-  "TODO_COPLAYER_PATH 0 0.6"
+  "experiments/puffer_drive_1wbs70vj.pt 0.5 0.6"
+  "experiments/puffer_drive_umev7gak.pt 0.1 0.6"
+  "experiments/puffer_drive_pqnboy8h.pt 0.01 0.6"
+  "TODO_RUNNING 0 0.6"
 
-  "TODO_COPLAYER_PATH 0.5 0.4"
-  "TODO_COPLAYER_PATH 0.1 0.4"
-  "TODO_COPLAYER_PATH 0.01 0.4"
-  "TODO_COPLAYER_PATH 0 0.4"
+  "TODO_RUNNING 0.5 0.4"
+  "TODO_RUNNING 0.1 0.4"
+  "TODO_RUNNING 0.01 0.4"
+  "TODO_RUNNING 0 0.4"
 
-  "TODO_COPLAYER_PATH 0.5 0.2"
-  "TODO_COPLAYER_PATH 0.1 0.2"
-  "TODO_COPLAYER_PATH 0.01 0.2"
-  "TODO_COPLAYER_PATH 0 0.2"
+  "TODO_RUNNING 0.5 0.2"
+  "TODO_RUNNING 0.1 0.2"
+  "TODO_RUNNING 0.01 0.2"
+  "TODO_RUNNING 0 0.2"
 )
 
 read -r COPLAYER_PATH ENTROPY_UB DISCOUNT_LB <<< "${ZIPPED_RUNS[$SLURM_ARRAY_TASK_ID]}"
@@ -63,7 +62,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_adaptive_drive --wandb --tag adaptive_nuplan_transformer \
+   puffer train puffer_adaptive_drive --wandb --tag adaptive_nuplan_transformer_new \
      --env.map-dir resources/drive/binaries/nuplan \
      --env.num-maps $NUPLAN_NUM_MAPS \
      --env.conditioning.type none \

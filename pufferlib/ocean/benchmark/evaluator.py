@@ -676,6 +676,7 @@ class HumanReplayEvaluator:
             state = {}
 
         collected_infos = []
+        scenario_metrics = {}  # Store scenario-specific metrics (scenario_0_*, scenario_1_*, etc.)
         delta_metrics = None
 
         # Loop through scenarios
@@ -708,6 +709,9 @@ class HumanReplayEvaluator:
                         if isinstance(info_dict, dict):
                             if "ada_delta_score" in info_dict:
                                 delta_metrics = info_dict
+                            elif any(k.startswith("scenario_") for k in info_dict.keys()):
+                                # Scenario-specific metrics (scenario_0_*, scenario_1_*, etc.)
+                                scenario_metrics.update(info_dict)
                             elif "score" in info_dict:
                                 collected_infos.append(info_dict)
 
@@ -718,6 +722,10 @@ class HumanReplayEvaluator:
             for key in metric_keys:
                 values = [info.get(key, 0) for info in collected_infos]
                 aggregated[key] = np.mean(values)
+
+            # Merge scenario-specific metrics if they exist
+            if scenario_metrics:
+                aggregated.update(scenario_metrics)
 
             # Merge delta metrics if they exist
             if delta_metrics:

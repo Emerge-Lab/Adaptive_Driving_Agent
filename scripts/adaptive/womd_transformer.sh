@@ -19,27 +19,26 @@
 
 # Co-player policies trained with scripts/coplayers/womd_transformer.sh
 # Each entry: "policy_path entropy_weight_ub discount_weight_lb"
-# TODO: Update paths after training co-players
 ZIPPED_RUNS=(
-  "TODO_COPLAYER_PATH 0.5 0.8"
-  "TODO_COPLAYER_PATH 0.1 0.8"
-  "TODO_COPLAYER_PATH 0.01 0.8"
-  "TODO_COPLAYER_PATH 0 0.8"
+  "experiments/puffer_drive_zagelrzs.pt 0.5 0.8"
+  "experiments/puffer_drive_d8kb6hwf.pt 0.1 0.8"
+  "experiments/puffer_drive_xdmwezaw.pt 0.01 0.8"
+  "experiments/puffer_drive_0cxi9nf8.pt 0 0.8"
 
-  "TODO_COPLAYER_PATH 0.5 0.6"
-  "TODO_COPLAYER_PATH 0.1 0.6"
-  "TODO_COPLAYER_PATH 0.01 0.6"
-  "TODO_COPLAYER_PATH 0 0.6"
+  "experiments/puffer_drive_t69evoxz.pt 0.5 0.6"
+  "experiments/puffer_drive_yuuod9cn.pt 0.1 0.6"
+  "experiments/puffer_drive_436bzeu2.pt 0.01 0.6"
+  "experiments/puffer_drive_ct49w01c.pt 0 0.6"
 
-  "TODO_COPLAYER_PATH 0.5 0.4"
-  "TODO_COPLAYER_PATH 0.1 0.4"
-  "TODO_COPLAYER_PATH 0.01 0.4"
-  "TODO_COPLAYER_PATH 0 0.4"
+  "experiments/puffer_drive_1e54zwgz.pt 0.5 0.4"
+  "experiments/puffer_drive_epupe6sw.pt 0.1 0.4"
+  "experiments/puffer_drive_npqu25y1.pt 0.01 0.4"
+  "experiments/puffer_drive_v9urng8s.pt 0 0.4"
 
-  "TODO_COPLAYER_PATH 0.5 0.2"
-  "TODO_COPLAYER_PATH 0.1 0.2"
-  "TODO_COPLAYER_PATH 0.01 0.2"
-  "TODO_COPLAYER_PATH 0 0.2"
+  "experiments/puffer_drive_fugsjie2.pt 0.5 0.2"
+  "experiments/puffer_drive_iejlfoo7.pt 0.1 0.2"
+  "experiments/puffer_drive_rl7e091t.pt 0.01 0.2"
+  "experiments/puffer_drive_vztz9mmh.pt 0 0.2"
 )
 
 read -r COPLAYER_PATH ENTROPY_UB DISCOUNT_LB <<< "${ZIPPED_RUNS[$SLURM_ARRAY_TASK_ID]}"
@@ -62,7 +61,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_adaptive_drive --wandb --tag adaptive_womd_transformer \
+   puffer train puffer_adaptive_drive --wandb --tag adaptive_womd_transformer_new \
      --env.num-maps 10000 \
      --env.conditioning.type none \
      --env.co-player-enabled 1 \

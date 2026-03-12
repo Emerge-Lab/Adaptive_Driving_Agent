@@ -17,25 +17,25 @@
 # Co-player policies trained with scripts/coplayers/womd_recurrent.sh
 # Each entry: "policy_path entropy_weight_ub discount_weight_lb"
 ZIPPED_RUNS=(
-  "experiments/puffer_drive_8u92j3ts/model_puffer_drive_003000.pt 0.5 0.8"
-  "experiments/puffer_drive_x4xs711x.pt 0.1 0.8"
-  "experiments/puffer_drive_hhzdzhl8.pt 0.01 0.8"
-  "experiments/puffer_drive_3xd48djp.pt 0 0.8"
+  "experiments/puffer_drive_o9brlhxk.pt 0.5 0.8"
+  "experiments/puffer_drive_ufgi4za3.pt 0.1 0.8"
+  "experiments/puffer_drive_h97urhep.pt 0.01 0.8"
+  "experiments/puffer_drive_sa0w31jc.pt 0 0.8"
 
-  "experiments/puffer_drive_fgglgofu.pt 0.5 0.6"
-  "experiments/puffer_drive_g3x9e5rn.pt 0.01 0.6"
-  "experiments/puffer_drive_gzuuzs0o.pt 0.1 0.6"
-  "experiments/puffer_drive_6nzf7xha.pt 0 0.6"
+  "experiments/puffer_drive_ojounplt.pt 0.5 0.6"
+  "experiments/puffer_drive_5tr8vzex.pt 0.1 0.6"
+  "experiments/puffer_drive_wr30n6a9.pt 0.01 0.6"
+  "experiments/puffer_drive_use1k7kc.pt 0 0.6"
 
-  "experiments/puffer_drive_3iefv59j.pt 0.5 0.4"
-  "experiments/puffer_drive_7h07nrxy.pt 0.1 0.4"
-  "experiments/puffer_drive_bot2wl0m.pt 0.01 0.4"
-  "experiments/puffer_drive_n7mx9f4b.pt 0 0.4"
+  "experiments/puffer_drive_nb2vowrz.pt 0.5 0.4"
+  "experiments/puffer_drive_e3e6vion.pt 0.1 0.4"
+  "experiments/puffer_drive_yyu6icxx.pt 0.01 0.4"
+  "experiments/puffer_drive_iuzoucs0.pt 0 0.4"
 
-  "experiments/puffer_drive_9jv4q77m.pt 0.5 0.2"
-  "experiments/puffer_drive_5p8gpw84.pt 0.1 0.2"
-  "experiments/puffer_drive_jskw659g.pt 0.01 0.2"
-  "experiments/puffer_drive_eeyizdrk.pt 0 0.2"
+  "experiments/puffer_drive_u8kntkem.pt 0.5 0.2"
+  "TODO_FAILED 0.1 0.2"
+  "experiments/puffer_drive_f8ccc1f1.pt 0.01 0.2"
+  "experiments/puffer_drive_04p394xa.pt 0 0.2"
 )
 
 read -r COPLAYER_PATH ENTROPY_UB DISCOUNT_LB <<< "${ZIPPED_RUNS[$SLURM_ARRAY_TASK_ID]}"
@@ -58,7 +58,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_adaptive_drive --wandb --tag adaptive_womd_recurrent \
+   puffer train puffer_adaptive_drive --wandb --tag adaptive_womd_recurrent_k2 \
      --env.num-maps 10000 \
      --env.conditioning.type none \
      --env.co-player-enabled 1 \

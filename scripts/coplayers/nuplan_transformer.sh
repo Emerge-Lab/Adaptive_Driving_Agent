@@ -62,7 +62,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_drive --wandb --wandb-project ada_new_coplayers --tag coplayer_nuplan_transformer \
+   puffer train puffer_drive --wandb --wandb-project ada_new_coplayers --tag coplayer_nuplan_transformer_lr3e4 \
      --env.map-dir resources/drive/binaries/nuplan \
      --env.num-maps $NUPLAN_NUM_MAPS \
      --env.conditioning.type $CONDITION_TYPE \
@@ -71,6 +71,8 @@ singularity exec --nv \
      --env.conditioning.discount-weight-lb $DISCOUNT_LB \
      --env.conditioning.discount-weight-ub $DISCOUNT_UB \
      --rnn-name Transformer \
+     --train.horizon 32 \
+     --train.learning-rate 0.0003 \
      --train.checkpoint-interval 50
 
    kill \$HEARTBEAT_PID
