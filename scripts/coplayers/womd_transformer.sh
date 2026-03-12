@@ -64,9 +64,9 @@ singularity exec --nv \
      --env.conditioning.entropy-weight-ub $ENTROPY_UB \
      --env.conditioning.discount-weight-lb $DISCOUNT_LB \
      --env.conditioning.discount-weight-ub $DISCOUNT_UB \
-     --rnn-name Transformer \
+     --policy-architecure Transformer \
      --train.horizon 32 \
-     --train.learning-rate 0.0003 \
+     --train.learning-rate 0.003 \
      --train.checkpoint-interval 50
 
    kill \$HEARTBEAT_PID

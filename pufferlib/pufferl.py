@@ -430,7 +430,7 @@ class PuffeRL:
                     state["transformer_context"] = self.transformer_context[state_key]
                     state["transformer_position"] = self.transformer_position[state_key]
                     # Note: terminals not needed for eval since we're doing single-step inference
-                print(f"o_device shape: {o_device.shape}", flush=True)
+
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
@@ -1713,25 +1713,10 @@ def load_policy(args, vecenv, env_name=""):
 
     device = args["train"]["device"]
 
-    # Handle both RNN and Transformer wrappers
-    policy_architecture = args.get("policy_architecture", "Recurrent")
-
-    if policy_architecture == "Transformer":  # Load transformer wrapper
-        transformer_cls = getattr(env_module.torch, policy_architecture)
-        if args.get("env_name") == "puffer_drive":
-            args["transformer"]["context_length"] = args["train"]["context_length"]
-        elif agrs.get("env_name") == "puffer_adaptive_drive":
-            args["transformer"]["context_length"] = vecenv.driver_env.episode_length
-        policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
-    elif policy_architecture == "Recurrent":
-        # Load RNN wrapper
-        rnn_cls = getattr(env_module.torch, policy_architecture)
-        policy = rnn_cls(vecenv.driver_env, policy, **args["rnn"])
-
-    policy = policy.to(device)
-
     load_id = args["load_id"]
+    load_path = args.get("load_model_path")
     state_dict = None
+    rnn_name = args.get("policy_architecture", "Recurrent")
 
     if load_path is not None:
         state_dict = torch.load(load_path, map_location=device)
