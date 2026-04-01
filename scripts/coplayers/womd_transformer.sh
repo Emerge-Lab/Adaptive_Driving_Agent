@@ -64,8 +64,9 @@ singularity exec --nv \
      --env.conditioning.entropy-weight-ub $ENTROPY_UB \
      --env.conditioning.discount-weight-lb $DISCOUNT_LB \
      --env.conditioning.discount-weight-ub $DISCOUNT_UB \
-     --policy-architecure Transformer \
-     --train.horizon 32 \
+     --policy-architecture Transformer \
+     --train.horizon 91 \
+     --train.context-length 91 \
      --train.learning-rate 0.003 \
      --train.checkpoint-interval 50
 

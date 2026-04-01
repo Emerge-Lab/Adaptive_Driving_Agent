@@ -20,25 +20,21 @@
 # Co-player policies trained with scripts/coplayers/nuplan_transformer.sh
 # Each entry: "policy_path entropy_weight_ub discount_weight_lb"
 ZIPPED_RUNS=(
-  "experiments/puffer_drive_4nd35ic5.pt 0.5 0.8"
-  "experiments/puffer_drive_zldh9cp8.pt 0.1 0.8"
-  "experiments/puffer_drive_71mz4gzn.pt 0.01 0.8"
-  "experiments/puffer_drive_9kzdmusb.pt 0 0.8"
-
-  "experiments/puffer_drive_1wbs70vj.pt 0.5 0.6"
-  "experiments/puffer_drive_umev7gak.pt 0.1 0.6"
-  "experiments/puffer_drive_pqnboy8h.pt 0.01 0.6"
-  "TODO_RUNNING 0 0.6"
-
-  "TODO_RUNNING 0.5 0.4"
-  "TODO_RUNNING 0.1 0.4"
-  "TODO_RUNNING 0.01 0.4"
-  "TODO_RUNNING 0 0.4"
-
-  "TODO_RUNNING 0.5 0.2"
-  "TODO_RUNNING 0.1 0.2"
-  "TODO_RUNNING 0.01 0.2"
-  "TODO_RUNNING 0 0.2"
+"experiments/puffer_drive_joqbmi4s.pt 0.01 0.2"
+"experiments/puffer_drive_0h81rtfi.pt 0 0.4"
+"experiments/puffer_drive_medzmgum.pt 0.1 0.2"
+"experiments/puffer_drive_f4a8yoi9.pt 0.5 0.2"
+"experiments/puffer_drive_b1yx43w2.pt 0.01 0.4"
+"experiments/puffer_drive_lv4x8hlt.pt 0.1 0.4"
+"experiments/puffer_drive_j51yz49e.pt 0.5 0.4"
+"experiments/puffer_drive_iry1wanp.pt 0 0.6"
+"experiments/puffer_drive_kx8bhu3v.pt 0.01 0.6"
+"experiments/puffer_drive_js4mf85k.pt 0.1 0.6"
+"experiments/puffer_drive_52u5onve.pt 0.5 0.6"
+"experiments/puffer_drive_nu7lkmx4.pt 0 0.8"
+"experiments/puffer_drive_f8dpkpbq.pt 0.01 0.8"
+"experiments/puffer_drive_zxsxu6z7.pt 0.1 0.8"
+"experiments/puffer_drive_mfahi5bc.pt 0.5 0.8"
 )
 
 read -r COPLAYER_PATH ENTROPY_UB DISCOUNT_LB <<< "${ZIPPED_RUNS[$SLURM_ARRAY_TASK_ID]}"
@@ -62,7 +58,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_adaptive_drive --wandb --tag adaptive_nuplan_transformer_new \
+   puffer train puffer_adaptive_drive --wandb --tag adaptive_nuplan_transformer_1apr \
      --env.map-dir resources/drive/binaries/nuplan \
      --env.num-maps $NUPLAN_NUM_MAPS \
      --env.conditioning.type none \
