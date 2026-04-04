@@ -64,6 +64,7 @@ singularity exec --nv \
      --env.conditioning.type none \
      --env.co-player-enabled 1 \
      --env.co-player-policy.policy-path $COPLAYER_PATH \
+     --env.co-player-policy.architecture Transformer \
      --env.co-player-policy.conditioning.type $CONDITION_TYPE \
      --env.co-player-policy.conditioning.discount-weight-lb $DISCOUNT_LB \
      --env.co-player-policy.conditioning.discount-weight-ub $DISCOUNT_UB \

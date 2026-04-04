@@ -848,6 +848,8 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         input_size = co_player_policy.get("input_size", 256)
         hidden_size = co_player_policy.get("hidden_size", 256)
         co_player_rnn = co_player_policy.get("rnn", None)
+        co_player_architecture = co_player_policy.get("architecture", "Recurrent")
+        co_player_transformer = co_player_policy.get("transformer", {})
 
         # Get conditioning type from env_k
         co_player_conditioning = co_player_policy.get("conditioning")
@@ -914,7 +916,18 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
         base_policy = Drive(co_player_env, input_size=input_size, hidden_size=hidden_size)
 
-        if co_player_rnn:
+        if co_player_architecture == "Transformer":
+            policy = pufferlib.models.TransformerWrapper(
+                co_player_env,
+                base_policy,
+                input_size=co_player_transformer.get("input_size", 256),
+                hidden_size=co_player_transformer.get("hidden_size", 256),
+                num_layers=co_player_transformer.get("num_layers", 2),
+                num_heads=co_player_transformer.get("num_heads", 4),
+                horizon=co_player_transformer.get("horizon", 91),
+                dropout=co_player_transformer.get("dropout", 0.0),
+            )
+        elif co_player_rnn:
             policy = pufferlib.models.LSTMWrapper(
                 co_player_env,
                 base_policy,

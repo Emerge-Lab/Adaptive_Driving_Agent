@@ -38,8 +38,9 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
 
         if is_adaptive:
             # Use evaluate_human_logs.py for adaptive agents with human replay
-            # Get rnn_name from config (determines Recurrent vs Transformer)
-            rnn_name = config.get("rnn_name", "Recurrent")
+            # Get architecture from config (determines Recurrent vs Transformer)
+            # Check both policy_architecture and rnn_name for compatibility
+            rnn_name = config.get("policy_architecture", config.get("rnn_name", "Recurrent"))
 
             cmd = [
                 sys.executable,

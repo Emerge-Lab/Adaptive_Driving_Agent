@@ -1745,8 +1745,13 @@ def load_policy(args, vecenv, env_name=""):
     if rnn_name == "Transformer":
         # Load transformer wrapper
         transformer_cls = getattr(env_module.torch, rnn_name)
-        # Use config horizon, fallback to episode_length
-        args["transformer"]["horizon"] = args["train"].get("horizon", vecenv.driver_env.episode_length)
+        # For adaptive_driving_agent, use episode_length as horizon (k_scenarios * scenario_length)
+        # Otherwise, use config horizon with fallback to episode_length
+        is_adaptive = getattr(vecenv.driver_env, "env_name", None) == "adaptive_drive"
+        if is_adaptive:
+            args["transformer"]["horizon"] = vecenv.driver_env.episode_length
+        else:
+            args["transformer"]["horizon"] = args["train"].get("horizon", vecenv.driver_env.episode_length)
         policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
     elif rnn_name is not None:
         # Load RNN wrapper (Recurrent)

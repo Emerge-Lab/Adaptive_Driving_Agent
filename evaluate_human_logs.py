@@ -176,7 +176,7 @@ def main():
     temp_env = make_env(**args["env"])
 
     if args_parsed.rnn_name == "Recurrent":
-        base_policy = Drive(temp_env, input_size=64, hidden_size=256)
+        base_policy = Drive(temp_env, input_size=128, hidden_size=256)
         policy = Recurrent(temp_env, base_policy, input_size=256, hidden_size=256).to(args_parsed.device)
     elif args_parsed.rnn_name == "Transformer":
         base_policy = Drive(temp_env, input_size=128, hidden_size=256)
