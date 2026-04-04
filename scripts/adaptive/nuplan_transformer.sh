@@ -58,7 +58,7 @@ singularity exec --nv \
    nice -n 19 python scripts/gpu_heartbeat.py &
    HEARTBEAT_PID=\$!
 
-   puffer train puffer_adaptive_drive --wandb --tag adaptive_nuplan_transformer_1apr \
+   puffer train puffer_adaptive_drive --wandb --tag adaptive_nuplan_transformer_4apr \
      --env.map-dir resources/drive/binaries/nuplan \
      --env.num-maps $NUPLAN_NUM_MAPS \
      --env.conditioning.type none \

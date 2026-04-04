@@ -255,9 +255,8 @@ class Drive(pufferlib.PufferEnv):
             self.co_player_policy_name = co_player_policy.get("policy_name")
             self.co_player_rnn_name = co_player_policy.get("rnn_name")
             self.co_player_policy = co_player_policy.get("co_player_policy_func")
-            self.co_player_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            # Move co-player policy to device (loaded on CPU in vector.py)
-            self.co_player_policy = self.co_player_policy.to(self.co_player_device)
+            # Co-player runs in forked subprocess - must stay on CPU (CUDA doesn't work with fork)
+            self.co_player_device = torch.device("cpu")
             self._set_co_player_state()
 
         super().__init__(buf=buf)
