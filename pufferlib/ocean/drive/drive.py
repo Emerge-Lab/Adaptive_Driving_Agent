@@ -255,6 +255,9 @@ class Drive(pufferlib.PufferEnv):
             self.co_player_policy_name = co_player_policy.get("policy_name")
             self.co_player_rnn_name = co_player_policy.get("rnn_name")
             self.co_player_policy = co_player_policy.get("co_player_policy_func")
+            self.co_player_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            # Move co-player policy to device (loaded on CPU in vector.py)
+            self.co_player_policy = self.co_player_policy.to(self.co_player_device)
             self._set_co_player_state()
 
         super().__init__(buf=buf)
@@ -425,30 +428,51 @@ class Drive(pufferlib.PufferEnv):
             if self.co_player_condition_type != "none":
                 co_player_obs = self._add_co_player_conditioning(co_player_obs)
 
-            co_player_obs = torch.as_tensor(co_player_obs)
+            # Convert directly to device for GPU acceleration
+            co_player_obs = torch.as_tensor(co_player_obs, device=self.co_player_device)
             logits, value = self.co_player_policy.forward_eval(co_player_obs, self.state)
-            co_player_action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+            co_player_action = logits.argmax(dim=-1)
+            # Only this transfer is necessary
             co_player_action = co_player_action.cpu().numpy().reshape(self.co_player_actions.shape)
         return co_player_action
 
     def _set_co_player_state(self):
         with torch.no_grad():
-            self.state = dict(
-                lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
-                lstm_c=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size),
-            )
+            # Detect if co-player uses Transformer (has horizon) or LSTM
+            self.co_player_is_transformer = hasattr(self.co_player_policy, 'horizon')
+
+            if self.co_player_is_transformer:
+                self.state = dict(
+                    transformer_context=torch.zeros(
+                        self.num_co_players,
+                        self.co_player_policy.horizon,
+                        self.co_player_policy.hidden_size,
+                        device=self.co_player_device
+                    ),
+                    transformer_position=torch.zeros(1, dtype=torch.long, device=self.co_player_device),
+                )
+            else:
+                self.state = dict(
+                    lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size,
+                                      device=self.co_player_device),
+                    lstm_c=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size,
+                                      device=self.co_player_device),
+                )
 
     def _reset_co_player_state(self, done_indices=None):
-        """Reset LSTM state for co-players whose episodes ended"""
+        """Reset LSTM/Transformer state for co-players whose episodes ended"""
         with torch.no_grad():
             if done_indices is None:
                 # Reset all
                 self._set_co_player_state()
             else:
                 # Reset only specific co-players
-                device = self.state["lstm_h"].device
-                self.state["lstm_h"][done_indices] = 0
-                self.state["lstm_c"][done_indices] = 0
+                if self.co_player_is_transformer:
+                    self.state["transformer_context"][done_indices] = 0
+                    # Note: transformer_position is shared, only reset context
+                else:
+                    self.state["lstm_h"][done_indices] = 0
+                    self.state["lstm_c"][done_indices] = 0
 
     def _add_co_player_conditioning(self, observations):
         """Add pre-sampled conditioning variables to co-player observations"""

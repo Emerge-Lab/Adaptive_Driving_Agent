@@ -8,6 +8,7 @@ import pufferlib.pytorch
 import pufferlib.spaces
 
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 import math
 
 
@@ -210,6 +211,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         num_heads=8,
         horizon=512,
         dropout=0.0,
+        use_checkpointing=False,
     ):
         """Wraps your policy with a Transformer for temporal modeling.
 
@@ -222,6 +224,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             num_heads: Number of attention heads
             horizon: Maximum sequence length to attend over
             dropout: Dropout probability
+            use_checkpointing: Enable gradient checkpointing to save memory (slower training)
         """
         super().__init__()
         self.obs_shape = env.single_observation_space.shape
@@ -232,6 +235,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.is_continuous = self.policy.is_continuous
+        self.use_checkpointing = use_checkpointing
 
         # Project encoded observations to transformer dimension if needed
         if input_size != hidden_size:
@@ -260,6 +264,10 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             mask = self.create_causal_mask(T, "cpu")
             self.register_buffer(f"_causal_mask_{T}", mask, persistent=False)
 
+        # Cached masks for episode mask creation (reduces memory allocation)
+        self.register_buffer("_zero_mask", torch.zeros(1), persistent=False)
+        self.register_buffer("_neg_inf_mask", torch.full((1,), float("-inf")), persistent=False)
+
         # Layer norm for output
         self.output_norm = nn.LayerNorm(hidden_size)
 
@@ -285,19 +293,41 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         """Get cached causal mask or create new one"""
         buffer_name = f"_causal_mask_{T}"
         if hasattr(self, buffer_name):
-            return getattr(self, buffer_name).to(device)
-        return self.create_causal_mask(T, device)
+            mask = getattr(self, buffer_name)
+            if mask.device != device:
+                # Move to device and cache
+                mask = mask.to(device)
+                setattr(self, buffer_name, mask)
+            return mask
+        mask = self.create_causal_mask(T, device)
+        self.register_buffer(buffer_name, mask, persistent=False)
+        return mask
+
+    def get_positional_embedding(self, T, device):
+        """Get cached positional embedding for length T"""
+        cache_key = f"_pos_embed_{T}"
+        if not hasattr(self, cache_key) or getattr(self, cache_key).device != device:
+            pos_embed = self.positional_embedding[:, :T].to(device)
+            setattr(self, cache_key, pos_embed)
+        return getattr(self, cache_key)
 
     def create_episode_mask(self, terminals, seq_len):
-        """Episode mask which ensures that you arent attending over episode boundaries"""
+        """Episode mask which ensures that you arent attending over episode boundaries.
+        Optimized with cached mask buffers to reduce memory allocation."""
         B = terminals.shape[0]
         device = terminals.device
 
+        # Use cumsum for episode IDs
         episode_ids = torch.nn.functional.pad(terminals[:, :-1], (1, 0)).cumsum(dim=1)
 
+        # Avoid full (B, T, T) allocation - use sparse comparison
         mask_allow = episode_ids.unsqueeze(2) == episode_ids.unsqueeze(1)
 
-        return torch.where(mask_allow, torch.zeros(1, device=device), torch.full((1,), float("-inf"), device=device))
+        # Use cached tensors moved to correct device
+        zero_mask = self._zero_mask.to(device) if self._zero_mask.device != device else self._zero_mask
+        neg_inf_mask = self._neg_inf_mask.to(device) if self._neg_inf_mask.device != device else self._neg_inf_mask
+
+        return torch.where(mask_allow, zero_mask, neg_inf_mask)
 
     def forward_eval(self, observations, state):
         B = observations.shape[0]
@@ -321,7 +351,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         context[:, write_idx, :] = hidden.unsqueeze(1)
         pos = pos + 1
 
-        pos_embed = self.positional_embedding[:, : self.horizon]
+        pos_embed = self.get_positional_embedding(self.horizon, device)
         context_with_pos = context + pos_embed
 
         causal_mask = self.get_causal_mask(self.horizon, device)
@@ -362,13 +392,20 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             hidden = hidden[:, -T_actual:]
             T = T_actual
 
-        hidden = hidden + self.positional_embedding[:, :T]
+        hidden = hidden + self.get_positional_embedding(T, device)
 
         use_episode_mask = "terminals" in state and state["terminals"] is not None
 
         if not use_episode_mask:
             causal_mask = self.get_causal_mask(T, device)
-            hidden = self.transformer(hidden, mask=causal_mask, is_causal=True)
+            if self.training and self.use_checkpointing:
+                hidden = checkpoint(
+                    lambda h, m: self.transformer(h, mask=m, is_causal=True),
+                    hidden, causal_mask,
+                    use_reentrant=False
+                )
+            else:
+                hidden = self.transformer(hidden, mask=causal_mask, is_causal=True)
         else:
             terminals = state["terminals"]
             if terminals.shape[1] > T:
@@ -377,7 +414,14 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             episode_mask = self.create_episode_mask(terminals, T)
             attn_mask = causal_mask.unsqueeze(0) + episode_mask
             attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
-            hidden = self.transformer(hidden, mask=attn_mask, is_causal=False)
+            if self.training and self.use_checkpointing:
+                hidden = checkpoint(
+                    lambda h, m: self.transformer(h, mask=m, is_causal=False),
+                    hidden, attn_mask,
+                    use_reentrant=False
+                )
+            else:
+                hidden = self.transformer(hidden, mask=attn_mask, is_causal=False)
 
         hidden = self.output_norm(hidden)
         flat_hidden = hidden.contiguous().view(B * T, self.hidden_size)
