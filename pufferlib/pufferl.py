@@ -365,6 +365,7 @@ class PuffeRL:
         self.full_rows = 0
         while self.full_rows < self.segments:
             profile("env", epoch)
+            print(".", end="", flush=True)  # Workaround: visible I/O prevents multiprocessing deadlock
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
             # print(f"o shape is {o.shape}", flush = True)
             if self.population_play:

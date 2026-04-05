@@ -665,10 +665,9 @@ class HumanReplayEvaluator:
                 lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
                 lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
             )
-        elif policy_architecture == "Transformer":
-            context_length = args["train"].get("context_length", 182)
+        elif is_transformer:
             state = dict(
-                transformer_context=torch.zeros(num_agents, horizon, policy.hidden_size, device=device),
+                transformer_context=torch.zeros(num_agents, policy.horizon, policy.hidden_size, device=device),
                 transformer_position=torch.zeros(1, dtype=torch.long, device=device),
             )
         else:
