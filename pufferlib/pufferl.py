@@ -432,6 +432,7 @@ class PuffeRL:
                     state["transformer_position"] = self.transformer_position[state_key]
                     # Note: terminals not needed for eval since we're doing single-step inference
 
+                print(".", end="", flush=True)  # Prevents multiprocessing deadlock
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
