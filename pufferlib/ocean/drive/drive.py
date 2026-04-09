@@ -429,8 +429,13 @@ class Drive(pufferlib.PufferEnv):
 
             # Convert directly to device for GPU acceleration
             co_player_obs = torch.as_tensor(co_player_obs, device=self.co_player_device)
+            import sys; sys.stdout.flush()  # Prevent multiprocessing deadlock
             logits, value = self.co_player_policy.forward_eval(co_player_obs, self.state)
-            co_player_action = logits.argmax(dim=-1)
+            # Handle multi-discrete actions (logits is a tuple) vs single discrete (logits is tensor)
+            if isinstance(logits, tuple):
+                co_player_action = torch.cat([l.argmax(dim=-1, keepdim=True) for l in logits], dim=-1)
+            else:
+                co_player_action = logits.argmax(dim=-1)
             # Only this transfer is necessary
             co_player_action = co_player_action.cpu().numpy().reshape(self.co_player_actions.shape)
         return co_player_action

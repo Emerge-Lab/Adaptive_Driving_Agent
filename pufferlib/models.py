@@ -337,15 +337,18 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         hidden = self.input_projection(hidden)
 
         if "transformer_context" not in state or state["transformer_context"] is None:
-            context = torch.zeros(B, self.horizon, self.hidden_size, device=device)
+            context = torch.zeros(B, self.horizon, self.hidden_size, device=device, dtype=hidden.dtype)
             pos = torch.zeros(1, dtype=torch.long, device=device)
         else:
             context = state["transformer_context"]
             pos = state.get("transformer_position", torch.zeros(1, dtype=torch.long, device=device))
 
             if context.shape[-1] != self.hidden_size or context.shape[0] != B or context.shape[1] != self.horizon:
-                context = torch.zeros(B, self.horizon, self.hidden_size, device=device)
+                context = torch.zeros(B, self.horizon, self.hidden_size, device=device, dtype=hidden.dtype)
                 pos = torch.zeros(1, dtype=torch.long, device=device)
+            # Ensure context dtype matches hidden dtype (for mixed precision)
+            if context.dtype != hidden.dtype:
+                context = context.to(hidden.dtype)
 
         write_idx = (pos % self.horizon).long()
         context[:, write_idx, :] = hidden.unsqueeze(1)

@@ -945,6 +945,7 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         state_dict = torch.load(checkpoint_path, map_location="cpu")
 
         policy.load_state_dict(state_dict, strict=True)
+        policy = policy.to("cpu")  # Ensure all buffers are on CPU for forked subprocesses
         policy.eval()
         print(
             f"Co player policy loaded with {conditioning_dims} conditioning dims (condition_type={condition_type})",
@@ -953,15 +954,15 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         # Store policy and conditioning info in env_k
         env_k["co_player_policy"]["co_player_policy_func"] = policy
 
-        # Increased from 1 to 4 for co-player inference performance
-        # If stability issues occur, reduce back to 1
-        torch.set_num_threads(4)
-        torch.set_num_interop_threads(4)
+        # NOTE: Setting threads to 1 is required for co-player policies to work
+        # inside environment evaluation. Higher values cause deadlock.
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
         import os
 
-        os.environ["OMP_NUM_THREADS"] = "4"
-        os.environ["MKL_NUM_THREADS"] = "4"
-        os.environ["NUMEXPR_NUM_THREADS"] = "4"
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
         # Disable MKL if available
         try:
