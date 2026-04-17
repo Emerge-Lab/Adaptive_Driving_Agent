@@ -757,33 +757,42 @@ class PuffeRL:
             self.msg = f"Checkpoint saved at update {self.epoch}"
 
             if self.render and self.epoch % self.render_interval == 0:
-                print("Attempting Render ")
-                model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
-                model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
+                print("Attempting Python-based rendering...")
+                try:
+                    # Use Python-based rendering (works with any architecture: LSTM, Transformer, etc.)
+                    pufferlib.utils.render_videos_python(
+                        config=self.config,
+                        policy=self.uncompiled_policy,
+                        logger=self.logger,
+                        epoch=self.epoch,
+                        global_step=self.global_step,
+                        device=self.config["train"]["device"],
+                    )
+                except Exception as e:
+                    print(f"Python rendering failed: {e}, falling back to C-based rendering...")
+                    # Fall back to C-based rendering for LSTM models
+                    model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
+                    model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
 
-                if model_files:
-                    # Take the latest checkpoint
-                    latest_cpt = max(model_files, key=os.path.getctime)
-                    bin_path = f"{model_dir}.bin"
+                    if model_files:
+                        latest_cpt = max(model_files, key=os.path.getctime)
+                        bin_path = f"{model_dir}.bin"
 
-                    # Export to .bin for rendering with raylib
-                    try:
-                        export_args = {"env_name": self.config["env"], "load_model_path": latest_cpt, **self.config}
-
-                        export(
-                            args=export_args,
-                            env_name=self.config["env"],
-                            vecenv=self.vecenv,
-                            policy=self.uncompiled_policy,
-                            path=bin_path,
-                            silent=True,
-                        )
-                        pufferlib.utils.render_videos(
-                            self.config, self.vecenv, self.logger, self.epoch, self.global_step, bin_path
-                        )
-
-                    except Exception as e:
-                        print(f"Failed to export model weights: {e}")
+                        try:
+                            export_args = {"env_name": self.config["env"], "load_model_path": latest_cpt, **self.config}
+                            export(
+                                args=export_args,
+                                env_name=self.config["env"],
+                                vecenv=self.vecenv,
+                                policy=self.uncompiled_policy,
+                                path=bin_path,
+                                silent=True,
+                            )
+                            pufferlib.utils.render_videos(
+                                self.config, self.vecenv, self.logger, self.epoch, self.global_step, bin_path
+                            )
+                        except Exception as e2:
+                            print(f"C-based rendering also failed: {e2}")
 
         if self.config["eval"]["wosac_realism_eval"] and (
             self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training

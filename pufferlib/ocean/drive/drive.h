@@ -6,11 +6,24 @@
 #include <math.h>
 #include <assert.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include "raylib.h"
 #include "raymath.h"
 #include "rlgl.h"
 #include <time.h>
 #include "error.h"
+
+// Render modes
+#define RENDER_OFF 0
+#define RENDER_HEADLESS 1
+#define RENDER_WINDOW 2
+
+// View modes for rendering
+#define VIEW_MODE_SIM_STATE 0     // Full simulation state (top-down orthographic)
+#define VIEW_MODE_BEV_AGENT_OBS 1 // Bird's eye view centered on agent
+#define VIEW_MODE_AGENT_PERSP 2   // Agent perspective (3rd person)
 
 // Entity Types
 #define NONE 0
@@ -135,6 +148,7 @@ const Color PUFF_BACKGROUND = (Color){6, 24, 24, 255};
 const Color PUFF_BACKGROUND2 = (Color){18, 72, 72, 255};
 const Color LIGHTGREEN = (Color){152, 255, 152, 255};
 const Color LIGHTYELLOW = (Color){255, 255, 152, 255};
+const Color LIGHTBLUE = (Color){152, 200, 255, 255};
 const Color SOFT_YELLOW = (Color){245, 245, 220, 255};
 
 struct timespec ts;
@@ -380,6 +394,9 @@ struct Drive {
     int *co_player_ids;
     int *ego_agent_ids;
     bool population_play;
+    // Rendering
+    int render_mode;          // RENDER_OFF, RENDER_HEADLESS, or RENDER_WINDOW
+    char video_suffix[64];    // Optional suffix appended to mp4 filename (e.g. "_bev")
 };
 
 void add_log(Drive *env) {
@@ -2512,15 +2529,92 @@ struct Client {
     int car_assignments[MAX_AGENTS]; // To keep car model assignments consistent per vehicle
     Vector3 default_camera_position;
     Vector3 default_camera_target;
+    // Video recording state (for headless rendering)
+    int recorder_pipefd[2];   // Pipe to ffmpeg process
+    pid_t recorder_pid;       // PID of ffmpeg process
+    // Original map dimensions (for consistent rendering across scenarios)
+    float original_map_width;
+    float original_map_height;
 };
 
 Client *make_client(Drive *env) {
     Client *client = (Client *)calloc(1, sizeof(Client));
-    client->width = 1280;
-    client->height = 704;
-    SetConfigFlags(FLAG_MSAA_4X_HINT);
-    InitWindow(client->width, client->height, "PufferDrive");
-    SetTargetFPS(30);
+    client->recorder_pid = 0;
+    client->recorder_pipefd[0] = -1;
+    client->recorder_pipefd[1] = -1;
+
+    if (env->render_mode == RENDER_WINDOW) {
+        // Interactive window mode
+        client->width = 1280;
+        client->height = 704;
+        SetConfigFlags(FLAG_MSAA_4X_HINT);
+        InitWindow(client->width, client->height, "PufferDrive");
+        SetTargetFPS(30);
+    } else if (env->render_mode == RENDER_HEADLESS) {
+        // Headless rendering mode - hidden window with ffmpeg pipe
+        float map_width = env->grid_map->bottom_right_x - env->grid_map->top_left_x;
+        float map_height = env->grid_map->top_left_y - env->grid_map->bottom_right_y;
+        float scale = 6.0f;
+        client->width = (int)roundf(map_width * scale / 2.0f) * 2;
+        client->height = (int)roundf(map_height * scale / 2.0f) * 2;
+        // Store original map dimensions for consistent rendering across scenarios
+        client->original_map_width = map_width;
+        client->original_map_height = map_height;
+
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        SetConfigFlags(FLAG_MSAA_4X_HINT);
+        InitWindow(client->width, client->height, "PufferDrive Headless");
+        SetTargetFPS(6000);
+
+        // Set up ffmpeg process for video recording
+        if (pipe(client->recorder_pipefd) == -1) {
+            fprintf(stderr, "Failed to create pipe for video recording\n");
+            free(client);
+            return NULL;
+        }
+
+        char size_str[64];
+        snprintf(size_str, sizeof(size_str), "%dx%d", (int)client->width, (int)client->height);
+
+        // Build output filename using scenario_id and video_suffix
+        char filename[320];
+        if (env->video_suffix[0] != '\0') {
+            snprintf(filename, sizeof(filename), "%s%s.mp4", env->scenario_id, env->video_suffix);
+        } else {
+            snprintf(filename, sizeof(filename), "%s.mp4", env->scenario_id);
+        }
+
+        client->recorder_pid = fork();
+        if (client->recorder_pid == -1) {
+            fprintf(stderr, "Failed to fork ffmpeg process\n");
+            close(client->recorder_pipefd[0]);
+            close(client->recorder_pipefd[1]);
+            free(client);
+            return NULL;
+        }
+
+        if (client->recorder_pid == 0) {
+            // Child process: run ffmpeg
+            close(client->recorder_pipefd[1]);
+            dup2(client->recorder_pipefd[0], STDIN_FILENO);
+            close(client->recorder_pipefd[0]);
+            for (int fd = 3; fd < 256; fd++) {
+                close(fd);
+            }
+            execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba",
+                   "-s", size_str, "-r", "30", "-i", "-", "-c:v", "libx264",
+                   "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
+                   "-crf", "23", "-loglevel", "error", filename, NULL);
+            fprintf(stderr, "Failed to exec ffmpeg\n");
+            _exit(1);
+        }
+
+        close(client->recorder_pipefd[0]);  // Close read end in parent
+        fprintf(stderr, "[drive] ffmpeg forked: pid=%d file=%s size=%s\n",
+                client->recorder_pid, filename, size_str);
+    }
+
+    // Load textures and models (for both window and headless modes)
     client->puffers = LoadTexture("resources/puffers_128.png");
     client->cars[0] = LoadModel("resources/drive/RedCar.glb");
     client->cars[1] = LoadModel("resources/drive/WhiteCar.glb");
@@ -2535,23 +2629,14 @@ Client *make_client(Drive *env) {
     for (int i = 0; i < MAX_AGENTS; i++) {
         client->car_assignments[i] = (rand() % 4) + 1;
     }
-    // Get initial target position from first active agent
-    Vector3 target_pos = {
-        0,
-        0, // Y is up
-        1  // Z is depth
-    };
 
-    // Set up camera to look at target from above and behind
-    client->default_camera_position = (Vector3){
-        0,      // Same X as target
-        120.0f, // 20 units above target
-        175.0f  // 20 units behind target
-    };
+    // Set up camera defaults
+    Vector3 target_pos = {0, 0, 1};
+    client->default_camera_position = (Vector3){0, 120.0f, 175.0f};
     client->default_camera_target = target_pos;
     client->camera.position = client->default_camera_position;
     client->camera.target = client->default_camera_target;
-    client->camera.up = (Vector3){0.0f, -1.0f, 0.0f}; // Y is up
+    client->camera.up = (Vector3){0.0f, -1.0f, 0.0f};
     client->camera.fovy = 45.0f;
     client->camera.projection = CAMERA_PERSPECTIVE;
     client->camera_zoom = 1.0f;
@@ -3141,6 +3226,140 @@ void draw_scene(Drive *env, Client *client, int mode, int obs_only, int lasers, 
     }
 }
 
+// Headless rendering helper: write frame to ffmpeg pipe
+static void write_frame_to_pipe(Client *client) {
+    if (client->recorder_pipefd[1] < 0) return;
+
+    int w = (int)client->width;
+    int h = (int)client->height;
+    unsigned char *screen_data = rlReadScreenPixels(w, h);
+    if (screen_data) {
+        write(client->recorder_pipefd[1], screen_data, w * h * 4);
+        RL_FREE(screen_data);
+    }
+}
+
+// Render with view_mode and draw_traces parameters (for Python-based rendering)
+void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_scenario, int k_scenarios) {
+    if (env->client == NULL) {
+        env->client = make_client(env);
+    }
+    if (env->client == NULL) return;  // make_client may fail in headless mode
+
+    Client *client = env->client;
+    Color road = (Color){35, 35, 37, 255};
+
+    if (env->render_mode == RENDER_HEADLESS) {
+        // Headless rendering mode
+        // Use ORIGINAL map dimensions for consistent resolution across scenarios
+        // This prevents resolution changes when k_scenarios > 1 and maps have different sizes
+        float render_map_height = client->original_map_height;
+
+        Camera3D camera = {0};
+
+        if (view_mode == VIEW_MODE_SIM_STATE) {
+            // Top-down orthographic view of full simulation state
+            // Using original_map_height keeps pixels-per-world-unit consistent
+            camera.position = (Vector3){0.0f, 0.0f, 400.0f};
+            camera.target = (Vector3){0.0f, 0.0f, 0.0f};
+            camera.up = (Vector3){0.0f, -1.0f, 0.0f};
+            camera.projection = CAMERA_ORTHOGRAPHIC;
+            camera.fovy = render_map_height;
+
+            BeginDrawing();
+            ClearBackground(road);
+            BeginMode3D(camera);
+
+            if (draw_traces) {
+                // Draw trajectory traces for all active agents
+                for (int i = 0; i < env->active_agent_count; i++) {
+                    int idx = env->active_agent_indices[i];
+                    int t_end = env->scenario_length;
+                    if (t_end > env->entities[idx].array_size) {
+                        t_end = env->entities[idx].array_size;
+                    }
+                    for (int t = env->init_steps; t < t_end; t++) {
+                        if (env->entities[idx].traj_valid[t]) {
+                            DrawPoint3D((Vector3){
+                                env->entities[idx].traj_x[t],
+                                env->entities[idx].traj_y[t],
+                                0.5f
+                            }, LIGHTBLUE);
+                        }
+                    }
+                }
+            }
+            draw_scene(env, client, 1, 0, 0, 0);
+            EndMode3D();
+
+        } else if (view_mode == VIEW_MODE_BEV_AGENT_OBS) {
+            // Bird's eye view centered on human-controlled agent
+            int agent_idx = env->active_agent_indices[env->human_agent_idx];
+            Entity *agent = &env->entities[agent_idx];
+
+            camera.position = (Vector3){agent->x, agent->y, 400.0f};
+            camera.target = (Vector3){agent->x, agent->y, 0.0f};
+            camera.up = (Vector3){0.0f, -1.0f, 0.0f};
+            camera.projection = CAMERA_ORTHOGRAPHIC;
+            camera.fovy = env->grid_map->vision_range * GRID_CELL_SIZE * 2.0f;
+
+            BeginDrawing();
+            ClearBackground(road);
+            BeginMode3D(camera);
+            draw_scene(env, client, 1, 1, 0, 0);
+            EndMode3D();
+
+        } else {
+            // Agent perspective (3rd person chase camera)
+            int agent_idx = env->active_agent_indices[env->human_agent_idx];
+            Entity *agent = &env->entities[agent_idx];
+
+            camera.position = (Vector3){
+                agent->x - (25.0f * cosf(agent->heading)),
+                agent->y - (25.0f * sinf(agent->heading)),
+                15.0f
+            };
+            camera.target = (Vector3){
+                agent->x + 40.0f * cosf(agent->heading),
+                agent->y + 40.0f * sinf(agent->heading),
+                1.0f
+            };
+            camera.up = (Vector3){0.0f, 0.0f, 1.0f};
+            camera.fovy = 60.0f;
+            camera.projection = CAMERA_PERSPECTIVE;
+
+            BeginDrawing();
+            ClearBackground(road);
+            BeginMode3D(camera);
+            draw_scene(env, client, 0, 0, 0, 1);
+            EndMode3D();
+        }
+
+        // Draw scenario counter overlay (2D text on top of 3D scene)
+        if (k_scenarios > 1) {
+            char scenario_text[64];
+            snprintf(scenario_text, sizeof(scenario_text), "Scenario %d / %d", current_scenario + 1, k_scenarios);
+            DrawText(scenario_text, 40, 40, 120, WHITE);
+        }
+
+        EndDrawing();
+
+        // Write frame to ffmpeg pipe
+        write_frame_to_pipe(client);
+
+    } else {
+        // Interactive window mode - use default rendering
+        BeginDrawing();
+        ClearBackground(road);
+        BeginMode3D(client->camera);
+        handle_camera_controls(env->client);
+        draw_scene(env, client, 0, 0, 0, 0);
+        EndMode3D();
+        EndDrawing();
+    }
+}
+
+// Original c_render for backward compatibility (interactive window mode)
 void c_render(Drive *env) {
     if (env->client == NULL) {
         env->client = make_client(env);
@@ -3152,6 +3371,7 @@ void c_render(Drive *env) {
     BeginMode3D(client->camera);
     handle_camera_controls(env->client);
     draw_scene(env, client, 0, 0, 0, 0);
+    EndMode3D();
 
     if (IsKeyPressed(KEY_TAB)) {
         env->human_agent_idx = (env->human_agent_idx + 1) % env->active_agent_count;
@@ -3226,7 +3446,32 @@ void c_render(Drive *env) {
     EndDrawing();
 }
 
+// Set the video filename suffix for headless rendering
+void set_video_suffix(Drive *env, const char *suffix) {
+    if (suffix) {
+        strncpy(env->video_suffix, suffix, sizeof(env->video_suffix) - 1);
+        env->video_suffix[sizeof(env->video_suffix) - 1] = '\0';
+    } else {
+        env->video_suffix[0] = '\0';
+    }
+}
+
 void close_client(Client *client) {
+    // Clean up video recording if active
+    if (client->recorder_pid > 0) {
+        // Close the write end of the pipe to signal EOF to ffmpeg
+        if (client->recorder_pipefd[1] >= 0) {
+            close(client->recorder_pipefd[1]);
+            client->recorder_pipefd[1] = -1;
+        }
+        // Wait for ffmpeg to finish
+        int status;
+        waitpid(client->recorder_pid, &status, 0);
+        fprintf(stderr, "[drive] ffmpeg process finished with status %d\n", status);
+        client->recorder_pid = 0;
+    }
+
+    // Unload models and textures
     for (int i = 0; i < 6; i++) {
         UnloadModel(client->cars[i]);
     }

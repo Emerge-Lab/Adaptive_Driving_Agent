@@ -268,6 +268,160 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
         print(f"Failed to run WOSAC evaluation: {type(e).__name__}: {e}")
 
 
+def render_videos_python(config, policy, logger, epoch, global_step, device="cuda"):
+    """
+    Generate and log training videos using Python-based rendering.
+
+    This function works with ANY policy architecture (LSTM, Transformer, etc.)
+    because policy inference happens in Python/PyTorch, not in C.
+
+    Args:
+        config: Configuration dictionary containing env settings
+        policy: The policy to render (PyTorch model)
+        logger: Logger object with run_id and optional wandb attribute
+        epoch: Current training epoch
+        global_step: Current global training step
+        device: Device for policy inference (default: "cuda")
+
+    Returns:
+        None. Prints error messages if rendering fails.
+    """
+    import copy
+    import glob
+    import torch
+    from pufferlib.pufferl import load_env
+    from pufferlib.ocean.drive.rollout import RenderContext, RenderView, rollout_loop
+
+    try:
+        run_id = logger.run_id
+        # config["env"] is the env name string in PuffeRL's train_config
+        env_name = config.get("env", "drive")
+        model_dir = os.path.join(config["data_dir"], f"{env_name}_{run_id}")
+        video_output_dir = os.path.join(model_dir, "videos")
+        os.makedirs(video_output_dir, exist_ok=True)
+
+        # Get render settings from config
+        view_modes = config.get("render_view_modes", [RenderView.FULL_SIM_STATE])
+        if isinstance(view_modes, int):
+            view_modes = [view_modes]
+
+        # Create render config for load_env
+        # load_env expects: args["env"] = env kwargs dict, args["vec"] = vec kwargs, args["package"] = package name
+        # PuffeRL's config has: config["env"] = env name, config["env_config"] = env kwargs
+        # Use deep copy to avoid modifying original config
+        env_kwargs = copy.deepcopy(config.get("env_config", {}))
+        env_kwargs["render_mode"] = 1  # RENDER_HEADLESS
+
+        # Debug: Print conditioning and co-player settings
+        conditioning = env_kwargs.get("conditioning", {})
+        co_player_policy = env_kwargs.get("co_player_policy", {})
+        co_player_enabled = env_kwargs.get("co_player_enabled", False)
+
+        print(f"[render] env_name: {env_name}")
+        print(f"[render] co_player_enabled: {co_player_enabled}")
+        print(f"[render] conditioning type: {conditioning.get('type', 'none')}")
+        if co_player_enabled:
+            print(f"[render] co_player_policy path: {co_player_policy.get('policy_path', 'NOT SET')}")
+            print(f"[render] co_player_policy architecture: {co_player_policy.get('architecture', 'NOT SET')}")
+            co_player_cond = co_player_policy.get("conditioning", {})
+            print(f"[render] co_player conditioning type: {co_player_cond.get('type', 'none')}")
+
+        render_args = {
+            "env": env_kwargs,
+            "vec": config.get("vec", {"num_envs": 1, "backend": "serial"}),
+            "package": config.get("package", "ocean"),
+        }
+
+        # Determine if using RNN/Transformer
+        # Check policy type directly from config or infer from policy
+        use_rnn = config.get("use_rnn", False)
+        rnn_name = config.get("rnn_name") or config.get("policy_architecture", "Recurrent")
+        print(f"[render] use_rnn: {use_rnn}, rnn_name: {rnn_name}")
+
+        # Get episode length from env_config
+        episode_length = env_kwargs.get("scenario_length", 91)
+        # For adaptive agents, episode_length = k_scenarios * scenario_length
+        k_scenarios = env_kwargs.get("k_scenarios", 1)
+        if k_scenarios > 1:
+            episode_length = k_scenarios * episode_length
+        print(f"[render] episode_length: {episode_length}, k_scenarios: {k_scenarios}")
+
+        videos_to_log_world = []
+        videos_to_log_agent = []
+
+        for view_mode in view_modes:
+            view_suffix = {
+                RenderView.FULL_SIM_STATE: "_sim_state",
+                RenderView.BEV_AGENT_OBS: "_bev",
+                RenderView.AGENT_PERSPECTIVE: "_persp",
+            }.get(view_mode, "")
+
+            # Create render environment
+            render_env = load_env(env_name, render_args)
+
+            # Debug: Print render environment state
+            driver = render_env.driver_env
+            print(f"[render] render_env created successfully")
+            print(f"[render] population_play: {driver.population_play}")
+            print(f"[render] num_agents: {driver.num_agents}")
+            if driver.population_play:
+                print(f"[render] num_ego_agents: {driver.num_ego_agents}")
+                print(f"[render] num_co_players: {driver.num_co_players}")
+                print(f"[render] co_player_policy loaded: {driver.co_player_policy is not None}")
+            print(f"[render] reward_conditioned: {driver.reward_conditioned}")
+            print(f"[render] entropy_conditioned: {driver.entropy_conditioned}")
+            print(f"[render] discount_conditioned: {driver.discount_conditioned}")
+            print(f"[render] observation_space shape: {render_env.observation_space.shape}")
+
+            try:
+                policy.eval()
+                rollout_loop(
+                    policy=policy,
+                    env=render_env,
+                    device=device,
+                    use_rnn=use_rnn,
+                    max_steps=episode_length,
+                    render_ctx=RenderContext(
+                        view_mode=view_mode,
+                        env_id=0,
+                        draw_traces=True,
+                        video_suffix=view_suffix,
+                    ),
+                )
+            finally:
+                render_env.close()
+
+        # Collect generated videos (written to cwd by C code)
+        video_files = glob.glob("*.mp4")
+        for video_file in video_files:
+            target_filename = f"epoch_{epoch:06d}_{os.path.basename(video_file)}"
+            target_path = os.path.join(video_output_dir, target_filename)
+            shutil.move(video_file, target_path)
+
+            if hasattr(logger, "wandb") and logger.wandb:
+                import wandb
+                if "_sim_state" in target_filename or "topdown" in target_filename:
+                    videos_to_log_world.append(wandb.Video(target_path, format="mp4"))
+                else:
+                    videos_to_log_agent.append(wandb.Video(target_path, format="mp4"))
+
+        # Log videos to wandb
+        if hasattr(logger, "wandb") and logger.wandb and (videos_to_log_world or videos_to_log_agent):
+            payload = {}
+            if videos_to_log_world:
+                payload["render/world_state"] = videos_to_log_world
+            if videos_to_log_agent:
+                payload["render/agent_view"] = videos_to_log_agent
+            logger.wandb.log(payload, step=global_step)
+
+        print(f"Python-based rendering completed for epoch {epoch}")
+
+    except Exception as e:
+        print(f"Failed to render videos with Python: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def render_videos(config, vecenv, logger, epoch, global_step, bin_path):
     """
     Generate and log training videos using C-based rendering.

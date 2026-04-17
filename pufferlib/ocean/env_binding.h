@@ -519,8 +519,8 @@ static PyObject *vec_step(PyObject *self, PyObject *arg) {
 
 static PyObject *vec_render(PyObject *self, PyObject *args) {
     int num_args = PyTuple_Size(args);
-    if (num_args != 2) {
-        PyErr_SetString(PyExc_TypeError, "vec_render requires 2 arguments");
+    if (num_args != 6) {
+        PyErr_SetString(PyExc_TypeError, "vec_render requires 6 arguments: (vec_env, view_mode, draw_traces, env_id, current_scenario, k_scenarios)");
         return NULL;
     }
 
@@ -530,14 +530,48 @@ static PyObject *vec_render(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    PyObject *env_id_arg = PyTuple_GetItem(args, 1);
-    if (!PyObject_TypeCheck(env_id_arg, &PyLong_Type)) {
-        PyErr_SetString(PyExc_TypeError, "env_id must be an integer");
+    int view_mode = (int)PyLong_AsLong(PyTuple_GetItem(args, 1));
+    int draw_traces = PyObject_IsTrue(PyTuple_GetItem(args, 2));
+    int env_id = (int)PyLong_AsLong(PyTuple_GetItem(args, 3));
+    int current_scenario = (int)PyLong_AsLong(PyTuple_GetItem(args, 4));
+    int k_scenarios = (int)PyLong_AsLong(PyTuple_GetItem(args, 5));
+
+    if (env_id < 0 || env_id >= vec->num_envs) {
+        PyErr_SetString(PyExc_ValueError, "env_id out of range");
         return NULL;
     }
-    int env_id = PyLong_AsLong(env_id_arg);
 
-    c_render(vec->envs[env_id]);
+    c_render_with_mode(vec->envs[env_id], view_mode, draw_traces, current_scenario, k_scenarios);
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_set_video_suffix(PyObject *self, PyObject *args) {
+    int num_args = PyTuple_Size(args);
+    if (num_args != 3) {
+        PyErr_SetString(PyExc_TypeError, "vec_set_video_suffix requires 3 arguments: (vec_env, env_id, suffix)");
+        return NULL;
+    }
+
+    VecEnv *vec = (VecEnv *)PyLong_AsVoidPtr(PyTuple_GetItem(args, 0));
+    if (!vec) {
+        PyErr_SetString(PyExc_ValueError, "Invalid vec_env handle");
+        return NULL;
+    }
+
+    int env_id = (int)PyLong_AsLong(PyTuple_GetItem(args, 1));
+    if (env_id < 0 || env_id >= vec->num_envs) {
+        PyErr_SetString(PyExc_ValueError, "env_id out of range");
+        return NULL;
+    }
+
+    PyObject *suffix_obj = PyTuple_GetItem(args, 2);
+    const char *suffix = PyUnicode_AsUTF8(suffix_obj);
+    if (!suffix) {
+        PyErr_SetString(PyExc_TypeError, "suffix must be a string");
+        return NULL;
+    }
+
+    set_video_suffix(vec->envs[env_id], suffix);
     Py_RETURN_NONE;
 }
 
@@ -1019,6 +1053,7 @@ static PyMethodDef methods[] = {
     {"vec_step", vec_step, METH_VARARGS, "Step the vector of environments"},
     {"vec_log", vec_log, METH_VARARGS, "Log the vector of environments"},
     {"vec_render", vec_render, METH_VARARGS, "Render the vector of environments"},
+    {"vec_set_video_suffix", vec_set_video_suffix, METH_VARARGS, "Set video filename suffix for headless rendering"},
     {"vec_close", vec_close, METH_VARARGS, "Close the vector of environments"},
     {"shared", (PyCFunction)my_shared, METH_VARARGS | METH_KEYWORDS, "Shared state"},
     {"get_global_agent_state", get_global_agent_state, METH_VARARGS, "Get global agent state"},
@@ -1054,6 +1089,16 @@ PyMODINIT_FUNC PyInit_binding(void) {
     PyModule_AddIntConstant(m, "PARTNER_FEATURES", PARTNER_FEATURES);
     PyModule_AddIntConstant(m, "EGO_FEATURES_CLASSIC", EGO_FEATURES_CLASSIC);
     PyModule_AddIntConstant(m, "EGO_FEATURES_JERK", EGO_FEATURES_JERK);
+
+    // Render mode constants
+    PyModule_AddIntConstant(m, "RENDER_OFF", RENDER_OFF);
+    PyModule_AddIntConstant(m, "RENDER_HEADLESS", RENDER_HEADLESS);
+    PyModule_AddIntConstant(m, "RENDER_WINDOW", RENDER_WINDOW);
+
+    // View mode constants
+    PyModule_AddIntConstant(m, "VIEW_MODE_SIM_STATE", VIEW_MODE_SIM_STATE);
+    PyModule_AddIntConstant(m, "VIEW_MODE_BEV_AGENT_OBS", VIEW_MODE_BEV_AGENT_OBS);
+    PyModule_AddIntConstant(m, "VIEW_MODE_AGENT_PERSP", VIEW_MODE_AGENT_PERSP);
 
     return m;
 }

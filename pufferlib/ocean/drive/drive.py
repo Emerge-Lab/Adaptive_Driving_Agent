@@ -3,11 +3,19 @@ import gymnasium
 import json
 import struct
 import os
+from enum import IntEnum
 import pufferlib
 from pufferlib.ocean.drive import binding
 import torch
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
+
+
+class RenderView(IntEnum):
+    """View modes for rendering."""
+    FULL_SIM_STATE = 0     # Top-down orthographic view of full simulation
+    BEV_AGENT_OBS = 1      # Bird's eye view centered on agent observation
+    AGENT_PERSPECTIVE = 2  # Third-person chase camera following agent
 
 
 class Drive(pufferlib.PufferEnv):
@@ -53,9 +61,19 @@ class Drive(pufferlib.PufferEnv):
         map_dir="resources/drive/binaries/training",
         use_all_maps=False,
         report_all_scenarios=False,
+        map_seed=None,
     ):
         # env
         self.dt = dt
+        # Convert render_mode string to integer constant
+        if render_mode is None or render_mode == 0:
+            self._render_mode_int = binding.RENDER_OFF
+        elif render_mode == 1 or render_mode == "headless":
+            self._render_mode_int = binding.RENDER_HEADLESS
+        elif render_mode == 2 or render_mode == "window" or render_mode == "human":
+            self._render_mode_int = binding.RENDER_WINDOW
+        else:
+            self._render_mode_int = binding.RENDER_OFF
         self.render_mode = render_mode
         self.report_all_scenarios = report_all_scenarios
         self.num_maps = num_maps
@@ -76,6 +94,7 @@ class Drive(pufferlib.PufferEnv):
         self.resample_frequency = resample_frequency
         self.ini_file = ini_file
         self.use_all_maps = use_all_maps
+        self.map_seed = map_seed
 
         if episode_length != None:
             self.scenario_length = episode_length
@@ -320,6 +339,7 @@ class Drive(pufferlib.PufferEnv):
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
                 map_dir=map_dir,
+                render_mode=self._render_mode_int,
             )
             env_ids.append(env_id)
 
@@ -348,6 +368,7 @@ class Drive(pufferlib.PufferEnv):
             num_ego_agents=self.num_ego_agents,
             goal_target_distance=self.goal_target_distance,
             use_all_maps=self.use_all_maps,
+            map_seed=self.map_seed if self.map_seed is not None else -1,
         )
 
         if self.population_play:
@@ -817,8 +838,31 @@ class Drive(pufferlib.PufferEnv):
 
         return polylines
 
-    def render(self):
-        binding.vec_render(self.c_envs, 0)
+    def render(self, view_mode: int = 0, draw_traces: bool = True, env_id: int = 0):
+        """Render the environment.
+
+        Args:
+            view_mode: View mode for rendering:
+                0 = VIEW_MODE_SIM_STATE (top-down orthographic)
+                1 = VIEW_MODE_BEV_AGENT_OBS (bird's eye view centered on agent)
+                2 = VIEW_MODE_AGENT_PERSP (third-person chase camera)
+            draw_traces: Whether to draw trajectory traces
+            env_id: Which environment to render (default 0)
+        """
+        binding.vec_render(self.c_envs, int(view_mode), draw_traces, env_id,
+                          self.current_scenario, self.k_scenarios)
+
+    def set_video_suffix(self, suffix: str, env_id: int = 0):
+        """Set the suffix appended to the mp4 filename for headless rendering.
+
+        Must be called before the first render() call of a rollout.
+        E.g. set_video_suffix("_bev", env_id=0) -> {scenario_id}_bev.mp4
+
+        Args:
+            suffix: Suffix string to append to video filename
+            env_id: Which environment to set suffix for (default 0)
+        """
+        binding.vec_set_video_suffix(self.c_envs, env_id, suffix)
 
     def close(self):
         binding.vec_close(self.c_envs)

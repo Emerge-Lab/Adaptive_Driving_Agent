@@ -176,6 +176,11 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
 
     env->init_mode = (int)unpack(kwargs, "init_mode");
     env->control_mode = (int)unpack(kwargs, "control_mode");
+    // Render mode: 0=RENDER_OFF, 1=RENDER_HEADLESS, 2=RENDER_WINDOW
+    env->render_mode = RENDER_OFF;  // Default to off
+    if (kwargs && PyDict_GetItemString(kwargs, "render_mode")) {
+        env->render_mode = (int)unpack(kwargs, "render_mode");
+    }
     env->goal_behavior = (int)unpack(kwargs, "goal_behavior");
     env->goal_target_distance = (float)unpack(kwargs, "goal_target_distance");
     env->goal_radius = (float)unpack(kwargs, "goal_radius");

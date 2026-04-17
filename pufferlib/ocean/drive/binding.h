@@ -12,12 +12,17 @@ static PyObject *my_shared_self_play(PyObject *self, PyObject *args, PyObject *k
     float goal_target_distance = unpack(kwargs, "goal_target_distance");
     int use_all_maps = unpack(kwargs, "use_all_maps");
     int max_controlled_agents = unpack(kwargs, "max_controlled_agents");
+    int map_seed = PyDict_GetItemString(kwargs, "map_seed") ? unpack(kwargs, "map_seed") : -1;
     printf("Generating environments for %d agents using %s maps from %s, num maps %d \n", num_agents,
            use_all_maps ? "all" : "random", map_dir, num_maps);
     fflush(stdout);
-    // Use current time and pid for randomness
-    clock_gettime(CLOCK_REALTIME, &ts);
-    srand((unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ getpid()));
+    // Use provided seed or fall back to time+pid
+    if (map_seed >= 0) {
+        srand((unsigned int)map_seed);
+    } else {
+        clock_gettime(CLOCK_REALTIME, &ts);
+        srand((unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ getpid()));
+    }
     int total_agent_count = 0;
     int env_count = 0;
     int max_envs = use_all_maps ? num_maps : num_agents;
@@ -190,6 +195,7 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
     int control_mode = unpack(kwargs, "control_mode");
     int init_steps = unpack(kwargs, "init_steps");
     int max_controlled_agents = unpack(kwargs, "max_controlled_agents");
+    int map_seed = PyDict_GetItemString(kwargs, "map_seed") ? unpack(kwargs, "map_seed") : -1;
 
     int max_scenes_per_process = 0;
     PyObject *max_envs_obj = PyDict_GetItemString(kwargs, "max_scenes_per_process");
@@ -200,10 +206,14 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
         }
     }
 
-    // Use current time + PID for better randomness
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    srand((unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ getpid()));
+    // Use provided seed or fall back to time+pid
+    if (map_seed >= 0) {
+        srand((unsigned int)map_seed);
+    } else {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        srand((unsigned int)(ts.tv_sec ^ ts.tv_nsec ^ getpid()));
+    }
 
     int num_coplayers = num_agents - num_ego_agents;
     printf("Creating worlds for %d total agents (%d egos, %d co-players)\n", num_agents, num_ego_agents, num_coplayers);

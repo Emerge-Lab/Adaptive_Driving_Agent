@@ -9,7 +9,7 @@
 #SBATCH --account=torch_pr_355_tandon_advanced
 #SBATCH --cpus-per-task=48
 #SBATCH --gres=gpu:1
-#SBATCH --array=0-15
+#SBATCH --array=0-8
 
 # Train adaptive agents on NuPlan with Transformer architecture
 # Uses pre-trained NuPlan Transformer co-players with varied conditioning
@@ -22,19 +22,19 @@
 ZIPPED_RUNS=(
 "experiments/puffer_drive_joqbmi4s.pt 0.01 0.2"
 "experiments/puffer_drive_0h81rtfi.pt 0 0.4"
-"experiments/puffer_drive_medzmgum.pt 0.1 0.2"
-"experiments/puffer_drive_f4a8yoi9.pt 0.5 0.2"
+# "experiments/puffer_drive_medzmgum.pt 0.1 0.2"
+# "experiments/puffer_drive_f4a8yoi9.pt 0.5 0.2"
 "experiments/puffer_drive_b1yx43w2.pt 0.01 0.4"
-"experiments/puffer_drive_lv4x8hlt.pt 0.1 0.4"
-"experiments/puffer_drive_j51yz49e.pt 0.5 0.4"
+# "experiments/puffer_drive_lv4x8hlt.pt 0.1 0.4"
+# "experiments/puffer_drive_j51yz49e.pt 0.5 0.4"
 "experiments/puffer_drive_iry1wanp.pt 0 0.6"
 "experiments/puffer_drive_kx8bhu3v.pt 0.01 0.6"
 "experiments/puffer_drive_js4mf85k.pt 0.1 0.6"
-"experiments/puffer_drive_52u5onve.pt 0.5 0.6"
+# "experiments/puffer_drive_52u5onve.pt 0.5 0.6"
 "experiments/puffer_drive_nu7lkmx4.pt 0 0.8"
 "experiments/puffer_drive_f8dpkpbq.pt 0.01 0.8"
 "experiments/puffer_drive_zxsxu6z7.pt 0.1 0.8"
-"experiments/puffer_drive_mfahi5bc.pt 0.5 0.8"
+# "experiments/puffer_drive_mfahi5bc.pt 0.5 0.8"
 )
 
 read -r COPLAYER_PATH ENTROPY_UB DISCOUNT_LB <<< "${ZIPPED_RUNS[$SLURM_ARRAY_TASK_ID]}"
