@@ -62,6 +62,8 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
                 str(eval_config.get("human_replay_num_agents", 32)),
                 "--num-maps",
                 str(eval_config.get("human_replay_num_maps", 100)),
+                "--map-dir",
+                str(eval_config.get("map_dir", env_config.get("map_dir", "resources/drive/binaries/training"))),
                 "--num-rollouts",
                 str(eval_config.get("human_replay_num_rollouts", 100)),
                 "--dynamics-model",
@@ -170,6 +172,11 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
                 str(eval_config.get("human_replay_num_agents", 64)),
                 "--eval.human-replay-control-mode",
                 str(eval_config.get("human_replay_control_mode", "control_sdc_only")),
+                # Forward eval map_dir/num_maps so the subprocess does not fall back to ini defaults
+                "--eval.map-dir",
+                str(eval_config.get("map_dir", env_config.get("map_dir", "resources/drive/binaries/training"))),
+                "--eval.num-maps",
+                str(eval_config.get("num_maps", 20)),
                 # Pass conditioning settings
                 "--env.conditioning.type",
                 conditioning_type,

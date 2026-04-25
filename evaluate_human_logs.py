@@ -106,6 +106,8 @@ def main():
     parser.add_argument("--policy-path", type=str, required=True)
     parser.add_argument("--rnn-name", type=str, default="Recurrent")
     parser.add_argument("--num-maps", type=int, default=10)
+    parser.add_argument("--map-dir", type=str, default=None,
+                        help="Override map directory (e.g. resources/drive/binaries/nuplan)")
     parser.add_argument("--num-rollouts", type=int, default=100)
     parser.add_argument("--num-agents", type=int, default=64)
     parser.add_argument("--output", type=str, default="eval_human_logs.json")
@@ -134,6 +136,7 @@ def main():
     print(f"  Policy: {args_parsed.policy_path}")
     print(f"  RNN Name: {args_parsed.rnn_name}")
     print(f"  Num maps: {args_parsed.num_maps}")
+    print(f"  Map dir: {args_parsed.map_dir or '(use env default)'}")
     print(f"  Total rollouts: {args_parsed.num_rollouts}")
     print(f"  Num agents per env: {args_parsed.num_agents}")
     print(f"  Adaptive agent: {bool(args_parsed.adaptive_driving_agent)}")
@@ -158,6 +161,7 @@ def main():
         "env": {
             "num_agents": args_parsed.num_agents,
             "num_maps": args_parsed.num_maps,
+            **({"map_dir": args_parsed.map_dir} if args_parsed.map_dir else {}),
             "scenario_length": scenario_length,
             "adaptive_driving_agent": args_parsed.adaptive_driving_agent,
             "k_scenarios": args_parsed.k_scenarios,

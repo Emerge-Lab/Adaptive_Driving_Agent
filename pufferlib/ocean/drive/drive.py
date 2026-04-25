@@ -918,6 +918,20 @@ def simplify_polyline(geometry, polyline_reduction_threshold, max_segment_length
     return [geometry[i] for i in range(num_points) if not skip[i]]
 
 
+def _to_int32(v, default=0):
+    """Wrap an arbitrary integer into the signed int32 range using two's-complement
+    semantics so struct.pack('i', ...) cannot overflow. nuPlan IDs and some type
+    fields can exceed 2^31-1; this preserves the low 32 bits the way C would."""
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return default
+    v &= 0xFFFFFFFF
+    if v >= 0x80000000:
+        v -= 0x100000000
+    return v
+
+
 def save_map_binary(map_data, output_file, unique_map_id):
     trajectory_length = 91
     """Saves map data in a binary format readable by C"""
@@ -928,25 +942,25 @@ def save_map_binary(map_data, output_file, unique_map_id):
         tracks_to_predict = metadata.get("tracks_to_predict", [])
 
         # Write sdc_track_index
-        f.write(struct.pack("i", sdc_track_index))
+        f.write(struct.pack("i", _to_int32(sdc_track_index, -1)))
 
         # Write tracks_to_predict info (indices only)
-        f.write(struct.pack("i", len(tracks_to_predict)))
+        f.write(struct.pack("i", _to_int32(len(tracks_to_predict))))
         for track in tracks_to_predict:
             track_index = track.get("track_index", -1)
-            f.write(struct.pack("i", track_index))
+            f.write(struct.pack("i", _to_int32(track_index, -1)))
 
         # Count total entities
         num_objects = len(map_data.get("objects", []))
         num_roads = len(map_data.get("roads", []))
         # num_entities = num_objects + num_roads
-        f.write(struct.pack("i", num_objects))
-        f.write(struct.pack("i", num_roads))
+        f.write(struct.pack("i", _to_int32(num_objects)))
+        f.write(struct.pack("i", _to_int32(num_roads)))
         # f.write(struct.pack('i', num_entities))
         # Write objects
         for obj in map_data.get("objects", []):
             # Write unique map id
-            f.write(struct.pack("i", unique_map_id))
+            f.write(struct.pack("i", _to_int32(unique_map_id)))
 
             # Write base entity data
             obj_type = obj.get("type", 1)
@@ -956,13 +970,10 @@ def save_map_binary(map_data, output_file, unique_map_id):
                 obj_type = 2
             elif obj_type == "cyclist":
                 obj_type = 3
-            f.write(struct.pack("i", obj_type))  # type
-            # Truncate large IDs to fit in int32 range
+            f.write(struct.pack("i", _to_int32(obj_type)))  # type
             obj_id = obj.get("id", 0)
-            if isinstance(obj_id, int) and (obj_id > 2147483647 or obj_id < -2147483648):
-                obj_id = obj_id % 2147483647
-            f.write(struct.pack("i", obj_id))  # id
-            f.write(struct.pack("i", trajectory_length))  # array_size
+            f.write(struct.pack("i", _to_int32(obj_id)))  # id
+            f.write(struct.pack("i", _to_int32(trajectory_length)))  # array_size
             # Write position arrays
             positions = obj.get("position", [])
             for i in range(trajectory_length):
@@ -995,7 +1006,7 @@ def save_map_binary(map_data, output_file, unique_map_id):
             f.write(
                 struct.pack(
                     f"{trajectory_length}i",
-                    *[int(valids[i]) if i < len(valids) else 0 for i in range(trajectory_length)],
+                    *[_to_int32(valids[i]) if i < len(valids) else 0 for i in range(trajectory_length)],
                 )
             )
 
@@ -1007,11 +1018,11 @@ def save_map_binary(map_data, output_file, unique_map_id):
             f.write(struct.pack("f", float(goal_pos.get("x", 0.0))))  # Get x value
             f.write(struct.pack("f", float(goal_pos.get("y", 0.0))))  # Get y value
             f.write(struct.pack("f", float(goal_pos.get("z", 0.0))))  # Get z value
-            f.write(struct.pack("i", obj.get("mark_as_expert", 0)))
+            f.write(struct.pack("i", _to_int32(obj.get("mark_as_expert", 0))))
 
         # Write roads
         for idx, road in enumerate(map_data.get("roads", [])):
-            f.write(struct.pack("i", unique_map_id))
+            f.write(struct.pack("i", _to_int32(unique_map_id)))
 
             geometry = road.get("geometry", [])
             road_type = road.get("map_element_id", 0)
@@ -1040,13 +1051,10 @@ def save_map_binary(map_data, output_file, unique_map_id):
             elif road_type == 20:
                 road_type = 10
             # Write base entity data
-            f.write(struct.pack("i", road_type))  # type
-            # Truncate large IDs to fit in int32 range
+            f.write(struct.pack("i", _to_int32(road_type)))  # type
             road_id = road.get("id", 0)
-            if isinstance(road_id, int) and (road_id > 2147483647 or road_id < -2147483648):
-                road_id = road_id % 2147483647
-            f.write(struct.pack("i", road_id))  # id
-            f.write(struct.pack("i", size))  # array_size
+            f.write(struct.pack("i", _to_int32(road_id)))  # id
+            f.write(struct.pack("i", _to_int32(size)))  # array_size
 
             # Write position arrays
             for coord in ["x", "y", "z"]:
@@ -1061,7 +1069,7 @@ def save_map_binary(map_data, output_file, unique_map_id):
             f.write(struct.pack("f", float(goal_pos.get("x", 0.0))))  # Get x value
             f.write(struct.pack("f", float(goal_pos.get("y", 0.0))))  # Get y value
             f.write(struct.pack("f", float(goal_pos.get("z", 0.0))))  # Get z value
-            f.write(struct.pack("i", road.get("mark_as_expert", 0)))
+            f.write(struct.pack("i", _to_int32(road.get("mark_as_expert", 0))))
 
 
 def load_map(map_name, unique_map_id, binary_output=None):
@@ -1178,7 +1186,7 @@ if __name__ == "__main__":
     # test_performance()
     # Process the train dataset
     # process_all_maps(data_folder="/data/processed/training")
-    process_all_maps(data_folder="/data/nuplan_gpudrive/nuplan")
+    process_all_maps(data_folder="/workspace/ADA/GPUDrive-NuPlan-MiniSet/nuplan")
     # Process the validation/test dataset
     # process_all_maps(data_folder="data/processed/validation")
     # # Process the validation_interactive dataset
