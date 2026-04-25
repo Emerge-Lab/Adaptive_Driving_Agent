@@ -1,119 +1,105 @@
 #!/bin/bash
-# Train every co-player variant we currently care about, in series.
+#SBATCH --job-name=coplayer_ablation
+#SBATCH --output=/scratch/mmk9418/logs/%A_%a_%x.out
+#SBATCH --error=/scratch/mmk9418/logs/%A_%a_%x.err
+#SBATCH --mem=128GB
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --account=torch_pr_355_tandon_advanced
+#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:1
+#SBATCH --array=0-7
+
+# Train every co-player ablation variant in one slurm array.
 #
-# Use this to eyeball that learning is happening across the matrix
-# (we can't see learning curves from CI, only from running and watching wandb).
-# Once these are trained, feed the resulting checkpoints into
-# scripts/adaptive/* to verify adaptive-agent training works end-to-end.
+#   sbatch scripts/ablations/all_coplayers.sh
 #
-# Usage:
-#   bash scripts/ablations/all_coplayers.sh                       # full matrix
-#   bash scripts/ablations/all_coplayers.sh --quick               # tiny budgets, smoke-style
-#   bash scripts/ablations/all_coplayers.sh --datasets nuplan     # one dataset
-#   bash scripts/ablations/all_coplayers.sh --archs Recurrent     # one architecture
+# 8 array tasks = 2 datasets × 2 archs × 2 conditioning types:
+#   idx | dataset | architecture | conditioning
+#   ----+---------+--------------+-------------
+#    0  | womd    | Recurrent    | none
+#    1  | womd    | Recurrent    | all
+#    2  | womd    | Transformer  | none
+#    3  | womd    | Transformer  | all
+#    4  | nuplan  | Recurrent    | none
+#    5  | nuplan  | Recurrent    | all
+#    6  | nuplan  | Transformer  | none
+#    7  | nuplan  | Transformer  | all
 #
-# Artifacts: wandb run ids → experiments/puffer_drive_<run>.pt
+# Resulting checkpoints land at experiments/puffer_drive_<wandb_run_id>.pt.
+# Once they've trained, plug them into scripts/adaptive/*.sh as ZIPPED_RUNS
+# entries.
 
-set -euo pipefail
+# Decode array index → (dataset, arch, cond_type)
+RUNS=(
+  "womd Recurrent none"
+  "womd Recurrent all"
+  "womd Transformer none"
+  "womd Transformer all"
+  "nuplan Recurrent none"
+  "nuplan Recurrent all"
+  "nuplan Transformer none"
+  "nuplan Transformer all"
+)
 
-cd "$(dirname "$0")/../.."
-source .venv/bin/activate
+read -r DATASET ARCH COND <<< "${RUNS[$SLURM_ARRAY_TASK_ID]}"
 
-DATASETS=(womd nuplan)
-ARCHS=(Recurrent Transformer)
-COND_TYPES=(none all)
-QUICK=0
-EXTRA_ARGS=()
+# Dataset → map_dir + num_maps
+case "$DATASET" in
+  nuplan)
+    MAP_DIR="resources/drive/binaries/nuplan"
+    NUM_MAPS=5000
+    ;;
+  womd)
+    MAP_DIR="resources/drive/binaries/training"
+    NUM_MAPS=10000
+    ;;
+  *) echo "unknown dataset $DATASET" >&2; exit 1 ;;
+esac
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --quick) QUICK=1; shift ;;
-    --datasets) IFS=',' read -ra DATASETS <<< "$2"; shift 2 ;;
-    --archs)    IFS=',' read -ra ARCHS    <<< "$2"; shift 2 ;;
-    --cond)     IFS=',' read -ra COND_TYPES <<< "$2"; shift 2 ;;
-    --) shift; EXTRA_ARGS=("$@"); break ;;
-    *)  EXTRA_ARGS+=("$1"); shift ;;
-  esac
-done
+# Conditioning → puffer flags
+# `all` sweeps entropy 0→0.1 and discount 0.8→1.0 (the same range used in
+# scripts/coplayers/* with the cell at idx 0).
+case "$COND" in
+  none)
+    COND_ARGS="--env.conditioning.type none"
+    ;;
+  all)
+    COND_ARGS="--env.conditioning.type all \
+               --env.conditioning.entropy-weight-lb 0 \
+               --env.conditioning.entropy-weight-ub 0.1 \
+               --env.conditioning.discount-weight-lb 0.8 \
+               --env.conditioning.discount-weight-ub 1.0"
+    ;;
+  *) echo "unknown conditioning $COND" >&2; exit 1 ;;
+esac
 
-if [[ "$QUICK" -eq 1 ]]; then
-  TIMESTEPS=200000
-  CHECKPOINT_INTERVAL=5
-  NUM_MAPS_NUPLAN=20
-  NUM_MAPS_WOMD=20
-else
-  TIMESTEPS=500000000
-  CHECKPOINT_INTERVAL=50
-  NUM_MAPS_NUPLAN=5000
-  NUM_MAPS_WOMD=10000
-fi
+TAG="coplayer_${DATASET}_${ARCH,,}_cond-${COND}"
 
-map_dir_for() {
-  case "$1" in
-    nuplan) echo "resources/drive/binaries/nuplan" ;;
-    womd)   echo "resources/drive/binaries/training" ;;
-    *) echo "unknown dataset $1" >&2; exit 1 ;;
-  esac
-}
+singularity exec --nv \
+ --overlay "$OVERLAY_FILE:ro" \
+ "$SINGULARITY_IMAGE" \
+ bash -c "
+   set -e
 
-num_maps_for() {
-  case "$1" in
-    nuplan) echo "$NUM_MAPS_NUPLAN" ;;
-    womd)   echo "$NUM_MAPS_WOMD" ;;
-  esac
-}
+   source ~/.bashrc
+   cd /scratch/mmk9418/projects/Adaptive_Driving_Agent
+   source .venv/bin/activate
 
-cond_args_for() {
-  # All sweeps fix entropy_lb=0, discount_ub=1; vary entropy_ub and discount_lb.
-  case "$1" in
-    none) echo "--env.conditioning.type none" ;;
-    all)  echo "--env.conditioning.type all \
-                --env.conditioning.entropy-weight-lb 0 \
-                --env.conditioning.entropy-weight-ub 0.1 \
-                --env.conditioning.discount-weight-lb 0.8 \
-                --env.conditioning.discount-weight-ub 1.0" ;;
-    *) echo "unknown conditioning $1" >&2; exit 1 ;;
-  esac
-}
+   nice -n 19 python scripts/gpu_heartbeat.py &
+   HEARTBEAT_PID=\$!
 
-run_one() {
-  local dataset="$1"
-  local arch="$2"
-  local cond="$3"
-  local map_dir num_maps cond_args tag
-  map_dir=$(map_dir_for "$dataset")
-  num_maps=$(num_maps_for "$dataset")
-  cond_args=$(cond_args_for "$cond")
-  tag="coplayer_${dataset}_${arch,,}_cond-${cond}"
+   puffer train puffer_drive --wandb \
+     --wandb-project ada_coplayer_ablation \
+     --tag $TAG \
+     --policy-architecture $ARCH \
+     --rnn-name $ARCH \
+     --env.map-dir $MAP_DIR \
+     --env.num-maps $NUM_MAPS \
+     --eval.map-dir $MAP_DIR \
+     --train.checkpoint-interval 50 \
+     $COND_ARGS
 
-  echo
-  echo "=== $tag ==="
-  echo "    map_dir=$map_dir num_maps=$num_maps timesteps=$TIMESTEPS"
-  echo
-
-  # shellcheck disable=SC2086
-  puffer train puffer_drive --wandb \
-    --wandb-project ada_coplayer_ablation \
-    --tag "$tag" \
-    --policy-architecture "$arch" \
-    --rnn-name "$arch" \
-    --env.map-dir "$map_dir" \
-    --env.num-maps "$num_maps" \
-    --eval.map-dir "$map_dir" \
-    --train.total-timesteps "$TIMESTEPS" \
-    --train.checkpoint-interval "$CHECKPOINT_INTERVAL" \
-    --train.render False \
-    $cond_args \
-    "${EXTRA_ARGS[@]}"
-}
-
-for dataset in "${DATASETS[@]}"; do
-  for arch in "${ARCHS[@]}"; do
-    for cond in "${COND_TYPES[@]}"; do
-      run_one "$dataset" "$arch" "$cond"
-    done
-  done
-done
-
-echo
-echo "Done. Checkpoints in experiments/puffer_drive_*.pt; wandb project: ada_coplayer_ablation"
+   kill \$HEARTBEAT_PID
+ "

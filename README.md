@@ -108,19 +108,14 @@ sbatch scripts/coplayers/womd_recurrent.sh
 sbatch scripts/coplayers/womd_transformer.sh
 ```
 
-Or, to fire the full matrix locally (no SLURM):
+Or, to fire all 8 ablation cells (2 datasets × 2 archs × {none, all}) as a
+single slurm array:
 
 ```bash
-# Full budget (2B steps × 8 configs)
-bash scripts/ablations/all_coplayers.sh
-
-# Quick smoke (200k steps × 8 configs) — useful to confirm learning happens
-bash scripts/ablations/all_coplayers.sh --quick
-
-# Subset
-bash scripts/ablations/all_coplayers.sh --datasets nuplan --archs Recurrent
-bash scripts/ablations/all_coplayers.sh --cond all
+sbatch scripts/ablations/all_coplayers.sh   # 8 array tasks, one per cell
 ```
+
+The matrix is documented in the script's header.
 
 Resulting checkpoints land at `experiments/puffer_drive_<wandb_run_id>.pt`.
 
