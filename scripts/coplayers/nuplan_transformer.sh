@@ -74,7 +74,8 @@ singularity exec --nv \
      --train.context-length 91 \
      --train.horizon 91 \
      --train.learning-rate 0.003 \
-     --train.checkpoint-interval 50
+     --train.checkpoint-interval 50 \
+     --eval.map-dir resources/drive/binaries/nuplan
 
    kill \$HEARTBEAT_PID
  "

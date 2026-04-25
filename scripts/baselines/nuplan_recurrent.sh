@@ -39,6 +39,7 @@ singularity exec --nv \
      --env.co-player-enabled 0 \
      --train.seed 42 \
      --rnn-name Recurrent \
+     --eval.map-dir resources/drive/binaries/nuplan
 
    kill \$HEARTBEAT_PID
  "
