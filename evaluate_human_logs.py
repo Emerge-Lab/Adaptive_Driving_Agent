@@ -115,6 +115,19 @@ def main():
     parser.add_argument("--k-scenarios", type=int, default=1)
     parser.add_argument("--dynamics-model", type=str, default="classic")
     parser.add_argument("--human-replay", action="store_true")
+    # Conditioning arguments
+    parser.add_argument("--conditioning-type", type=str, default="none",
+                        help="Conditioning type: none, reward, entropy, discount, or all")
+    parser.add_argument("--collision-weight-lb", type=float, default=-3.0)
+    parser.add_argument("--collision-weight-ub", type=float, default=-3.0)
+    parser.add_argument("--offroad-weight-lb", type=float, default=-1.0)
+    parser.add_argument("--offroad-weight-ub", type=float, default=-1.0)
+    parser.add_argument("--goal-weight-lb", type=float, default=1.0)
+    parser.add_argument("--goal-weight-ub", type=float, default=1.0)
+    parser.add_argument("--entropy-weight-lb", type=float, default=0.001)
+    parser.add_argument("--entropy-weight-ub", type=float, default=0.001)
+    parser.add_argument("--discount-weight-lb", type=float, default=0.98)
+    parser.add_argument("--discount-weight-ub", type=float, default=0.98)
     args_parsed = parser.parse_args()
 
     print(f"Evaluation Configuration:")
@@ -126,6 +139,7 @@ def main():
     print(f"  Adaptive agent: {bool(args_parsed.adaptive_driving_agent)}")
     print(f"  K scenarios: {args_parsed.k_scenarios}")
     print(f"  Dynamics Model: {args_parsed.dynamics_model}")
+    print(f"  Conditioning type: {args_parsed.conditioning_type}")
     print(f"  Output: {args_parsed.output}\n")
 
     # Build args dict in the format expected by HumanReplayEvaluator
@@ -158,6 +172,19 @@ def main():
             "reward_offroad_collision": -0.5,
             "reward_goal": 1.0,
             "reward_goal_post_respawn": 0.25,
+            "conditioning": {
+                "type": args_parsed.conditioning_type,
+                "collision_weight_lb": args_parsed.collision_weight_lb,
+                "collision_weight_ub": args_parsed.collision_weight_ub,
+                "offroad_weight_lb": args_parsed.offroad_weight_lb,
+                "offroad_weight_ub": args_parsed.offroad_weight_ub,
+                "goal_weight_lb": args_parsed.goal_weight_lb,
+                "goal_weight_ub": args_parsed.goal_weight_ub,
+                "entropy_weight_lb": args_parsed.entropy_weight_lb,
+                "entropy_weight_ub": args_parsed.entropy_weight_ub,
+                "discount_weight_lb": args_parsed.discount_weight_lb,
+                "discount_weight_ub": args_parsed.discount_weight_ub,
+            },
         },
         "vec": {
             "backend": "PufferEnv",

@@ -115,7 +115,9 @@ def rollout_loop(
         max_steps = getattr(driver, 'scenario_length', 91)
 
     info = []
-    for _ in range(max_steps):
+    for step in range(max_steps):
+        if step % 30 == 0:
+            print(f"[Python Render] Step {step}/{max_steps}", flush=True)
         # Render BEFORE the step so each frame shows the state the policy was
         # conditioned on.
         if render_ctx is not None:

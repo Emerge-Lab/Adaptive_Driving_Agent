@@ -756,6 +756,7 @@ class PuffeRL:
             self.save_checkpoint()
             self.msg = f"Checkpoint saved at update {self.epoch}"
 
+            print(f"[DEBUG] Checkpoint at epoch {self.epoch}: render={self.render}, render_interval={self.render_interval}, epoch % render_interval = {self.epoch % self.render_interval}")
             if self.render and self.epoch % self.render_interval == 0:
                 print("Attempting Python-based rendering...")
                 try:
@@ -766,7 +767,7 @@ class PuffeRL:
                         logger=self.logger,
                         epoch=self.epoch,
                         global_step=self.global_step,
-                        device=self.config["train"]["device"],
+                        device=self.config["device"],  # train_config is flat, device is at top level
                     )
                 except Exception as e:
                     print(f"Python rendering failed: {e}, falling back to C-based rendering...")

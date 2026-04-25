@@ -33,8 +33,13 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
         env_config = config.get("env_config", {})
         eval_config = config.get("eval", {})
 
+        # Get conditioning config for passing to eval subprocess
+        conditioning = env_config.get("conditioning", {})
+        conditioning_type = conditioning.get("type", "none")
+
         print(f"[Human Replay Eval] env_name={env_name}, is_adaptive={is_adaptive}")
         print(f"[Human Replay Eval] Using model: {latest_cpt}")
+        print(f"[Human Replay Eval] conditioning_type={conditioning_type}")
 
         if is_adaptive:
             # Use evaluate_human_logs.py for adaptive agents with human replay
@@ -66,6 +71,29 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
                 "1",
                 "--output",
                 "/tmp/human_replay_eval.json",
+                # Pass conditioning settings
+                "--conditioning-type",
+                conditioning_type,
+                "--collision-weight-lb",
+                str(conditioning.get("collision_weight_lb", -3.0)),
+                "--collision-weight-ub",
+                str(conditioning.get("collision_weight_ub", -3.0)),
+                "--offroad-weight-lb",
+                str(conditioning.get("offroad_weight_lb", -1.0)),
+                "--offroad-weight-ub",
+                str(conditioning.get("offroad_weight_ub", -1.0)),
+                "--goal-weight-lb",
+                str(conditioning.get("goal_weight_lb", 1.0)),
+                "--goal-weight-ub",
+                str(conditioning.get("goal_weight_ub", 1.0)),
+                "--entropy-weight-lb",
+                str(conditioning.get("entropy_weight_lb", 0.001)),
+                "--entropy-weight-ub",
+                str(conditioning.get("entropy_weight_ub", 0.001)),
+                "--discount-weight-lb",
+                str(conditioning.get("discount_weight_lb", 0.98)),
+                "--discount-weight-ub",
+                str(conditioning.get("discount_weight_ub", 0.98)),
             ]
             print(f"[Human Replay Eval] Command: {' '.join(cmd)}")
 
@@ -142,6 +170,29 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
                 str(eval_config.get("human_replay_num_agents", 64)),
                 "--eval.human-replay-control-mode",
                 str(eval_config.get("human_replay_control_mode", "control_sdc_only")),
+                # Pass conditioning settings
+                "--env.conditioning.type",
+                conditioning_type,
+                "--env.conditioning.collision-weight-lb",
+                str(conditioning.get("collision_weight_lb", -3.0)),
+                "--env.conditioning.collision-weight-ub",
+                str(conditioning.get("collision_weight_ub", -3.0)),
+                "--env.conditioning.offroad-weight-lb",
+                str(conditioning.get("offroad_weight_lb", -1.0)),
+                "--env.conditioning.offroad-weight-ub",
+                str(conditioning.get("offroad_weight_ub", -1.0)),
+                "--env.conditioning.goal-weight-lb",
+                str(conditioning.get("goal_weight_lb", 1.0)),
+                "--env.conditioning.goal-weight-ub",
+                str(conditioning.get("goal_weight_ub", 1.0)),
+                "--env.conditioning.entropy-weight-lb",
+                str(conditioning.get("entropy_weight_lb", 0.001)),
+                "--env.conditioning.entropy-weight-ub",
+                str(conditioning.get("entropy_weight_ub", 0.001)),
+                "--env.conditioning.discount-weight-lb",
+                str(conditioning.get("discount_weight_lb", 0.98)),
+                "--env.conditioning.discount-weight-ub",
+                str(conditioning.get("discount_weight_ub", 0.98)),
             ]
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=os.getcwd())
@@ -293,6 +344,7 @@ def render_videos_python(config, policy, logger, epoch, global_step, device="cud
     from pufferlib.ocean.drive.rollout import RenderContext, RenderView, rollout_loop
 
     try:
+        print("[Python Render] ========== STARTING PYTHON-BASED RENDERING ==========")
         run_id = logger.run_id
         # config["env"] is the env name string in PuffeRL's train_config
         env_name = config.get("env", "drive")
@@ -375,6 +427,7 @@ def render_videos_python(config, policy, logger, epoch, global_step, device="cud
 
             try:
                 policy.eval()
+                print(f"[Python Render] Starting rollout_loop with max_steps={episode_length}, view_mode={view_mode}")
                 rollout_loop(
                     policy=policy,
                     env=render_env,
@@ -388,11 +441,13 @@ def render_videos_python(config, policy, logger, epoch, global_step, device="cud
                         video_suffix=view_suffix,
                     ),
                 )
+                print(f"[Python Render] rollout_loop completed successfully")
             finally:
                 render_env.close()
 
         # Collect generated videos (written to cwd by C code)
         video_files = glob.glob("*.mp4")
+        print(f"[Python Render] Found {len(video_files)} video files: {video_files}")
         for video_file in video_files:
             target_filename = f"epoch_{epoch:06d}_{os.path.basename(video_file)}"
             target_path = os.path.join(video_output_dir, target_filename)
@@ -478,6 +533,11 @@ def render_videos(config, vecenv, logger, epoch, global_step, bin_path):
 
         # Get env config for k_scenarios and co-player settings
         env_config = config.get("env_config", {})
+
+        # Pass conditioning type to visualize binary
+        conditioning = env_config.get("conditioning", {})
+        conditioning_type = conditioning.get("type", "none")
+        base_cmd.extend(["--conditioning-type", conditioning_type])
 
         # Pass k_scenarios for adaptive agents (longer videos)
         k_scenarios = env_config.get("k_scenarios", 1)
@@ -632,6 +692,13 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
         env_config = config.get("env_config", config.get("env", {}))
         k_scenarios = env_config.get("k_scenarios", env_config.get("k-scenarios", 1))
         map_dir = env_config.get("map_dir", env_config.get("map-dir", None))
+        conditioning = env_config.get("conditioning", {})
+        conditioning_type = conditioning.get("type", "none")
+
+        # Select correct INI file based on env name
+        env_name = config.get("env", "")
+        is_adaptive = "adaptive" in env_name
+        ini_file = "pufferlib/config/ocean/adaptive.ini" if is_adaptive else "pufferlib/config/ocean/drive.ini"
 
         # Build command for human replay rendering
         cmd = [
@@ -641,7 +708,7 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
             "-screen 0 1280x720x24",
             "./visualize",
             "--ini-file",
-            "pufferlib/config/ocean/adaptive.ini",
+            ini_file,
             "--policy-name",
             expected_weights_path,
             "--max-controlled-agents",
@@ -658,6 +725,8 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
             "resources/drive/output_topdown.mp4",
             "--output-agent",
             "resources/drive/output_agent.mp4",
+            "--conditioning-type",
+            conditioning_type,
         ]
 
         # Add map_dir override if specified (for NuPlan or other datasets)
@@ -675,6 +744,8 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
             print(f"[Human Replay Render] Rendering map {map_idx}...", flush=True)
             result = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True, text=True, timeout=600, env=env_vars)
             print(f"[Human Replay Render] Return code: {result.returncode}", flush=True)
+            if result.stdout:
+                print(f"[Human Replay Render] stdout: {result.stdout[:500]}", flush=True)
             if result.stderr:
                 print(f"[Human Replay Render] stderr: {result.stderr[:500]}", flush=True)
 

@@ -304,7 +304,8 @@ void forward_population(DriveNet *ego_net, DriveNet *co_player_net, float *obser
 int eval_gif(const char *map_name, const char *policy_name, int show_grid, int obs_only, int lasers,
              int show_human_logs, int frame_skip, const char *view_mode, const char *output_topdown,
              const char *output_agent, int num_maps, int zoom_in, const char *ini_file, int k_scenarios_cli,
-             int max_controlled_agents_cli, const char *co_player_policy_name, const char *map_dir_cli) {
+             int max_controlled_agents_cli, const char *co_player_policy_name, const char *map_dir_cli,
+             const char *conditioning_type_cli) {
 
     // Parse configuration from INI file
     env_init_config conf = {0};
@@ -322,7 +323,7 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
     char map_buffer[100];
     if (map_name == NULL) {
         srand(time(NULL));
-        int random_map = rand() % num_maps;
+        int random_map = (rand() % num_maps) + 1;  // Maps are 1-indexed (map_001.bin, not map_000.bin)
         sprintf(map_buffer, "%s/map_%03d.bin", conf.map_dir, random_map);
         map_name = map_buffer;
     }
@@ -344,15 +345,19 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
     }
     fclose(policy_file);
 
-    int use_rc = (conf.conditioning != NULL)
-                     ? (strcmp(conf.conditioning->type, "reward") == 0 || strcmp(conf.conditioning->type, "all") == 0)
-                     : 0;
-    int use_ec = (conf.conditioning != NULL)
-                     ? (strcmp(conf.conditioning->type, "entropy") == 0 || strcmp(conf.conditioning->type, "all") == 0)
-                     : 0;
-    int use_dc = (conf.conditioning != NULL)
-                     ? (strcmp(conf.conditioning->type, "discount") == 0 || strcmp(conf.conditioning->type, "all") == 0)
-                     : 0;
+    // Determine conditioning type: CLI override takes precedence over INI
+    const char *conditioning_type = "none";
+    if (conditioning_type_cli != NULL) {
+        conditioning_type = conditioning_type_cli;
+    } else if (conf.conditioning != NULL && conf.conditioning->type != NULL) {
+        conditioning_type = conf.conditioning->type;
+    }
+
+    int use_rc = (strcmp(conditioning_type, "reward") == 0 || strcmp(conditioning_type, "all") == 0);
+    int use_ec = (strcmp(conditioning_type, "entropy") == 0 || strcmp(conditioning_type, "all") == 0);
+    int use_dc = (strcmp(conditioning_type, "discount") == 0 || strcmp(conditioning_type, "all") == 0);
+
+    printf("Conditioning type: %s (rc=%d, ec=%d, dc=%d)\n", conditioning_type, use_rc, use_ec, use_dc);
     // Initialize environment with all config values from INI [env] section
     Drive env = {
         .action_type = conf.action_type,
@@ -683,6 +688,7 @@ int main(int argc, char *argv[]) {
     int init_mode = 0;
     int control_mode = 0;
     int goal_behavior = 0;
+    const char *conditioning_type_cli = NULL; // CLI override for conditioning type
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -788,11 +794,19 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error: --map-dir option requires a directory path\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--conditioning-type") == 0) {
+            if (i + 1 < argc) {
+                conditioning_type_cli = argv[i + 1];
+                i++;
+            } else {
+                fprintf(stderr, "Error: --conditioning-type option requires a value (none, reward, entropy, discount, all)\n");
+                return 1;
+            }
         }
     }
 
     eval_gif(map_name, policy_name, show_grid, obs_only, lasers, show_human_logs, frame_skip, view_mode, output_topdown,
              output_agent, num_maps, zoom_in, ini_file, k_scenarios_cli, max_controlled_agents_cli,
-             co_player_policy_name, map_dir_cli);
+             co_player_policy_name, map_dir_cli, conditioning_type_cli);
     return 0;
 }

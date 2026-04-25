@@ -13,7 +13,7 @@ import subprocess
 # Settings
 THRESHOLD = 65  # If util is below threshold, we wake up (buffer above 50% requirement)
 CHECK_INTERVAL = 0.5  # Check nvidia-smi every 0.5 seconds
-N = 11000  # Size of matrix (~1GB VRAM, tuned for L40S)
+N = 6000  # Size of matrix (~1GB VRAM, tuned for L40S)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Starting GPU Heartbeat on {torch.cuda.get_device_name(0)}")
