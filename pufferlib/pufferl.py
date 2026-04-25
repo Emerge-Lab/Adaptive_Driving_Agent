@@ -1302,17 +1302,6 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
     args = args or load_config(env_name)
 
-    # If --load-model-path points at a checkpoint with sidecar info.json,
-    # let the sidecar dictate architecture / dataset / conditioning so the
-    # user doesn't have to re-pass them. We rebuild a fresh ini-default
-    # baseline and only overlay sidecar values that differ — explicit CLI
-    # flags still win because they were applied above by load_config.
-    load_path = args.get("load_model_path")
-    if load_path:
-        info = load_run_info(load_path)
-        if info:
-            apply_run_info(args, info, source=load_path)
-
     wosac_enabled = args["eval"]["wosac_realism_eval"]
     human_replay_enabled = args["eval"]["human_replay_eval"]
     # Honor eval.map_dir only when explicitly set; otherwise inherit the
@@ -1715,47 +1704,6 @@ def load_run_info(model_path):
             except Exception as e:
                 print(f"[info.json] failed to read {path}: {e}")
     return {}
-
-
-def apply_run_info(args, info, source=""):
-    """Overlay sidecar info.json values onto args.
-
-    The CLI parser (load_config) has already applied user CLI overrides on
-    top of ini defaults. The sidecar is the source of truth for what the
-    checkpoint was actually trained with — when it disagrees with the ini
-    default, the sidecar wins. Explicit CLI flags still override because
-    they were already merged into args before this is called; we only
-    overlay when args still holds an ini-shaped value.
-    """
-    info_env = info.get("env", {})
-    overlaid = []
-
-    sidecar_arch = info.get("policy_architecture")
-    if sidecar_arch and args.get("policy_architecture") != sidecar_arch:
-        args["policy_architecture"] = sidecar_arch
-        args["rnn_name"] = sidecar_arch
-        overlaid.append(f"policy_architecture={sidecar_arch}")
-
-    for key in ("k_scenarios", "scenario_length", "dynamics_model"):
-        v = info_env.get(key)
-        if v is not None and args["env"].get(key) != v:
-            args["env"][key] = v
-            overlaid.append(f"env.{key}={v}")
-
-    sidecar_map = info_env.get("map_dir")
-    if sidecar_map and args["env"].get("map_dir") != sidecar_map:
-        if args.get("eval", {}).get("map_dir") in (None, "", "None"):
-            args["env"]["map_dir"] = sidecar_map
-            overlaid.append(f"env.map_dir={sidecar_map}")
-
-    sidecar_cond = info_env.get("conditioning") or {}
-    cur_cond = args["env"].get("conditioning", {}) or {}
-    if sidecar_cond.get("type") and cur_cond.get("type") != sidecar_cond.get("type"):
-        args["env"]["conditioning"] = dict(sidecar_cond)
-        overlaid.append(f"env.conditioning.type={sidecar_cond['type']}")
-
-    if overlaid:
-        print(f"[info.json] applied from {source}: {', '.join(overlaid)}")
 
 
 def autotune(args=None, env_name=None, vecenv=None, policy=None):

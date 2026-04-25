@@ -31,6 +31,7 @@ singularity exec --nv \
      --env.conditioning.type none \
      --env.co-player-enabled 0 \
      --train.seed 42 \
+     --policy-architecture Transformer \
      --rnn-name Transformer
 
    kill \$HEARTBEAT_PID

@@ -64,6 +64,7 @@ singularity exec --nv \
       --env.conditioning.discount-weight-lb 0.8 \
       --env.conditioning.discount-weight-ub $DISCOUNT_UB \
       --policy-architecture Transformer \
+      --rnn-name Transformer \
       --train.context-length 91 \
       --train.horizon 91 \
       --train.seed $SEED \

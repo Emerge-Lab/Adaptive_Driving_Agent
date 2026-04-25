@@ -234,6 +234,39 @@ Different renders pick different maps via a prime stride
 `<run_dir>/renders/epoch_<NNN>_<mode>_k<k>_map<id>_<view>.mp4`, and uploads
 to wandb.
 
+## Checkpoint sidecar (info.json)
+
+Every checkpoint dir gets an `info.json` written alongside the `.pt` files
+at save time. It records the training config you can't recover from the
+weights alone — useful for grepping later or for filling in adaptive
+training scripts by hand:
+
+```json
+{
+  "run_id": "1qcm9dc0",
+  "env_name": "puffer_drive",
+  "policy_architecture": "Recurrent",
+  "env": {
+    "map_dir": "resources/drive/binaries/nuplan",
+    "k_scenarios": 1,
+    "scenario_length": 91,
+    "dynamics_model": "classic",
+    "co_player_enabled": false,
+    "conditioning": {
+      "type": "all",
+      "entropy_weight_lb": 0.0, "entropy_weight_ub": 0.1,
+      "discount_weight_lb": 0.8, "discount_weight_ub": 1.0,
+      "..."
+    }
+  }
+}
+```
+
+This is reference-only — no autoload. When you train an adaptive ego
+against a co-player, you still pass `--env.co-player-policy.policy-path`
+(and the matching architecture / conditioning flags) explicitly so the
+intent stays in the script.
+
 ## Evaluation
 
 Two evaluators ship out of the box:

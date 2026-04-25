@@ -70,6 +70,7 @@ singularity exec --nv \
      --env.co-player-policy.conditioning.discount-weight-ub $DISCOUNT_UB \
      --env.co-player-policy.conditioning.entropy-weight-lb $ENTROPY_LB \
      --env.co-player-policy.conditioning.entropy-weight-ub $ENTROPY_UB \
+     --policy-architecture Transformer \
      --rnn-name Transformer \
      --eval.map-dir resources/drive/binaries/nuplan
 

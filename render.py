@@ -29,18 +29,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from pufferlib.pufferl import load_config, load_env, load_policy, load_run_info
+from pufferlib.pufferl import load_config, load_env, load_policy
 from pufferlib.ocean.drive.rollout import RenderContext, RenderView, rollout_loop
-
-
-# Set of CLI flags that were given explicitly. Filled in main() before
-# build_config() runs so we know which fields to overlay from info.json.
-EXPLICIT_FLAGS = set()
-
-
-def _explicit(flag: str) -> bool:
-    """Was this dest explicitly passed on the CLI?"""
-    return flag in EXPLICIT_FLAGS
 
 
 VIEW_MODE_BY_NAME = {
@@ -101,16 +91,6 @@ def detect_architecture(model_path, device="cpu"):
 
 def build_config(args):
     """Build the env/vec/policy config dict for one render."""
-    info = load_run_info(args.model_path) or {}
-    info_env = info.get("env", {})
-    info_overlaid = []
-
-    # Sidecar can promote a baseline render to adaptive (k_scenarios>1) or
-    # vice-versa — apply that early so we pick the right env_name.
-    if not _explicit("k_scenarios") and info_env.get("k_scenarios"):
-        args.k_scenarios = info_env["k_scenarios"]
-        info_overlaid.append(f"k_scenarios={args.k_scenarios}")
-
     if args.adaptive or args.k_scenarios > 1 or args.co_player_path is not None:
         env_name = "puffer_adaptive_drive"
     else:
@@ -122,33 +102,6 @@ def build_config(args):
         config = load_config(env_name)
     finally:
         sys.argv = saved_argv
-
-    # Sidecar overlays for fields the user didn't pass explicitly. Sidecar
-    # beats argparse defaults (which are themselves wrong-by-default for
-    # checkpoints trained with non-default conditioning / map_dir).
-    if not _explicit("policy_architecture") and info.get("policy_architecture"):
-        args.policy_architecture = info["policy_architecture"]
-        info_overlaid.append(f"policy_architecture={args.policy_architecture}")
-    if not _explicit("map_dir") and info_env.get("map_dir"):
-        args.map_dir = info_env["map_dir"]
-        info_overlaid.append(f"map_dir={args.map_dir}")
-    if not _explicit("scenario_length") and info_env.get("scenario_length"):
-        args.scenario_length = info_env["scenario_length"]
-        info_overlaid.append(f"scenario_length={args.scenario_length}")
-    if not _explicit("conditioning_type") and info_env.get("conditioning", {}).get("type"):
-        cond = info_env["conditioning"]
-        args.conditioning_type = cond.get("type", args.conditioning_type)
-        for fld in ("collision_weight_lb", "collision_weight_ub",
-                    "offroad_weight_lb", "offroad_weight_ub",
-                    "goal_weight_lb", "goal_weight_ub",
-                    "entropy_weight_lb", "entropy_weight_ub",
-                    "discount_weight_lb", "discount_weight_ub"):
-            if fld in cond and not _explicit(fld):
-                setattr(args, fld, cond[fld])
-        info_overlaid.append(f"conditioning.type={args.conditioning_type}")
-
-    if info_overlaid:
-        print(f"[info.json] applied: {', '.join(info_overlaid)}")
 
     arch = args.policy_architecture or detect_architecture(args.model_path) or "Recurrent"
     config["policy_architecture"] = arch
@@ -346,15 +299,6 @@ def main():
     p.add_argument("--co-player-entropy-weight-ub", type=float, default=0.1)
     p.add_argument("--co-player-discount-weight-lb", type=float, default=0.8)
     p.add_argument("--co-player-discount-weight-ub", type=float, default=1.0)
-
-    # Sniff which flags were passed explicitly so we don't overwrite them
-    # with sidecar values later.
-    raw = sys.argv[1:]
-    EXPLICIT_FLAGS.clear()
-    for action in p._actions:
-        for opt in action.option_strings:
-            if opt in raw or any(a.startswith(opt + "=") for a in raw):
-                EXPLICIT_FLAGS.add(action.dest)
 
     args = p.parse_args()
 

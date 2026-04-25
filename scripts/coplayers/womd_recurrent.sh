@@ -64,6 +64,7 @@ singularity exec --nv \
      --env.conditioning.entropy-weight-ub $ENTROPY_UB \
      --env.conditioning.discount-weight-lb $DISCOUNT_LB \
      --env.conditioning.discount-weight-ub $DISCOUNT_UB \
+     --policy-architecture Recurrent \
      --rnn-name Recurrent \
      --train.checkpoint-interval 50
 
