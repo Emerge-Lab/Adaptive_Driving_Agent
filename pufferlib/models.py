@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 import torch
@@ -10,6 +12,10 @@ import pufferlib.spaces
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import math
+
+
+# Set PUFFER_TRANSFORMER_LEGACY_EVAL=1 to fall back to the pre-KV-cache path.
+_USE_LEGACY_EVAL = os.environ.get("PUFFER_TRANSFORMER_LEGACY_EVAL", "0") == "1"
 
 
 class Default(nn.Module):
@@ -460,6 +466,11 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             self._prime_kv_cache(idx, state)
 
     def forward_eval(self, observations, state):
+        if _USE_LEGACY_EVAL:
+            # Escape hatch for benchmarking / safety net: set
+            # PUFFER_TRANSFORMER_LEGACY_EVAL=1 in the environment to bypass
+            # the KV-cached path and use the original full-context forward.
+            return self._forward_eval_legacy(observations, state)
         B = observations.shape[0]
         device = observations.device
 
