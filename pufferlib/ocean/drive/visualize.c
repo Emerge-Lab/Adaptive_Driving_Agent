@@ -204,7 +204,7 @@ static int make_gif_from_frames(const char *pattern, int fps, const char *palett
 // src_obs: Source observations (may include ego conditioning)
 // dst_obs: Destination buffer for co-player format (with co-player conditioning)
 // num_agents: Number of agents to transform
-// ego_base_dim: Base ego features (7 for CLASSIC, 10 for JERK)
+// ego_base_dim: Base ego features (9 for CLASSIC, 12 for JERK) - includes lane features
 // co_use_rc/ec/dc: Co-player conditioning flags (determines which features to insert)
 void transform_obs_for_coplayer(float *src_obs, float *dst_obs, int num_agents, int ego_obs_size, int coplayer_obs_size,
                                 int ego_base_dim, int co_use_rc, int co_use_ec, int co_use_dc, float collision_lb,
@@ -580,8 +580,8 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
     }
 
     // Calculate observation sizes per agent
-    // ego_base_dim: 7 for CLASSIC dynamics, 10 for JERK dynamics
-    int ego_base_dim = (env.dynamics_model == 1) ? 10 : 7; // 1 = JERK
+    // ego_base_dim: 9 for CLASSIC dynamics, 12 for JERK dynamics (includes lane features)
+    int ego_base_dim = (env.dynamics_model == 1) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
 
     // Ego observation size (environment generates observations without conditioning for ego)
     int ego_obs_size =

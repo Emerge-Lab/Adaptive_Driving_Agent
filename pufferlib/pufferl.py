@@ -558,9 +558,9 @@ class PuffeRL:
                     hasattr(self.vecenv.driver_env, "dynamics_model")
                     and self.vecenv.driver_env.dynamics_model == "jerk"
                 ):
-                    disc_idx = 10  # base ego obs
+                    disc_idx = 12  # EGO_FEATURES_JERK (was 10 before lane features)
                 else:
-                    disc_idx = 7
+                    disc_idx = 9  # EGO_FEATURES_CLASSIC (was 7 before lane features)
 
                 if self.vecenv.driver_env.reward_conditioned:
                     disc_idx += 3
@@ -691,9 +691,9 @@ class PuffeRL:
                     hasattr(self.vecenv.driver_env, "dynamics_model")
                     and self.vecenv.driver_env.dynamics_model == "jerk"
                 ):
-                    ent_idx = 10  # base ego obs
+                    ent_idx = 12  # EGO_FEATURES_JERK (was 10 before lane features)
                 else:
-                    ent_idx = 7
+                    ent_idx = 9  # EGO_FEATURES_CLASSIC (was 7 before lane features)
 
                 if self.vecenv.driver_env.reward_conditioned:
                     ent_idx += 3
@@ -759,6 +759,8 @@ class PuffeRL:
             print(f"[DEBUG] Checkpoint at epoch {self.epoch}: render={self.render}, render_interval={self.render_interval}, epoch % render_interval = {self.epoch % self.render_interval}")
             if self.render and self.epoch % self.render_interval == 0:
                 print("Attempting Python-based rendering...")
+                # Free GPU memory before rendering to avoid OOM
+                torch.cuda.empty_cache()
                 try:
                     # Use Python-based rendering (works with any architecture: LSTM, Transformer, etc.)
                     pufferlib.utils.render_videos_python(
