@@ -355,18 +355,22 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
     # Numerically equivalent to the legacy path (same rolling buffer +
     # causal-row semantics, including the post-wrap "self-attention only"
     # behavior at slot 0 after horizon steps).
+    #
+    # Implementation note: `slot` is kept as a 1-element long tensor (not
+    # `int(pos.item())`) so this method stays compile-friendly. On the GPU
+    # ego policy under torch.compile, `.item()` would cause a Dynamo graph
+    # break and a CUDA sync every call.
     # ------------------------------------------------------------------ #
 
-    def _streaming_attn_mask(self, slot, device):
-        """Return a (1, 1, 1, horizon) bool attn mask: True at slots [0, slot]."""
-        key = (slot, device.type, device.index if device.index is not None else -1)
+    def _slot_arange(self, device):
+        """Return a length-`horizon` arange tensor on `device`, cached per device."""
+        key = (device.type, device.index if device.index is not None else -1)
         cached = self._streaming_mask_cache.get(key)
         if cached is not None:
             return cached
-        mask = torch.zeros(1, 1, 1, self.horizon, dtype=torch.bool, device=device)
-        mask[..., : slot + 1] = True
-        self._streaming_mask_cache[key] = mask
-        return mask
+        arr = torch.arange(self.horizon, device=device)
+        self._streaming_mask_cache[key] = arr
+        return arr
 
     def _make_kv_cache(self, batch_size, device, dtype):
         return [
@@ -499,14 +503,17 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
                 k_cache = [c.to(hidden.dtype) for c in k_cache]
                 v_cache = [c.to(hidden.dtype) for c in v_cache]
 
-        slot = int(pos.item()) % self.horizon
+        slot_t = (pos % self.horizon).long()  # (1,) long tensor
 
         # Add the slot's positional embedding (slot-tied, matching the
         # legacy rolling-buffer scheme).
         pos_embed = self.get_positional_embedding(self.horizon, device)  # (1, horizon, hidden)
-        x = (hidden + pos_embed[0, slot]).unsqueeze(1)  # (B, 1, hidden)
+        pos_embed_slot = pos_embed.index_select(1, slot_t).squeeze(1)  # (1, hidden)
+        x = (hidden + pos_embed_slot).unsqueeze(1)  # (B, 1, hidden)
 
-        attn_mask = self._streaming_attn_mask(slot, device)
+        # Build (1, 1, 1, horizon) bool mask: True at slots [0, slot_t].
+        slots_arange = self._slot_arange(device)
+        attn_mask = (slots_arange <= slot_t).view(1, 1, 1, self.horizon)
         H = self.num_heads
         D = self.head_dim
 
@@ -520,8 +527,10 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             k = k.view(B, 1, H, D).transpose(1, 2)  # (B, H, 1, D)
             v = v.view(B, 1, H, D).transpose(1, 2)  # (B, H, 1, D)
 
-            k_cache[li][:, :, slot, :] = k.squeeze(2)
-            v_cache[li][:, :, slot, :] = v.squeeze(2)
+            # index_copy_ on dim=2 writes one slot using a tensor index, which
+            # avoids the .item() sync that would force a Dynamo graph break.
+            k_cache[li].index_copy_(2, slot_t, k)
+            v_cache[li].index_copy_(2, slot_t, v)
 
             attn_out = F.scaled_dot_product_attention(
                 q,
