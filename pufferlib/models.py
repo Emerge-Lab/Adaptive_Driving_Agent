@@ -234,8 +234,14 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         self.horizon = horizon
         self.num_layers = num_layers
         self.num_heads = num_heads
+        if hidden_size % num_heads != 0:
+            raise ValueError(f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})")
+        self.head_dim = hidden_size // num_heads
         self.is_continuous = self.policy.is_continuous
         self.use_checkpointing = use_checkpointing
+        # Per-slot attention masks for KV-cached streaming inference. Cached
+        # lazily per device to avoid recomputing the same mask each step.
+        self._streaming_mask_cache = {}
 
         # Project encoded observations to transformer dimension if needed
         if input_size != hidden_size:
@@ -329,7 +335,212 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
 
         return torch.where(mask_allow, zero_mask, neg_inf_mask)
 
+    # ------------------------------------------------------------------ #
+    # Streaming inference with per-layer KV cache.
+    #
+    # The legacy `_forward_eval_legacy` below recomputes a full transformer
+    # forward over the entire horizon-length context buffer on every step,
+    # then throws away all but one output position. For B=512 co-players,
+    # horizon=91, single-thread CPU, this costs ~3 s per step and dominates
+    # training wallclock.
+    #
+    # The KV-cached path maintains per-layer (K, V) buffers in `state` and
+    # only computes Q/K/V for the new token, attending against the cache.
+    # Numerically equivalent to the legacy path (same rolling buffer +
+    # causal-row semantics, including the post-wrap "self-attention only"
+    # behavior at slot 0 after horizon steps).
+    # ------------------------------------------------------------------ #
+
+    def _streaming_attn_mask(self, slot, device):
+        """Return a (1, 1, 1, horizon) bool attn mask: True at slots [0, slot]."""
+        key = (slot, device.type, device.index if device.index is not None else -1)
+        cached = self._streaming_mask_cache.get(key)
+        if cached is not None:
+            return cached
+        mask = torch.zeros(1, 1, 1, self.horizon, dtype=torch.bool, device=device)
+        mask[..., : slot + 1] = True
+        self._streaming_mask_cache[key] = mask
+        return mask
+
+    def _make_kv_cache(self, batch_size, device, dtype):
+        return [
+            torch.zeros(
+                batch_size, self.num_heads, self.horizon, self.head_dim, device=device, dtype=dtype
+            )
+            for _ in range(self.num_layers)
+        ]
+
+    def init_eval_state(self, batch_size, device, dtype=torch.float32):
+        """Allocate a fresh streaming-inference state dict for this policy."""
+        return dict(
+            k_cache=self._make_kv_cache(batch_size, device, dtype),
+            v_cache=self._make_kv_cache(batch_size, device, dtype),
+            transformer_position=torch.zeros(1, dtype=torch.long, device=device),
+        )
+
+    def _prime_kv_cache(self, indices, state):
+        """Prime K/V cache for `indices` to match legacy 'zero hidden context'.
+
+        The legacy reset only zeroed the rolling hidden buffer. Because that
+        buffer is summed with the slot-tied positional embedding inside the
+        transformer, the *effective* K/V at unwritten slots is the K/V you
+        get from running the transformer over an all-zero hidden sequence
+        (i.e. just the pos embeddings, with causal attention propagating
+        through layers). This priming fills our cache with exactly that
+        state, so subsequent forward_eval calls match the legacy bit-close.
+        """
+        if isinstance(indices, slice) and indices == slice(None):
+            n_idx = state["k_cache"][0].shape[0]
+        elif torch.is_tensor(indices):
+            n_idx = int(indices.shape[0])
+        else:
+            n_idx = len(indices)
+        if n_idx == 0:
+            return
+
+        H, D = self.num_heads, self.head_dim
+        T = self.horizon
+        device = state["k_cache"][0].device
+        dtype = state["k_cache"][0].dtype
+
+        pos_embed = self.get_positional_embedding(T, device).to(dtype)  # (1, T, hidden)
+        layer_input = pos_embed.expand(n_idx, T, self.hidden_size).contiguous()
+        causal_mask = self.get_causal_mask(T, device)
+
+        with torch.no_grad():
+            for li, layer in enumerate(self.transformer.layers):
+                attn = layer.self_attn
+                x_norm = layer.norm1(layer_input)
+                qkv = F.linear(x_norm, attn.in_proj_weight, attn.in_proj_bias)
+                q, k, v = qkv.chunk(3, dim=-1)
+                q = q.view(n_idx, T, H, D).transpose(1, 2)
+                k = k.view(n_idx, T, H, D).transpose(1, 2)
+                v = v.view(n_idx, T, H, D).transpose(1, 2)
+
+                state["k_cache"][li][indices] = k
+                state["v_cache"][li][indices] = v
+
+                attn_out = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=causal_mask, is_causal=False
+                )
+                attn_out = attn_out.transpose(1, 2).reshape(n_idx, T, self.hidden_size)
+                attn_out = F.linear(attn_out, attn.out_proj.weight, attn.out_proj.bias)
+                x = layer_input + attn_out
+                x_norm2 = layer.norm2(x)
+                ffn_h = layer.activation(F.linear(x_norm2, layer.linear1.weight, layer.linear1.bias))
+                ffn_out = F.linear(ffn_h, layer.linear2.weight, layer.linear2.bias)
+                layer_input = x + ffn_out
+
+    def reset_eval_state(self, state, done_indices=None):
+        """Reset KV cache (and step counter) for done agents.
+
+        - done_indices=None: full reset. K/V zeroed, step counter cleared.
+          (Equivalent to allocating a fresh state.)
+        - done_indices=tensor/array of agent indices: re-prime those rows
+          to mirror the legacy "zero hidden buffer" behavior. The shared
+          step counter is intentionally NOT reset in that case (matches
+          legacy, which only touched per-row context).
+        """
+        k_cache = state.get("k_cache")
+        v_cache = state.get("v_cache")
+        if k_cache is None or v_cache is None:
+            return
+        if done_indices is None:
+            for c in k_cache:
+                c.zero_()
+            for c in v_cache:
+                c.zero_()
+            pos = state.get("transformer_position")
+            if pos is not None:
+                pos.zero_()
+        else:
+            idx = done_indices
+            if not torch.is_tensor(idx):
+                idx = torch.as_tensor(idx, device=k_cache[0].device, dtype=torch.long)
+            self._prime_kv_cache(idx, state)
+
     def forward_eval(self, observations, state):
+        B = observations.shape[0]
+        device = observations.device
+
+        hidden = self.policy.encode_observations(observations, state=state)
+        hidden = self.input_projection(hidden)
+        # hidden: (B, hidden_size)
+
+        # Fetch or lazily allocate the KV cache. We re-allocate if shape
+        # changes (e.g. batch size differs across calls) or dtype mismatches
+        # the input (mixed-precision boundary).
+        k_cache = state.get("k_cache")
+        v_cache = state.get("v_cache")
+        need_alloc = (
+            k_cache is None
+            or v_cache is None
+            or k_cache[0].shape[0] != B
+            or k_cache[0].shape[2] != self.horizon
+        )
+        if need_alloc:
+            k_cache = self._make_kv_cache(B, device, hidden.dtype)
+            v_cache = self._make_kv_cache(B, device, hidden.dtype)
+            pos = torch.zeros(1, dtype=torch.long, device=device)
+        else:
+            pos = state.get("transformer_position", torch.zeros(1, dtype=torch.long, device=device))
+            if k_cache[0].dtype != hidden.dtype:
+                k_cache = [c.to(hidden.dtype) for c in k_cache]
+                v_cache = [c.to(hidden.dtype) for c in v_cache]
+
+        slot = int(pos.item()) % self.horizon
+
+        # Add the slot's positional embedding (slot-tied, matching the
+        # legacy rolling-buffer scheme).
+        pos_embed = self.get_positional_embedding(self.horizon, device)  # (1, horizon, hidden)
+        x = (hidden + pos_embed[0, slot]).unsqueeze(1)  # (B, 1, hidden)
+
+        attn_mask = self._streaming_attn_mask(slot, device)
+        H = self.num_heads
+        D = self.head_dim
+
+        for li, layer in enumerate(self.transformer.layers):
+            attn = layer.self_attn
+
+            x_norm = layer.norm1(x)
+            qkv = F.linear(x_norm, attn.in_proj_weight, attn.in_proj_bias)
+            q, k, v = qkv.chunk(3, dim=-1)
+            q = q.view(B, 1, H, D).transpose(1, 2)  # (B, H, 1, D)
+            k = k.view(B, 1, H, D).transpose(1, 2)  # (B, H, 1, D)
+            v = v.view(B, 1, H, D).transpose(1, 2)  # (B, H, 1, D)
+
+            k_cache[li][:, :, slot, :] = k.squeeze(2)
+            v_cache[li][:, :, slot, :] = v.squeeze(2)
+
+            attn_out = F.scaled_dot_product_attention(
+                q,
+                k_cache[li],
+                v_cache[li],
+                attn_mask=attn_mask,
+                is_causal=False,
+            )
+            attn_out = attn_out.transpose(1, 2).reshape(B, 1, self.hidden_size)
+            attn_out = F.linear(attn_out, attn.out_proj.weight, attn.out_proj.bias)
+            x = x + attn_out
+
+            x_norm2 = layer.norm2(x)
+            ffn_h = layer.activation(F.linear(x_norm2, layer.linear1.weight, layer.linear1.bias))
+            ffn_out = F.linear(ffn_h, layer.linear2.weight, layer.linear2.bias)
+            x = x + ffn_out
+
+        x = self.output_norm(x)
+        hidden_out = x.squeeze(1)
+
+        state["k_cache"] = k_cache
+        state["v_cache"] = v_cache
+        state["transformer_position"] = pos + 1
+        state["hidden"] = hidden_out
+
+        logits, values = self.policy.decode_actions(hidden_out)
+        return logits, values
+
+    def _forward_eval_legacy(self, observations, state):
+        """Original full-context forward. Kept for equivalence testing only."""
         B = observations.shape[0]
         device = observations.device
 
@@ -346,7 +557,6 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             if context.shape[-1] != self.hidden_size or context.shape[0] != B or context.shape[1] != self.horizon:
                 context = torch.zeros(B, self.horizon, self.hidden_size, device=device, dtype=hidden.dtype)
                 pos = torch.zeros(1, dtype=torch.long, device=device)
-            # Ensure context dtype matches hidden dtype (for mixed precision)
             if context.dtype != hidden.dtype:
                 context = context.to(hidden.dtype)
 

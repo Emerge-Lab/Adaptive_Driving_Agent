@@ -476,13 +476,12 @@ class Drive(pufferlib.PufferEnv):
             self.co_player_is_transformer = hasattr(self.co_player_policy, "horizon")
 
             if self.co_player_is_transformer:
+                # Transformer co-player uses streaming KV cache (see
+                # TransformerWrapper.forward_eval). The cache is allocated
+                # lazily inside forward_eval the first time it sees a state
+                # without "k_cache". We initialize the position counter here
+                # so reset_eval_state has something to zero on full reset.
                 self.state = dict(
-                    transformer_context=torch.zeros(
-                        self.num_co_players,
-                        self.co_player_policy.horizon,
-                        self.co_player_policy.hidden_size,
-                        device=self.co_player_device,
-                    ),
                     transformer_position=torch.zeros(1, dtype=torch.long, device=self.co_player_device),
                 )
             else:
@@ -504,8 +503,11 @@ class Drive(pufferlib.PufferEnv):
             else:
                 # Reset only specific co-players
                 if self.co_player_is_transformer:
-                    self.state["transformer_context"][done_indices] = 0
-                    # Note: transformer_position is shared, only reset context
+                    # Re-prime the KV cache for the done rows so that subsequent
+                    # forward_eval calls behave as if those rows had a fresh
+                    # zero hidden buffer (matches the original semantics of
+                    # `state["transformer_context"][done_indices] = 0`).
+                    self.co_player_policy.reset_eval_state(self.state, done_indices=done_indices)
                 else:
                     self.state["lstm_h"][done_indices] = 0
                     self.state["lstm_c"][done_indices] = 0
