@@ -1428,6 +1428,11 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
     GridMapEntity entity_list[MAX_ENTITIES_PER_CELL * 25]; // Array big enough for all neighboring cells
     int list_size =
         checkNeighbors(env, agent->x, agent->y, entity_list, MAX_ENTITIES_PER_CELL * 25, collision_offsets, 25);
+
+    // Track checked lanes to avoid duplicate processing (reset before loop)
+    int checked_lanes[MAX_CHECKED_LANES];
+    int num_checked = 0;
+
     for (int i = 0; i < list_size; i++) {
         if (entity_list[i].entity_idx == -1)
             continue;
@@ -1458,9 +1463,6 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
             int entity_idx = entity_list[i].entity_idx;
 
             // Skip if already checked this lane
-            static int checked_lanes[MAX_CHECKED_LANES];
-            static int num_checked = 0;
-            if (i == 0) num_checked = 0;  // Reset at start of loop
             int already_checked = 0;
             for (int c = 0; c < num_checked; c++) {
                 if (checked_lanes[c] == entity_idx) {
@@ -1932,13 +1934,7 @@ float clipSpeed(float speed) {
     return speed;
 }
 
-float normalize_heading(float heading) {
-    if (heading > M_PI)
-        heading -= 2 * M_PI;
-    if (heading < -M_PI)
-        heading += 2 * M_PI;
-    return heading;
-}
+// normalize_heading is defined earlier in this file (around line 1222)
 
 float normalize_value(float value, float min, float max) { return (value - min) / (max - min); }
 

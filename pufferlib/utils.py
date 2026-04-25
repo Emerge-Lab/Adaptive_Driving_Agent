@@ -387,7 +387,7 @@ def render_videos_python(config, policy, logger, epoch, global_step, device="cud
 
         render_args = {
             "env": env_kwargs,
-            "vec": config.get("vec", {"num_envs": 1, "backend": "serial"}),
+            "vec": config.get("vec", {"num_envs": 1, "backend": "Serial"}),
             "package": config.get("package", "ocean"),
         }
 
