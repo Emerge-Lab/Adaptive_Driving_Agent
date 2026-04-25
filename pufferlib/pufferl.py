@@ -858,6 +858,12 @@ class PuffeRL:
         state_path = os.path.join(path, "trainer_state.pt")
         torch.save(state, state_path + ".tmp")
         os.rename(state_path + ".tmp", state_path)
+
+        # Sidecar metadata: every render/eval can recover the right
+        # conditioning, dataset, and architecture from <run_dir>/info.json
+        # without the user having to re-pass them on the CLI.
+        write_run_info(path, self.config, run_id)
+
         return model_path
 
     def print_dashboard(self, clear=False, idx=[0], c1="[cyan]", c2="[white]", b1="[bright_cyan]", b2="[bright_white]"):
@@ -1296,6 +1302,17 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
     args = args or load_config(env_name)
 
+    # If --load-model-path points at a checkpoint with sidecar info.json,
+    # let the sidecar dictate architecture / dataset / conditioning so the
+    # user doesn't have to re-pass them. We rebuild a fresh ini-default
+    # baseline and only overlay sidecar values that differ — explicit CLI
+    # flags still win because they were applied above by load_config.
+    load_path = args.get("load_model_path")
+    if load_path:
+        info = load_run_info(load_path)
+        if info:
+            apply_run_info(args, info, source=load_path)
+
     wosac_enabled = args["eval"]["wosac_realism_eval"]
     human_replay_enabled = args["eval"]["human_replay_eval"]
     # Honor eval.map_dir only when explicitly set; otherwise inherit the
@@ -1639,6 +1656,106 @@ def export(args=None, env_name=None, vecenv=None, policy=None, path=None, silent
 
     if not silent:
         print(f"Saved {len(weights)} weights to {path}")
+
+
+def write_run_info(run_dir, config, run_id):
+    """Persist the bits of training config that render/eval need to replay.
+
+    We only record fields that change observation/architecture shape or
+    dataset identity — the things you can't recover from the .pt alone.
+    Existing checkpoints don't have this file; readers must treat it as
+    optional.
+    """
+    import json
+
+    env_cfg = config.get("env_config", {})
+    info = {
+        "run_id": run_id,
+        "env_name": config.get("env"),
+        "policy_architecture": config.get("policy_architecture"),
+        "rnn_name": config.get("rnn_name"),
+        "env": {
+            "map_dir": env_cfg.get("map_dir"),
+            "num_maps": env_cfg.get("num_maps"),
+            "num_agents": env_cfg.get("num_agents"),
+            "num_ego_agents": env_cfg.get("num_ego_agents"),
+            "k_scenarios": env_cfg.get("k_scenarios", 1),
+            "scenario_length": env_cfg.get("scenario_length", 91),
+            "dynamics_model": env_cfg.get("dynamics_model", "classic"),
+            "co_player_enabled": bool(env_cfg.get("co_player_enabled")),
+            "conditioning": env_cfg.get("conditioning", {}),
+            "co_player_policy": env_cfg.get("co_player_policy", {}),
+        },
+    }
+    info_path = os.path.join(run_dir, "info.json")
+    try:
+        with open(info_path + ".tmp", "w") as f:
+            json.dump(info, f, indent=2, default=str)
+        os.rename(info_path + ".tmp", info_path)
+    except Exception as e:
+        print(f"[info.json] failed to write: {e}")
+
+
+def load_run_info(model_path):
+    """Look up the run_dir/info.json for a given checkpoint path. Returns {} if missing."""
+    import json
+
+    candidates = []
+    parent = os.path.dirname(model_path) or "."
+    candidates.append(os.path.join(parent, "info.json"))
+    # Allow `experiments/puffer_drive_<id>.pt` (flat copy) → look in sibling run dir.
+    base, ext = os.path.splitext(model_path)
+    if ext == ".pt" and os.path.basename(base).startswith("puffer_"):
+        candidates.append(os.path.join(base, "info.json"))
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[info.json] failed to read {path}: {e}")
+    return {}
+
+
+def apply_run_info(args, info, source=""):
+    """Overlay sidecar info.json values onto args.
+
+    The CLI parser (load_config) has already applied user CLI overrides on
+    top of ini defaults. The sidecar is the source of truth for what the
+    checkpoint was actually trained with — when it disagrees with the ini
+    default, the sidecar wins. Explicit CLI flags still override because
+    they were already merged into args before this is called; we only
+    overlay when args still holds an ini-shaped value.
+    """
+    info_env = info.get("env", {})
+    overlaid = []
+
+    sidecar_arch = info.get("policy_architecture")
+    if sidecar_arch and args.get("policy_architecture") != sidecar_arch:
+        args["policy_architecture"] = sidecar_arch
+        args["rnn_name"] = sidecar_arch
+        overlaid.append(f"policy_architecture={sidecar_arch}")
+
+    for key in ("k_scenarios", "scenario_length", "dynamics_model"):
+        v = info_env.get(key)
+        if v is not None and args["env"].get(key) != v:
+            args["env"][key] = v
+            overlaid.append(f"env.{key}={v}")
+
+    sidecar_map = info_env.get("map_dir")
+    if sidecar_map and args["env"].get("map_dir") != sidecar_map:
+        if args.get("eval", {}).get("map_dir") in (None, "", "None"):
+            args["env"]["map_dir"] = sidecar_map
+            overlaid.append(f"env.map_dir={sidecar_map}")
+
+    sidecar_cond = info_env.get("conditioning") or {}
+    cur_cond = args["env"].get("conditioning", {}) or {}
+    if sidecar_cond.get("type") and cur_cond.get("type") != sidecar_cond.get("type"):
+        args["env"]["conditioning"] = dict(sidecar_cond)
+        overlaid.append(f"env.conditioning.type={sidecar_cond['type']}")
+
+    if overlaid:
+        print(f"[info.json] applied from {source}: {', '.join(overlaid)}")
 
 
 def autotune(args=None, env_name=None, vecenv=None, policy=None):

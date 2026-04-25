@@ -520,7 +520,8 @@ static PyObject *vec_step(PyObject *self, PyObject *arg) {
 static PyObject *vec_render(PyObject *self, PyObject *args) {
     int num_args = PyTuple_Size(args);
     if (num_args != 6) {
-        PyErr_SetString(PyExc_TypeError, "vec_render requires 6 arguments: (vec_env, view_mode, draw_traces, env_id, current_scenario, k_scenarios)");
+        PyErr_SetString(PyExc_TypeError, "vec_render requires 6 arguments: (vec_env, view_mode, draw_traces, env_id, "
+                                         "current_scenario, k_scenarios)");
         return NULL;
     }
 

@@ -13,8 +13,9 @@ from tqdm import tqdm
 
 class RenderView(IntEnum):
     """View modes for rendering."""
-    FULL_SIM_STATE = 0     # Top-down orthographic view of full simulation
-    BEV_AGENT_OBS = 1      # Bird's eye view centered on agent observation
+
+    FULL_SIM_STATE = 0  # Top-down orthographic view of full simulation
+    BEV_AGENT_OBS = 1  # Bird's eye view centered on agent observation
     AGENT_PERSPECTIVE = 2  # Third-person chase camera following agent
 
 
@@ -31,7 +32,7 @@ class Drive(pufferlib.PufferEnv):
         reward_goal=1.0,
         reward_goal_post_respawn=0.5,
         reward_lane_align=0.0,  # GIGAFLOW lane alignment reward (0 = disabled)
-        reward_vel_align=1.0,   # Velocity alignment coefficient for lane reward
+        reward_vel_align=1.0,  # Velocity alignment coefficient for lane reward
         goal_behavior=0,
         goal_target_distance=10.0,
         goal_radius=2.0,
@@ -456,7 +457,9 @@ class Drive(pufferlib.PufferEnv):
 
             # Convert directly to device for GPU acceleration
             co_player_obs = torch.as_tensor(co_player_obs, device=self.co_player_device)
-            import sys; sys.stdout.flush()  # Prevent multiprocessing deadlock
+            import sys
+
+            sys.stdout.flush()  # Prevent multiprocessing deadlock
             logits, value = self.co_player_policy.forward_eval(co_player_obs, self.state)
             # Handle multi-discrete actions (logits is a tuple) vs single discrete (logits is tensor)
             if isinstance(logits, tuple):
@@ -470,7 +473,7 @@ class Drive(pufferlib.PufferEnv):
     def _set_co_player_state(self):
         with torch.no_grad():
             # Detect if co-player uses Transformer (has horizon) or LSTM
-            self.co_player_is_transformer = hasattr(self.co_player_policy, 'horizon')
+            self.co_player_is_transformer = hasattr(self.co_player_policy, "horizon")
 
             if self.co_player_is_transformer:
                 self.state = dict(
@@ -478,16 +481,18 @@ class Drive(pufferlib.PufferEnv):
                         self.num_co_players,
                         self.co_player_policy.horizon,
                         self.co_player_policy.hidden_size,
-                        device=self.co_player_device
+                        device=self.co_player_device,
                     ),
                     transformer_position=torch.zeros(1, dtype=torch.long, device=self.co_player_device),
                 )
             else:
                 self.state = dict(
-                    lstm_h=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size,
-                                      device=self.co_player_device),
-                    lstm_c=torch.zeros(self.num_co_players, self.co_player_policy.hidden_size,
-                                      device=self.co_player_device),
+                    lstm_h=torch.zeros(
+                        self.num_co_players, self.co_player_policy.hidden_size, device=self.co_player_device
+                    ),
+                    lstm_c=torch.zeros(
+                        self.num_co_players, self.co_player_policy.hidden_size, device=self.co_player_device
+                    ),
                 )
 
     def _reset_co_player_state(self, done_indices=None):
@@ -520,7 +525,9 @@ class Drive(pufferlib.PufferEnv):
 
         # Use dynamic base_ego_dim based on dynamics model
         base_ego_dim = binding.EGO_FEATURES_JERK if self.dynamics_model == "jerk" else binding.EGO_FEATURES_CLASSIC
-        return np.concatenate([observations[:, :base_ego_dim], self.cached_conditioning_array, observations[:, base_ego_dim:]], axis=1)
+        return np.concatenate(
+            [observations[:, :base_ego_dim], self.cached_conditioning_array, observations[:, base_ego_dim:]], axis=1
+        )
 
     def _set_co_player_conditioning(self):
         """Sample and store conditioning values for each environment and update all caches"""
@@ -656,7 +663,9 @@ class Drive(pufferlib.PufferEnv):
                 self.scenario_metrics.append(scenario_log)
 
                 # Log metrics for all scenarios with scenario-specific prefixes
-                prefixed_log = {f"scenario_{self.current_scenario}_{k}": v for k, v in scenario_log.items() if k != "scenario_id"}
+                prefixed_log = {
+                    f"scenario_{self.current_scenario}_{k}": v for k, v in scenario_log.items() if k != "scenario_id"
+                }
                 info.append(prefixed_log)
 
                 if self.current_scenario == self.k_scenarios - 1:
@@ -859,8 +868,7 @@ class Drive(pufferlib.PufferEnv):
             draw_traces: Whether to draw trajectory traces
             env_id: Which environment to render (default 0)
         """
-        binding.vec_render(self.c_envs, int(view_mode), draw_traces, env_id,
-                          self.current_scenario, self.k_scenarios)
+        binding.vec_render(self.c_envs, int(view_mode), draw_traces, env_id, self.current_scenario, self.k_scenarios)
 
     def set_video_suffix(self, suffix: str, env_id: int = 0):
         """Set the suffix appended to the mp4 filename for headless rendering.

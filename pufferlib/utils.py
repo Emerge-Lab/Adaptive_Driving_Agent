@@ -32,27 +32,50 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
         map_dir = eval_config.get("map_dir") or env_config.get("map_dir")
 
         cmd = [
-            sys.executable, "-m", "pufferlib.pufferl", "eval", config["env"],
-            "--load-model-path", latest_cpt,
-            "--eval.wosac-realism-eval", "False",
-            "--eval.human-replay-eval", "True",
-            "--eval.human-replay-num-agents", str(eval_config.get("human_replay_num_agents", 64)),
-            "--eval.human-replay-num-maps", str(eval_config.get("human_replay_num_maps", 100)),
-            "--eval.human-replay-num-rollouts", str(eval_config.get("human_replay_num_rollouts", 100)),
-            "--eval.human-replay-control-mode", str(eval_config.get("human_replay_control_mode", "control_vehicles")),
+            sys.executable,
+            "-m",
+            "pufferlib.pufferl",
+            "eval",
+            config["env"],
+            "--load-model-path",
+            latest_cpt,
+            "--eval.wosac-realism-eval",
+            "False",
+            "--eval.human-replay-eval",
+            "True",
+            "--eval.human-replay-num-agents",
+            str(eval_config.get("human_replay_num_agents", 64)),
+            "--eval.human-replay-num-maps",
+            str(eval_config.get("human_replay_num_maps", 100)),
+            "--eval.human-replay-num-rollouts",
+            str(eval_config.get("human_replay_num_rollouts", 100)),
+            "--eval.human-replay-control-mode",
+            str(eval_config.get("human_replay_control_mode", "control_vehicles")),
             *(["--eval.map-dir", str(map_dir)] if map_dir else []),
-            "--eval.num-maps", str(eval_config.get("num_maps", 20)),
-            "--env.conditioning.type", conditioning_type,
-            "--env.conditioning.collision-weight-lb", str(conditioning.get("collision_weight_lb", -3.0)),
-            "--env.conditioning.collision-weight-ub", str(conditioning.get("collision_weight_ub", -3.0)),
-            "--env.conditioning.offroad-weight-lb", str(conditioning.get("offroad_weight_lb", -1.0)),
-            "--env.conditioning.offroad-weight-ub", str(conditioning.get("offroad_weight_ub", -1.0)),
-            "--env.conditioning.goal-weight-lb", str(conditioning.get("goal_weight_lb", 1.0)),
-            "--env.conditioning.goal-weight-ub", str(conditioning.get("goal_weight_ub", 1.0)),
-            "--env.conditioning.entropy-weight-lb", str(conditioning.get("entropy_weight_lb", 0.001)),
-            "--env.conditioning.entropy-weight-ub", str(conditioning.get("entropy_weight_ub", 0.001)),
-            "--env.conditioning.discount-weight-lb", str(conditioning.get("discount_weight_lb", 0.98)),
-            "--env.conditioning.discount-weight-ub", str(conditioning.get("discount_weight_ub", 0.98)),
+            "--eval.num-maps",
+            str(eval_config.get("num_maps", 20)),
+            "--env.conditioning.type",
+            conditioning_type,
+            "--env.conditioning.collision-weight-lb",
+            str(conditioning.get("collision_weight_lb", -3.0)),
+            "--env.conditioning.collision-weight-ub",
+            str(conditioning.get("collision_weight_ub", -3.0)),
+            "--env.conditioning.offroad-weight-lb",
+            str(conditioning.get("offroad_weight_lb", -1.0)),
+            "--env.conditioning.offroad-weight-ub",
+            str(conditioning.get("offroad_weight_ub", -1.0)),
+            "--env.conditioning.goal-weight-lb",
+            str(conditioning.get("goal_weight_lb", 1.0)),
+            "--env.conditioning.goal-weight-ub",
+            str(conditioning.get("goal_weight_ub", 1.0)),
+            "--env.conditioning.entropy-weight-lb",
+            str(conditioning.get("entropy_weight_lb", 0.001)),
+            "--env.conditioning.entropy-weight-ub",
+            str(conditioning.get("entropy_weight_ub", 0.001)),
+            "--env.conditioning.discount-weight-lb",
+            str(conditioning.get("discount_weight_lb", 0.98)),
+            "--env.conditioning.discount-weight-ub",
+            str(conditioning.get("discount_weight_ub", 0.98)),
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=os.getcwd())
@@ -108,17 +131,31 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
         map_dir = eval_config.get("map_dir") or env_config.get("map_dir")
 
         cmd = [
-            sys.executable, "-m", "pufferlib.pufferl", "eval", config["env"],
-            "--load-model-path", latest_cpt,
-            "--eval.wosac-realism-eval", "True",
-            "--eval.wosac-num-agents", str(eval_config.get("wosac_num_agents", 256)),
-            "--eval.wosac-init-mode", str(eval_config.get("wosac_init_mode", "create_all_valid")),
-            "--eval.wosac-control-mode", str(eval_config.get("wosac_control_mode", "control_wosac")),
-            "--eval.wosac-init-steps", str(eval_config.get("wosac_init_steps", 10)),
-            "--eval.wosac-goal-behavior", str(eval_config.get("wosac_goal_behavior", 2)),
-            "--eval.wosac-goal-radius", str(eval_config.get("wosac_goal_radius", 2.0)),
-            "--eval.wosac-sanity-check", str(eval_config.get("wosac_sanity_check", False)),
-            "--eval.wosac-aggregate-results", str(eval_config.get("wosac_aggregate_results", True)),
+            sys.executable,
+            "-m",
+            "pufferlib.pufferl",
+            "eval",
+            config["env"],
+            "--load-model-path",
+            latest_cpt,
+            "--eval.wosac-realism-eval",
+            "True",
+            "--eval.wosac-num-agents",
+            str(eval_config.get("wosac_num_agents", 256)),
+            "--eval.wosac-init-mode",
+            str(eval_config.get("wosac_init_mode", "create_all_valid")),
+            "--eval.wosac-control-mode",
+            str(eval_config.get("wosac_control_mode", "control_wosac")),
+            "--eval.wosac-init-steps",
+            str(eval_config.get("wosac_init_steps", 10)),
+            "--eval.wosac-goal-behavior",
+            str(eval_config.get("wosac_goal_behavior", 2)),
+            "--eval.wosac-goal-radius",
+            str(eval_config.get("wosac_goal_radius", 2.0)),
+            "--eval.wosac-sanity-check",
+            str(eval_config.get("wosac_sanity_check", False)),
+            "--eval.wosac-aggregate-results",
+            str(eval_config.get("wosac_aggregate_results", True)),
             *(["--eval.map-dir", str(map_dir)] if map_dir else []),
         ]
 
@@ -140,12 +177,15 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
         metrics = json.loads(stdout[start:end].strip())
 
         if hasattr(logger, "wandb") and logger.wandb:
-            logger.wandb.log({
-                "eval/wosac_realism_meta_score": metrics["realism_meta_score"],
-                "eval/wosac_ade": metrics["ade"],
-                "eval/wosac_min_ade": metrics["min_ade"],
-                "eval/wosac_total_num_agents": metrics["total_num_agents"],
-            }, step=global_step)
+            logger.wandb.log(
+                {
+                    "eval/wosac_realism_meta_score": metrics["realism_meta_score"],
+                    "eval/wosac_ade": metrics["ade"],
+                    "eval/wosac_min_ade": metrics["min_ade"],
+                    "eval/wosac_total_num_agents": metrics["total_num_agents"],
+                },
+                step=global_step,
+            )
 
     except subprocess.TimeoutExpired:
         print("WOSAC evaluation timed out after 600 seconds")
@@ -210,9 +250,7 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         if k_scenarios > 1:
             episode_length = k_scenarios * episode_length
 
-        mode = "human_replay" if human_replay else (
-            "coplayer" if env_kwargs.get("co_player_enabled") else "baseline"
-        )
+        mode = "human_replay" if human_replay else ("coplayer" if env_kwargs.get("co_player_enabled") else "baseline")
         videos_to_log_world = []
         videos_to_log_agent = []
 
@@ -251,6 +289,7 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
 
             if hasattr(logger, "wandb") and logger.wandb:
                 import wandb
+
                 if view == "sim_state":
                     videos_to_log_world.append(wandb.Video(target_path, format="mp4"))
                 else:
@@ -269,4 +308,5 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
     except Exception as e:
         print(f"Failed to render videos: {e}")
         import traceback
+
         traceback.print_exc()

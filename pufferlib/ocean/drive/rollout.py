@@ -22,8 +22,9 @@ import pufferlib.pytorch
 
 class RenderView(IntEnum):
     """View modes for rendering."""
-    FULL_SIM_STATE = 0     # Top-down orthographic view of full simulation
-    BEV_AGENT_OBS = 1      # Bird's eye view centered on agent observation
+
+    FULL_SIM_STATE = 0  # Top-down orthographic view of full simulation
+    BEV_AGENT_OBS = 1  # Bird's eye view centered on agent observation
     AGENT_PERSPECTIVE = 2  # Third-person chase camera following agent
 
 
@@ -74,7 +75,7 @@ def rollout_loop(
     driver = env.driver_env
 
     # Handle population play mode - only ego agents are controlled by the policy
-    population_play = getattr(driver, 'population_play', False)
+    population_play = getattr(driver, "population_play", False)
     if population_play:
         num_ego_agents = driver.num_ego_agents
         ego_ids = driver.ego_ids
@@ -94,7 +95,7 @@ def rollout_loop(
     state = {}
     if use_rnn:
         # Check if this is a Transformer or LSTM policy
-        is_transformer = hasattr(policy, 'transformer') or hasattr(policy, 'horizon')
+        is_transformer = hasattr(policy, "transformer") or hasattr(policy, "horizon")
 
         if is_transformer:
             # Transformer handles its own state initialization in forward_eval
@@ -102,7 +103,7 @@ def rollout_loop(
             state = {}
         else:
             # LSTM policy - initialize h and c states for ego agents only
-            if hasattr(policy, 'hidden_size'):
+            if hasattr(policy, "hidden_size"):
                 hidden_size = policy.hidden_size
             else:
                 hidden_size = 128  # default
@@ -112,7 +113,7 @@ def rollout_loop(
             )
 
     if max_steps is None:
-        max_steps = getattr(driver, 'scenario_length', 91)
+        max_steps = getattr(driver, "scenario_length", 91)
 
     info = []
     for step in range(max_steps):

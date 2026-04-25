@@ -29,8 +29,18 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from pufferlib.pufferl import load_config, load_env, load_policy
+from pufferlib.pufferl import load_config, load_env, load_policy, load_run_info
 from pufferlib.ocean.drive.rollout import RenderContext, RenderView, rollout_loop
+
+
+# Set of CLI flags that were given explicitly. Filled in main() before
+# build_config() runs so we know which fields to overlay from info.json.
+EXPLICIT_FLAGS = set()
+
+
+def _explicit(flag: str) -> bool:
+    """Was this dest explicitly passed on the CLI?"""
+    return flag in EXPLICIT_FLAGS
 
 
 VIEW_MODE_BY_NAME = {
@@ -53,9 +63,7 @@ def model_id_from_path(path):
     # prefer that (handles intermediate model_*.pt files).
     parent = os.path.basename(os.path.dirname(path) or "")
     candidate = parent if parent.startswith("puffer_") else fname
-    return (candidate
-            .replace("puffer_adaptive_drive_", "")
-            .replace("puffer_drive_", ""))
+    return candidate.replace("puffer_adaptive_drive_", "").replace("puffer_drive_", "")
 
 
 def run_dir_for(model_path):
@@ -93,6 +101,16 @@ def detect_architecture(model_path, device="cpu"):
 
 def build_config(args):
     """Build the env/vec/policy config dict for one render."""
+    info = load_run_info(args.model_path) or {}
+    info_env = info.get("env", {})
+    info_overlaid = []
+
+    # Sidecar can promote a baseline render to adaptive (k_scenarios>1) or
+    # vice-versa — apply that early so we pick the right env_name.
+    if not _explicit("k_scenarios") and info_env.get("k_scenarios"):
+        args.k_scenarios = info_env["k_scenarios"]
+        info_overlaid.append(f"k_scenarios={args.k_scenarios}")
+
     if args.adaptive or args.k_scenarios > 1 or args.co_player_path is not None:
         env_name = "puffer_adaptive_drive"
     else:
@@ -104,6 +122,33 @@ def build_config(args):
         config = load_config(env_name)
     finally:
         sys.argv = saved_argv
+
+    # Sidecar overlays for fields the user didn't pass explicitly. Sidecar
+    # beats argparse defaults (which are themselves wrong-by-default for
+    # checkpoints trained with non-default conditioning / map_dir).
+    if not _explicit("policy_architecture") and info.get("policy_architecture"):
+        args.policy_architecture = info["policy_architecture"]
+        info_overlaid.append(f"policy_architecture={args.policy_architecture}")
+    if not _explicit("map_dir") and info_env.get("map_dir"):
+        args.map_dir = info_env["map_dir"]
+        info_overlaid.append(f"map_dir={args.map_dir}")
+    if not _explicit("scenario_length") and info_env.get("scenario_length"):
+        args.scenario_length = info_env["scenario_length"]
+        info_overlaid.append(f"scenario_length={args.scenario_length}")
+    if not _explicit("conditioning_type") and info_env.get("conditioning", {}).get("type"):
+        cond = info_env["conditioning"]
+        args.conditioning_type = cond.get("type", args.conditioning_type)
+        for fld in ("collision_weight_lb", "collision_weight_ub",
+                    "offroad_weight_lb", "offroad_weight_ub",
+                    "goal_weight_lb", "goal_weight_ub",
+                    "entropy_weight_lb", "entropy_weight_ub",
+                    "discount_weight_lb", "discount_weight_ub"):
+            if fld in cond and not _explicit(fld):
+                setattr(args, fld, cond[fld])
+        info_overlaid.append(f"conditioning.type={args.conditioning_type}")
+
+    if info_overlaid:
+        print(f"[info.json] applied: {', '.join(info_overlaid)}")
 
     arch = args.policy_architecture or detect_architecture(args.model_path) or "Recurrent"
     config["policy_architecture"] = arch
@@ -230,33 +275,50 @@ def render_one(env_name, base_config, view_modes, render_idx, seed, args):
 def main():
     p = argparse.ArgumentParser(description="Unified Python rendering for PufferDrive")
     p.add_argument("--model-path", required=True, help="Trained ego policy checkpoint (.pt)")
-    p.add_argument("--co-player-path", default=None, help="Frozen co-player policy (.pt). Omit for baseline / human-replay.")
+    p.add_argument(
+        "--co-player-path", default=None, help="Frozen co-player policy (.pt). Omit for baseline / human-replay."
+    )
     p.add_argument("--human-replay", action="store_true", help="Render in human-replay mode (one ego, others = log)")
     p.add_argument("--adaptive", action="store_true", help="Force puffer_adaptive_drive env even when k_scenarios=1")
 
-    p.add_argument("--policy-architecture", choices=["Recurrent", "Transformer"], default=None,
-                   help="Override ego architecture (auto-detected from checkpoint if omitted)")
-    p.add_argument("--co-player-architecture", choices=["Recurrent", "Transformer"], default=None,
-                   help="Override co-player architecture")
+    p.add_argument(
+        "--policy-architecture",
+        choices=["Recurrent", "Transformer"],
+        default=None,
+        help="Override ego architecture (auto-detected from checkpoint if omitted)",
+    )
+    p.add_argument(
+        "--co-player-architecture",
+        choices=["Recurrent", "Transformer"],
+        default=None,
+        help="Override co-player architecture",
+    )
 
-    p.add_argument("--map-dir", default="resources/drive/binaries/training",
-                   help="Map binary directory (e.g. resources/drive/binaries/nuplan)")
+    p.add_argument(
+        "--map-dir",
+        default="resources/drive/binaries/training",
+        help="Map binary directory (e.g. resources/drive/binaries/nuplan)",
+    )
     p.add_argument("--num-maps", type=int, default=None, help="Map pool size (default: max(100, num_renders))")
     p.add_argument("--num-renders", type=int, default=1, help="Number of independent renders (different map seeds)")
     p.add_argument("--start-seed", type=int, default=1)
-    p.add_argument("--seed-stride", type=int, default=1009,
-                   help="Stride between consecutive map seeds. Spaced apart so adjacent renders pick different maps.")
+    p.add_argument(
+        "--seed-stride",
+        type=int,
+        default=1009,
+        help="Stride between consecutive map seeds. Spaced apart so adjacent renders pick different maps.",
+    )
     p.add_argument("--num-agents", type=int, default=64)
     p.add_argument("--num-ego-agents", type=int, default=32)
 
     p.add_argument("--k-scenarios", type=int, default=2, help="Number of scenarios per episode (adaptive)")
     p.add_argument("--scenario-length", type=int, default=91)
-    p.add_argument("--max-steps", type=int, default=None,
-                   help="Steps per render (default: k_scenarios * scenario_length)")
+    p.add_argument(
+        "--max-steps", type=int, default=None, help="Steps per render (default: k_scenarios * scenario_length)"
+    )
 
     p.add_argument("--view-mode", choices=["sim_state", "bev", "persp", "all"], default="sim_state")
-    p.add_argument("--output-dir", default=None,
-                   help="Where to write mp4s (default: <experiment_dir>/renders)")
+    p.add_argument("--output-dir", default=None, help="Where to write mp4s (default: <experiment_dir>/renders)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
     p.add_argument("--conditioning-type", choices=["none", "reward", "entropy", "discount", "all"], default="none")
@@ -271,7 +333,9 @@ def main():
     p.add_argument("--discount-weight-lb", type=float, default=0.98)
     p.add_argument("--discount-weight-ub", type=float, default=0.98)
 
-    p.add_argument("--co-player-conditioning-type", choices=["none", "reward", "entropy", "discount", "all"], default="all")
+    p.add_argument(
+        "--co-player-conditioning-type", choices=["none", "reward", "entropy", "discount", "all"], default="all"
+    )
     p.add_argument("--co-player-collision-weight-lb", type=float, default=-1.0)
     p.add_argument("--co-player-collision-weight-ub", type=float, default=0.0)
     p.add_argument("--co-player-offroad-weight-lb", type=float, default=-0.4)
@@ -282,6 +346,15 @@ def main():
     p.add_argument("--co-player-entropy-weight-ub", type=float, default=0.1)
     p.add_argument("--co-player-discount-weight-lb", type=float, default=0.8)
     p.add_argument("--co-player-discount-weight-ub", type=float, default=1.0)
+
+    # Sniff which flags were passed explicitly so we don't overwrite them
+    # with sidecar values later.
+    raw = sys.argv[1:]
+    EXPLICIT_FLAGS.clear()
+    for action in p._actions:
+        for opt in action.option_strings:
+            if opt in raw or any(a.startswith(opt + "=") for a in raw):
+                EXPLICIT_FLAGS.add(action.dest)
 
     args = p.parse_args()
 

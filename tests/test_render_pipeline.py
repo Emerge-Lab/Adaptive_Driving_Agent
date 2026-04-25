@@ -18,12 +18,15 @@ import sys
 import pytest
 
 
+FIXTURE_MAPS = os.path.join(os.path.dirname(__file__), "fixtures", "maps")
+
+
 def _have_xvfb():
     return shutil.which("xvfb-run") is not None and shutil.which("ffmpeg") is not None
 
 
 def _have_maps():
-    return os.path.exists("resources/drive/binaries/training/map_001.bin")
+    return os.path.exists(os.path.join(FIXTURE_MAPS, "map_001.bin"))
 
 
 @pytest.mark.skipif(not (_have_xvfb() and _have_maps()), reason="needs xvfb + ffmpeg + map binaries")
@@ -43,7 +46,7 @@ def test_render_writes_named_mp4(tmp_path):
         env = Drive(
             num_agents=4,
             num_maps=1,
-            map_dir=os.path.join(cwd, "resources/drive/binaries/training"),
+            map_dir=FIXTURE_MAPS,
             scenario_length=91,
             render_mode=1,
             conditioning={"type": "none"},
@@ -64,5 +67,6 @@ def test_render_writes_named_mp4(tmp_path):
 def test_render_context_default_basename_is_safe():
     """Importing rollout module shouldn't blow up and the dataclass should default."""
     from pufferlib.ocean.drive.rollout import RenderContext, RenderView
+
     ctx = RenderContext(view_mode=RenderView.FULL_SIM_STATE)
     assert ctx.video_basename == "render"

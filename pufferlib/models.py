@@ -403,9 +403,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             causal_mask = self.get_causal_mask(T, device)
             if self.training and self.use_checkpointing:
                 hidden = checkpoint(
-                    lambda h, m: self.transformer(h, mask=m, is_causal=True),
-                    hidden, causal_mask,
-                    use_reentrant=False
+                    lambda h, m: self.transformer(h, mask=m, is_causal=True), hidden, causal_mask, use_reentrant=False
                 )
             else:
                 hidden = self.transformer(hidden, mask=causal_mask, is_causal=True)
@@ -419,9 +417,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
             if self.training and self.use_checkpointing:
                 hidden = checkpoint(
-                    lambda h, m: self.transformer(h, mask=m, is_causal=False),
-                    hidden, attn_mask,
-                    use_reentrant=False
+                    lambda h, m: self.transformer(h, mask=m, is_causal=False), hidden, attn_mask, use_reentrant=False
                 )
             else:
                 hidden = self.transformer(hidden, mask=attn_mask, is_causal=False)

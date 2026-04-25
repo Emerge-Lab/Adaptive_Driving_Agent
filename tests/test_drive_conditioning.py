@@ -10,6 +10,8 @@ numbers so a constant bump (e.g. adding lane features) doesn't silently
 desync this file.
 """
 
+import os
+
 import numpy as np
 import pytest
 
@@ -20,6 +22,7 @@ from pufferlib.ocean.drive.drive import Drive
 BASE_EGO = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}
 PARTNER_DIM = (binding.MAX_AGENTS - 1) * binding.PARTNER_FEATURES
 ROAD_DIM = binding.MAX_ROAD_SEGMENT_OBSERVATIONS * binding.ROAD_FEATURES
+FIXTURE_MAPS = os.path.join(os.path.dirname(__file__), "fixtures", "maps")
 
 
 def expected_obs_dim(dynamics_model: str, conditioning_dims: int) -> int:
@@ -27,7 +30,7 @@ def expected_obs_dim(dynamics_model: str, conditioning_dims: int) -> int:
 
 
 def make_env(**kwargs):
-    defaults = dict(num_agents=4, num_maps=1, scenario_length=91)
+    defaults = dict(num_agents=4, num_maps=1, scenario_length=91, map_dir=FIXTURE_MAPS)
     defaults.update(kwargs)
     return Drive(**defaults)
 
@@ -48,9 +51,12 @@ def test_reward_conditioning(dynamics_model):
         dynamics_model=dynamics_model,
         conditioning={
             "type": "reward",
-            "collision_weight_lb": -1.0, "collision_weight_ub": 0.0,
-            "offroad_weight_lb": -1.0, "offroad_weight_ub": 0.0,
-            "goal_weight_lb": 0.0, "goal_weight_ub": 1.0,
+            "collision_weight_lb": -1.0,
+            "collision_weight_ub": 0.0,
+            "offroad_weight_lb": -1.0,
+            "offroad_weight_ub": 0.0,
+            "goal_weight_lb": 0.0,
+            "goal_weight_ub": 1.0,
         },
     )
     base = BASE_EGO[dynamics_model]
@@ -99,11 +105,16 @@ def test_all_conditioning(dynamics_model):
         dynamics_model=dynamics_model,
         conditioning={
             "type": "all",
-            "collision_weight_lb": -1.0, "collision_weight_ub": 0.0,
-            "offroad_weight_lb": -1.0, "offroad_weight_ub": 0.0,
-            "goal_weight_lb": 0.0, "goal_weight_ub": 1.0,
-            "entropy_weight_lb": 0.0, "entropy_weight_ub": 0.1,
-            "discount_weight_lb": 0.8, "discount_weight_ub": 0.99,
+            "collision_weight_lb": -1.0,
+            "collision_weight_ub": 0.0,
+            "offroad_weight_lb": -1.0,
+            "offroad_weight_ub": 0.0,
+            "goal_weight_lb": 0.0,
+            "goal_weight_ub": 1.0,
+            "entropy_weight_lb": 0.0,
+            "entropy_weight_ub": 0.1,
+            "discount_weight_lb": 0.8,
+            "discount_weight_ub": 0.99,
         },
     )
     base = BASE_EGO[dynamics_model]

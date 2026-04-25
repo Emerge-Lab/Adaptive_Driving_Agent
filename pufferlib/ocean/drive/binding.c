@@ -179,7 +179,7 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->init_mode = (int)unpack(kwargs, "init_mode");
     env->control_mode = (int)unpack(kwargs, "control_mode");
     // Render mode: 0=RENDER_OFF, 1=RENDER_HEADLESS, 2=RENDER_WINDOW
-    env->render_mode = RENDER_OFF;  // Default to off
+    env->render_mode = RENDER_OFF; // Default to off
     if (kwargs && PyDict_GetItemString(kwargs, "render_mode")) {
         env->render_mode = (int)unpack(kwargs, "render_mode");
     }

@@ -19,6 +19,7 @@ from pufferlib import utils as puffer_utils
 
 NUPLAN = "resources/drive/binaries/nuplan"
 WOMD = "resources/drive/binaries/training"
+FIXTURE_MAPS = os.path.join(os.path.dirname(__file__), "fixtures", "maps")
 
 
 def _have(path):
@@ -26,19 +27,16 @@ def _have(path):
 
 
 def test_env_uses_constructor_map_dir():
-    if not _have(WOMD):
-        pytest.skip("WOMD maps missing")
-    env = Drive(num_agents=4, num_maps=1, map_dir=WOMD,
-                conditioning={"type": "none"}, scenario_length=91)
-    assert env.map_dir == WOMD
+    if not _have(FIXTURE_MAPS):
+        pytest.skip("fixture maps missing")
+    env = Drive(num_agents=4, num_maps=1, map_dir=FIXTURE_MAPS, conditioning={"type": "none"}, scenario_length=91)
+    assert env.map_dir == FIXTURE_MAPS
     env.close()
 
 
 def test_eval_inherits_env_map_dir_when_eval_unset(monkeypatch, tmp_path):
     """eval() should set env.map_dir = eval.map_dir, and when eval.map_dir is unset
     (None / empty / 'None') it should fall back to env.map_dir."""
-    if not _have(WOMD):
-        pytest.skip("WOMD maps missing")
 
     # Stub out the heavy parts of pufferl.eval so we only exercise the
     # map-dir resolution prelude.
@@ -70,9 +68,7 @@ def test_eval_inherits_env_map_dir_when_eval_unset(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         pufferl.eval(args=args, env_name="puffer_drive")
 
-    assert captured["env_map_dir"] == NUPLAN, (
-        f"eval did not inherit env.map_dir; got {captured['env_map_dir']}"
-    )
+    assert captured["env_map_dir"] == NUPLAN, f"eval did not inherit env.map_dir; got {captured['env_map_dir']}"
     assert captured["eval_map_dir"] == NUPLAN
 
 
@@ -98,8 +94,7 @@ def test_human_replay_subprocess_forwards_concrete_map_dir(monkeypatch):
     config = {
         "env": "puffer_adaptive_drive",
         "data_dir": "/tmp",
-        "env_config": {"map_dir": NUPLAN, "k_scenarios": 2,
-                       "conditioning": {"type": "all"}},
+        "env_config": {"map_dir": NUPLAN, "k_scenarios": 2, "conditioning": {"type": "all"}},
         "eval": {
             "human_replay_num_agents": 32,
             "human_replay_num_maps": 50,

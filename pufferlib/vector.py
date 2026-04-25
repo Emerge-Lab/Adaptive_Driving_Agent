@@ -105,7 +105,7 @@ class Serial:
         self.flag = RESET
 
         # Handle population play mode (ego agents only controlled by policy)
-        self.population_play = getattr(self.driver_env, 'population_play', False)
+        self.population_play = getattr(self.driver_env, "population_play", False)
         if self.population_play:
             ego_agents_per_batch = self.driver_env.num_ego_agents * num_envs
             self.num_ego_agents = ego_agents_per_batch

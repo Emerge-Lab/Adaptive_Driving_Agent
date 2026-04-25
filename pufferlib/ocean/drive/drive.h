@@ -82,7 +82,7 @@
 #define LANE_SELECTION_DISTANCE_WEIGHT 0.7f
 #define LANE_SELECTION_HEADING_WEIGHT 0.3f
 #define LANE_SWITCH_THRESHOLD 0.5f
-#define LANE_ALIGN_COS_THRESHOLD 0.965f  // ~15 degrees
+#define LANE_ALIGN_COS_THRESHOLD 0.965f // ~15 degrees
 #define MAX_CHECKED_LANES 32
 
 // Grid cell size
@@ -222,7 +222,8 @@ struct Entity {
     float init_goal_y;
     int mark_as_expert;
     int collision_state;
-    float metrics_array[7]; // metrics_array: [collision, offroad, reached_goal, lane_aligned, lane_dist, lane_angle, avg_disp_error]
+    float metrics_array[7]; // metrics_array: [collision, offroad, reached_goal, lane_aligned, lane_dist, lane_angle,
+                            // avg_disp_error]
     float x;
     float y;
     float z;
@@ -411,7 +412,8 @@ struct Drive {
     bool population_play;
     // Rendering
     int render_mode;          // RENDER_OFF, RENDER_HEADLESS, or RENDER_WINDOW
-    char video_basename[256]; // Full mp4 basename (without ".mp4") set by Python via vec_set_video_suffix. Defaults to "render".
+    char video_basename[256]; // Full mp4 basename (without ".mp4") set by Python via vec_set_video_suffix. Defaults to
+                              // "render".
 };
 
 void add_log(Drive *env) {
@@ -709,12 +711,12 @@ void set_start_position(Drive *env) {
         e->heading_y = sinf(e->heading);
         e->valid = e->traj_valid[env->init_steps];
         e->collision_state = 0;
-        e->metrics_array[COLLISION_IDX] = 0.0f;    // vehicle collision
-        e->metrics_array[OFFROAD_IDX] = 0.0f;      // offroad
-        e->metrics_array[REACHED_GOAL_IDX] = 0.0f; // reached goal
-        e->metrics_array[LANE_ALIGNED_IDX] = 0.0f; // lane aligned
-        e->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;  // far from lane
-        e->metrics_array[LANE_ANGLE_IDX] = 0.0f;   // no alignment
+        e->metrics_array[COLLISION_IDX] = 0.0f;                        // vehicle collision
+        e->metrics_array[OFFROAD_IDX] = 0.0f;                          // offroad
+        e->metrics_array[REACHED_GOAL_IDX] = 0.0f;                     // reached goal
+        e->metrics_array[LANE_ALIGNED_IDX] = 0.0f;                     // lane aligned
+        e->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION; // far from lane
+        e->metrics_array[LANE_ANGLE_IDX] = 0.0f;                       // no alignment
         e->current_lane_idx = -1;
         e->current_lane_geometry_idx = -1;
         e->respawn_timestep = -1;
@@ -1220,8 +1222,10 @@ int collision_check(Drive *env, int agent_idx) {
 
 // Normalize heading to [-π, π]
 float normalize_heading(float h) {
-    while (h > M_PI) h -= 2.0f * M_PI;
-    while (h < -M_PI) h += 2.0f * M_PI;
+    while (h > M_PI)
+        h -= 2.0f * M_PI;
+    while (h < -M_PI)
+        h += 2.0f * M_PI;
     return h;
 }
 
@@ -1253,7 +1257,8 @@ float find_closest_segment_on_lane(Entity *lane, float px, float py, int *segmen
         float dy = y2 - y1;
         float seg_len_sq = dx * dx + dy * dy;
 
-        if (seg_len_sq < 1e-6f) continue;
+        if (seg_len_sq < 1e-6f)
+            continue;
 
         // Project point onto segment
         float t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq;
@@ -1281,11 +1286,14 @@ float find_closest_segment_on_lane(Entity *lane, float px, float py, int *segmen
 
 // Compute lane heading using weighted average of neighboring segments
 float compute_multi_segment_alignment(Entity *lane, int segment_idx) {
-    if (!lane || lane->array_size < 2) return 0.0f;
+    if (!lane || lane->array_size < 2)
+        return 0.0f;
 
     // Clamp to valid range
-    if (segment_idx < 0) segment_idx = 0;
-    if (segment_idx >= lane->array_size - 1) segment_idx = lane->array_size - 2;
+    if (segment_idx < 0)
+        segment_idx = 0;
+    if (segment_idx >= lane->array_size - 1)
+        segment_idx = lane->array_size - 2;
 
     float sum_heading = 0.0f;
     float sum_weight = 0.0f;
@@ -1293,7 +1301,8 @@ float compute_multi_segment_alignment(Entity *lane, int segment_idx) {
     // Consider current segment and neighbors
     for (int offset = -1; offset <= 1; offset++) {
         int idx = segment_idx + offset;
-        if (idx < 0 || idx >= lane->array_size - 1) continue;
+        if (idx < 0 || idx >= lane->array_size - 1)
+            continue;
 
         float dx = lane->traj_x[idx + 1] - lane->traj_x[idx];
         float dy = lane->traj_y[idx + 1] - lane->traj_y[idx];
@@ -1305,8 +1314,10 @@ float compute_multi_segment_alignment(Entity *lane, int segment_idx) {
         // Handle angle wrapping for averaging
         if (sum_weight > 0) {
             float diff = heading - (sum_heading / sum_weight);
-            if (diff > M_PI) heading -= 2.0f * M_PI;
-            else if (diff < -M_PI) heading += 2.0f * M_PI;
+            if (diff > M_PI)
+                heading -= 2.0f * M_PI;
+            else if (diff < -M_PI)
+                heading += 2.0f * M_PI;
         }
 
         sum_heading += weight * heading;
@@ -1364,11 +1375,11 @@ int check_lane_aligned(Entity *car, Entity *lane, int geometry_idx) {
 
 void reset_agent_metrics(Drive *env, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
-    agent->metrics_array[COLLISION_IDX] = 0.0f;    // vehicle collision
-    agent->metrics_array[OFFROAD_IDX] = 0.0f;      // offroad
-    agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f; // lane aligned
-    agent->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;  // far from lane
-    agent->metrics_array[LANE_ANGLE_IDX] = 0.0f;   // no alignment
+    agent->metrics_array[COLLISION_IDX] = 0.0f;                        // vehicle collision
+    agent->metrics_array[OFFROAD_IDX] = 0.0f;                          // offroad
+    agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f;                     // lane aligned
+    agent->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION; // far from lane
+    agent->metrics_array[LANE_ANGLE_IDX] = 0.0f;                       // no alignment
     agent->collision_state = 0;
     agent->current_lane_geometry_idx = -1;
 }
@@ -1470,14 +1481,17 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
                     break;
                 }
             }
-            if (already_checked) continue;
-            if (num_checked < MAX_CHECKED_LANES) checked_lanes[num_checked++] = entity_idx;
+            if (already_checked)
+                continue;
+            if (num_checked < MAX_CHECKED_LANES)
+                checked_lanes[num_checked++] = entity_idx;
 
             // Find closest segment on this lane (returns signed distance)
             int segment_idx;
             float signed_dist = find_closest_segment_on_lane(entity, agent->x, agent->y, &segment_idx);
             float abs_dist = fabsf(signed_dist);
-            if (abs_dist > LANE_DISTANCE_NORMALIZATION) continue;
+            if (abs_dist > LANE_DISTANCE_NORMALIZATION)
+                continue;
 
             // Compute lane heading using multi-segment alignment
             float lane_heading = compute_multi_segment_alignment(entity, segment_idx);
@@ -1490,8 +1504,8 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
             float distance_penalty = abs_dist / LANE_DISTANCE_NORMALIZATION;
 
             // Combined score using defined weights
-            float score = LANE_SELECTION_DISTANCE_WEIGHT * distance_penalty +
-                          LANE_SELECTION_HEADING_WEIGHT * heading_penalty;
+            float score =
+                LANE_SELECTION_DISTANCE_WEIGHT * distance_penalty + LANE_SELECTION_HEADING_WEIGHT * heading_penalty;
 
             // Hysteresis: penalize switching away from current lane
             if (agent->current_lane_idx != entity_idx && agent->current_lane_idx != -1) {
@@ -1499,7 +1513,7 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
             }
 
             // Track best candidate
-            if (score < min_distance) {  // Using min_distance to store best score
+            if (score < min_distance) { // Using min_distance to store best score
                 min_distance = score;
                 closest_lane_entity_idx = entity_idx;
                 closest_lane_geometry_idx = segment_idx;
@@ -2234,9 +2248,9 @@ void compute_observations(Drive *env) {
 
         // Lane alignment observations (GIGAFLOW Frenet coordinates)
         float lane_center_dist = ego_entity->metrics_array[LANE_DIST_IDX] / LANE_DISTANCE_NORMALIZATION;
-        lane_center_dist = fmaxf(-1.0f, fminf(1.0f, lane_center_dist));  // Clamp to [-1, 1]
+        lane_center_dist = fmaxf(-1.0f, fminf(1.0f, lane_center_dist)); // Clamp to [-1, 1]
         obs[7] = lane_center_dist;
-        obs[8] = ego_entity->metrics_array[LANE_ANGLE_IDX];  // cos(theta_f), already in [-1, 1]
+        obs[8] = ego_entity->metrics_array[LANE_ANGLE_IDX]; // cos(theta_f), already in [-1, 1]
 
         if (env->dynamics_model == JERK) {
             obs[9] = ego_entity->steering_angle / M_PI;
@@ -2669,15 +2683,15 @@ void c_step(Drive *env) {
         // Only apply if reward_lane_align > 0 (disabled by default)
         if (env->reward_lane_align > 0.0f) {
             float cos_theta = env->entities[agent_idx].metrics_array[LANE_ANGLE_IDX];
-            float theta_f = acosf(fminf(fmaxf(cos_theta, -1.0f), 1.0f));  // Get |θ_f| from cos
+            float theta_f = acosf(fminf(fmaxf(cos_theta, -1.0f), 1.0f)); // Get |θ_f| from cos
 
             // GIGAFLOW Rl-align: min(cos,0) + vel_align*min(cos*v,0) + 0.0025*(1-|θ|/(π/2))
-            float against_lane_penalty = fminf(cos_theta, 0.0f);  // Negative when >90° off
+            float against_lane_penalty = fminf(cos_theta, 0.0f); // Negative when >90° off
             float vel_aligned_penalty = env->reward_vel_align * fminf(cos_theta * current_speed, 0.0f);
             float alignment_bonus = 0.0025f * (1.0f - theta_f / (M_PI / 2.0f));
 
-            float lane_align_reward = env->reward_lane_align * env->dt *
-                (against_lane_penalty + vel_aligned_penalty + alignment_bonus);
+            float lane_align_reward =
+                env->reward_lane_align * env->dt * (against_lane_penalty + vel_aligned_penalty + alignment_bonus);
 
             env->rewards[i] += lane_align_reward;
 
@@ -2734,8 +2748,8 @@ struct Client {
     Vector3 default_camera_position;
     Vector3 default_camera_target;
     // Video recording state (for headless rendering)
-    int recorder_pipefd[2];   // Pipe to ffmpeg process
-    pid_t recorder_pid;       // PID of ffmpeg process
+    int recorder_pipefd[2]; // Pipe to ffmpeg process
+    pid_t recorder_pid;     // PID of ffmpeg process
     // Original map dimensions (for consistent rendering across scenarios)
     float original_map_width;
     float original_map_height;
@@ -2795,18 +2809,16 @@ static void start_video_recorder(Client *client, const char *basename) {
         for (int fd = 3; fd < 256; fd++) {
             close(fd);
         }
-        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba",
-               "-s", size_str, "-r", "30", "-i", "-", "-c:v", "libx264",
-               "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
-               "-crf", "23", "-loglevel", "error", filename, NULL);
+        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", size_str, "-r", "30", "-i", "-",
+               "-c:v", "libx264", "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-crf", "23",
+               "-loglevel", "error", filename, NULL);
         fprintf(stderr, "Failed to exec ffmpeg\n");
         _exit(1);
     }
 
-    close(client->recorder_pipefd[0]);  // parent: keep write end only
+    close(client->recorder_pipefd[0]); // parent: keep write end only
     client->recorder_pipefd[0] = -1;
-    fprintf(stderr, "[drive] ffmpeg forked: pid=%d file=%s size=%s\n",
-            client->recorder_pid, filename, size_str);
+    fprintf(stderr, "[drive] ffmpeg forked: pid=%d file=%s size=%s\n", client->recorder_pid, filename, size_str);
 }
 
 Client *make_client(Drive *env) {
@@ -3456,7 +3468,8 @@ void draw_scene(Drive *env, Client *client, int mode, int obs_only, int lasers, 
 
 // Headless rendering helper: write frame to ffmpeg pipe
 static void write_frame_to_pipe(Client *client) {
-    if (client->recorder_pipefd[1] < 0) return;
+    if (client->recorder_pipefd[1] < 0)
+        return;
 
     int w = (int)client->width;
     int h = (int)client->height;
@@ -3472,7 +3485,8 @@ void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_
     if (env->client == NULL) {
         env->client = make_client(env);
     }
-    if (env->client == NULL) return;  // make_client may fail in headless mode
+    if (env->client == NULL)
+        return; // make_client may fail in headless mode
 
     Client *client = env->client;
     Color road = (Color){35, 35, 37, 255};
@@ -3508,11 +3522,8 @@ void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_
                     }
                     for (int t = env->init_steps; t < t_end; t++) {
                         if (env->entities[idx].traj_valid[t]) {
-                            DrawPoint3D((Vector3){
-                                env->entities[idx].traj_x[t],
-                                env->entities[idx].traj_y[t],
-                                0.5f
-                            }, LIGHTBLUE);
+                            DrawPoint3D((Vector3){env->entities[idx].traj_x[t], env->entities[idx].traj_y[t], 0.5f},
+                                        LIGHTBLUE);
                         }
                     }
                 }
@@ -3542,16 +3553,10 @@ void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_
             int agent_idx = env->active_agent_indices[env->human_agent_idx];
             Entity *agent = &env->entities[agent_idx];
 
-            camera.position = (Vector3){
-                agent->x - (25.0f * cosf(agent->heading)),
-                agent->y - (25.0f * sinf(agent->heading)),
-                15.0f
-            };
-            camera.target = (Vector3){
-                agent->x + 40.0f * cosf(agent->heading),
-                agent->y + 40.0f * sinf(agent->heading),
-                1.0f
-            };
+            camera.position =
+                (Vector3){agent->x - (25.0f * cosf(agent->heading)), agent->y - (25.0f * sinf(agent->heading)), 15.0f};
+            camera.target =
+                (Vector3){agent->x + 40.0f * cosf(agent->heading), agent->y + 40.0f * sinf(agent->heading), 1.0f};
             camera.up = (Vector3){0.0f, 0.0f, 1.0f};
             camera.fovy = 60.0f;
             camera.projection = CAMERA_PERSPECTIVE;
