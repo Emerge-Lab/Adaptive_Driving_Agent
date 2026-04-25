@@ -35,15 +35,15 @@ class RenderContext:
         view_mode: RenderView enum value passed to driver.render().
         env_id: which sub-env in the vecenv to record from (default 0).
         draw_traces: whether to draw trajectory traces.
-        video_suffix: appended to the mp4 filename; applied once before the
-            first render via set_video_suffix so multi-view rollouts don't
-            collide on output paths.
+        video_basename: full mp4 basename (without ".mp4"). Set once before
+            the first render via driver.set_video_suffix. Caller is
+            responsible for making this unique across renders.
     """
 
     view_mode: RenderView
     env_id: int = 0
     draw_traces: bool = True
-    video_suffix: str = ""
+    video_basename: str = "render"
 
 
 def rollout_loop(
@@ -83,9 +83,9 @@ def rollout_loop(
         num_ego_agents = env.observation_space.shape[0]
         ego_ids = None
 
-    # Set video filename suffix before the first render call
+    # Set full video basename before the first render call
     if render_ctx is not None:
-        driver.set_video_suffix(render_ctx.video_suffix, env_id=render_ctx.env_id)
+        driver.set_video_suffix(render_ctx.video_basename, env_id=render_ctx.env_id)
 
     obs, _ = env.reset()
 

@@ -180,9 +180,6 @@ class PuffeRL:
         self.render = config["render"]
         self.render_interval = config["render_interval"]
 
-        if self.render:
-            ensure_drive_binary()
-
         # LSTM
         if config.get("rnn_name", "Recurrent") == "Recurrent":
             h = policy.hidden_size
@@ -756,46 +753,16 @@ class PuffeRL:
             self.save_checkpoint()
             self.msg = f"Checkpoint saved at update {self.epoch}"
 
-            print(f"[DEBUG] Checkpoint at epoch {self.epoch}: render={self.render}, render_interval={self.render_interval}, epoch % render_interval = {self.epoch % self.render_interval}")
             if self.render and self.epoch % self.render_interval == 0:
-                print("Attempting Python-based rendering...")
-                # Free GPU memory before rendering to avoid OOM
                 torch.cuda.empty_cache()
-                try:
-                    # Use Python-based rendering (works with any architecture: LSTM, Transformer, etc.)
-                    pufferlib.utils.render_videos_python(
-                        config=self.config,
-                        policy=self.uncompiled_policy,
-                        logger=self.logger,
-                        epoch=self.epoch,
-                        global_step=self.global_step,
-                        device=self.config["device"],  # train_config is flat, device is at top level
-                    )
-                except Exception as e:
-                    print(f"Python rendering failed: {e}, falling back to C-based rendering...")
-                    # Fall back to C-based rendering for LSTM models
-                    model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
-                    model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
-
-                    if model_files:
-                        latest_cpt = max(model_files, key=os.path.getctime)
-                        bin_path = f"{model_dir}.bin"
-
-                        try:
-                            export_args = {"env_name": self.config["env"], "load_model_path": latest_cpt, **self.config}
-                            export(
-                                args=export_args,
-                                env_name=self.config["env"],
-                                vecenv=self.vecenv,
-                                policy=self.uncompiled_policy,
-                                path=bin_path,
-                                silent=True,
-                            )
-                            pufferlib.utils.render_videos(
-                                self.config, self.vecenv, self.logger, self.epoch, self.global_step, bin_path
-                            )
-                        except Exception as e2:
-                            print(f"C-based rendering also failed: {e2}")
+                pufferlib.utils.render_videos(
+                    config=self.config,
+                    policy=self.uncompiled_policy,
+                    logger=self.logger,
+                    epoch=self.epoch,
+                    global_step=self.global_step,
+                    device=self.config["device"],
+                )
 
         if self.config["eval"]["wosac_realism_eval"] and (
             self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training
@@ -806,38 +773,16 @@ class PuffeRL:
             self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training
         ):
             pufferlib.utils.run_human_replay_eval_in_subprocess(self.config, self.logger, self.global_step)
-
-        # Eval rendering (ego vs human logs)
-        if self.config["eval"].get("human_replay_eval", False):
-            if self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training:
-                model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
-                model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
-
-                if model_files:
-                    latest_cpt = max(model_files, key=os.path.getctime)
-                    bin_path = f"{model_dir}.bin"
-
-                    try:
-                        export_args = {"env_name": self.config["env"], "load_model_path": latest_cpt, **self.config}
-                        export(
-                            args=export_args,
-                            env_name=self.config["env"],
-                            vecenv=self.vecenv,
-                            policy=self.uncompiled_policy,
-                            path=bin_path,
-                            silent=True,
-                        )
-                        eval_video_dir = os.path.join(model_dir, "eval_videos")
-                        pufferlib.utils.render_human_replay_videos(
-                            config=self.config,
-                            policy_bin_path=bin_path,
-                            output_dir=eval_video_dir,
-                            num_maps=self.config["eval"].get("human_replay_render_num_maps", 3),
-                            logger=self.logger,
-                            global_step=self.global_step,
-                        )
-                    except Exception as e:
-                        print(f"Failed to render eval videos: {e}")
+            torch.cuda.empty_cache()
+            pufferlib.utils.render_videos(
+                config=self.config,
+                policy=self.uncompiled_policy,
+                logger=self.logger,
+                epoch=self.epoch,
+                global_step=self.global_step,
+                device=self.config["device"],
+                human_replay=True,
+            )
 
     def mean_and_log(self):
         config = self.config
@@ -1353,7 +1298,13 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
     wosac_enabled = args["eval"]["wosac_realism_eval"]
     human_replay_enabled = args["eval"]["human_replay_eval"]
-    args["env"]["map_dir"] = args["eval"]["map_dir"]
+    # Honor eval.map_dir only when explicitly set; otherwise inherit the
+    # training env.map_dir so eval doesn't silently switch datasets.
+    eval_map_dir = args["eval"].get("map_dir")
+    if eval_map_dir in (None, "", "None"):
+        eval_map_dir = args["env"].get("map_dir")
+    args["env"]["map_dir"] = eval_map_dir
+    args["eval"]["map_dir"] = eval_map_dir
     args["env"]["num_maps"] = args["eval"]["num_maps"]
     args["env"]["use_all_maps"] = True
     dataset_name = args["env"]["map_dir"].split("/")[-1]
@@ -1417,6 +1368,18 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         args["vec"] = dict(backend=backend, num_envs=1)
         args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
         args["env"]["episode_length"] = 91  # WOMD scenario length
+        # Human replay: only 1 ego is policy-controlled, others follow logged trajectories
+        args["env"]["co_player_enabled"] = False
+        args["env"]["max_controlled_agents"] = 1
+        # `human_replay_mode` is only accepted by AdaptiveDrivingAgent
+        if "adaptive" in env_name:
+            args["env"]["human_replay_mode"] = True
+        if args["eval"].get("human_replay_num_agents") is not None:
+            args["env"]["num_agents"] = args["eval"]["human_replay_num_agents"]
+        if args["eval"].get("human_replay_num_maps") is not None:
+            args["env"]["num_maps"] = args["eval"]["human_replay_num_maps"]
+        if args["eval"].get("map_dir") not in (None, "", "None"):
+            args["env"]["map_dir"] = args["eval"]["map_dir"]
 
         vecenv = vecenv or load_env(env_name, args)
         policy = policy or load_policy(args, vecenv, env_name)
@@ -1448,10 +1411,6 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         driver = vecenv.driver_env
         num_agents = vecenv.observation_space.shape[0]
         device = args["train"]["device"]
-
-        # Rebuild visualize binary if saving frames (for C-based rendering)
-        if args["save_frames"] > 0:
-            ensure_drive_binary()
 
         state = {}
         if args["train"]["use_rnn"]:
@@ -1680,27 +1639,6 @@ def export(args=None, env_name=None, vecenv=None, policy=None, path=None, silent
 
     if not silent:
         print(f"Saved {len(weights)} weights to {path}")
-
-
-def ensure_drive_binary():
-    """Delete existing visualize binary and rebuild it. This ensures the
-    binary is always up-to-date with the latest code changes.
-    """
-    if os.path.exists("./visualize"):
-        os.remove("./visualize")
-
-    try:
-        result = subprocess.run(
-            ["bash", "scripts/build_ocean.sh", "visualize", "local"], capture_output=True, text=True, timeout=300
-        )
-
-        if result.returncode != 0:
-            print(f"Build failed: {result.stderr}")
-            raise RuntimeError("Failed to build visualize binary for rendering")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Build timed out")
-    except Exception as e:
-        raise RuntimeError(f"Build error: {e}")
 
 
 def autotune(args=None, env_name=None, vecenv=None, policy=None):

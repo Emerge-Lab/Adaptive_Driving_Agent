@@ -411,7 +411,7 @@ struct Drive {
     bool population_play;
     // Rendering
     int render_mode;          // RENDER_OFF, RENDER_HEADLESS, or RENDER_WINDOW
-    char video_suffix[64];    // Optional suffix appended to mp4 filename (e.g. "_bev")
+    char video_basename[256]; // Full mp4 basename (without ".mp4") set by Python via vec_set_video_suffix. Defaults to "render".
 };
 
 void add_log(Drive *env) {
@@ -1857,7 +1857,13 @@ void init(Drive *env) {
     }
 }
 
+void close_client(Client *client);
+
 void c_close(Drive *env) {
+    if (env->client != NULL) {
+        close_client(env->client);
+        env->client = NULL;
+    }
     if (env->population_play && env->co_player_logs != NULL) {
         free(env->co_player_logs);
         free(env->co_player_ids);
@@ -2735,6 +2741,74 @@ struct Client {
     float original_map_height;
 };
 
+// Stop the running ffmpeg recorder (if any) and wait for it to finish writing.
+static void stop_video_recorder(Client *client) {
+    if (client->recorder_pipefd[1] >= 0) {
+        close(client->recorder_pipefd[1]);
+        client->recorder_pipefd[1] = -1;
+    }
+    if (client->recorder_pipefd[0] >= 0) {
+        close(client->recorder_pipefd[0]);
+        client->recorder_pipefd[0] = -1;
+    }
+    if (client->recorder_pid > 0) {
+        int status;
+        waitpid(client->recorder_pid, &status, 0);
+        client->recorder_pid = 0;
+    }
+}
+
+// Start (or restart) the ffmpeg recorder. Stops any in-flight recorder first
+// so callers can switch output files mid-life without recreating raylib state.
+static void start_video_recorder(Client *client, const char *basename) {
+    stop_video_recorder(client);
+
+    if (pipe(client->recorder_pipefd) == -1) {
+        fprintf(stderr, "Failed to create pipe for video recording\n");
+        client->recorder_pipefd[0] = -1;
+        client->recorder_pipefd[1] = -1;
+        return;
+    }
+
+    char size_str[64];
+    snprintf(size_str, sizeof(size_str), "%dx%d", (int)client->width, (int)client->height);
+
+    char filename[320];
+    snprintf(filename, sizeof(filename), "%s.mp4", basename && basename[0] ? basename : "render");
+
+    client->recorder_pid = fork();
+    if (client->recorder_pid == -1) {
+        fprintf(stderr, "Failed to fork ffmpeg process\n");
+        close(client->recorder_pipefd[0]);
+        close(client->recorder_pipefd[1]);
+        client->recorder_pipefd[0] = -1;
+        client->recorder_pipefd[1] = -1;
+        client->recorder_pid = 0;
+        return;
+    }
+
+    if (client->recorder_pid == 0) {
+        // Child: run ffmpeg
+        close(client->recorder_pipefd[1]);
+        dup2(client->recorder_pipefd[0], STDIN_FILENO);
+        close(client->recorder_pipefd[0]);
+        for (int fd = 3; fd < 256; fd++) {
+            close(fd);
+        }
+        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba",
+               "-s", size_str, "-r", "30", "-i", "-", "-c:v", "libx264",
+               "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
+               "-crf", "23", "-loglevel", "error", filename, NULL);
+        fprintf(stderr, "Failed to exec ffmpeg\n");
+        _exit(1);
+    }
+
+    close(client->recorder_pipefd[0]);  // parent: keep write end only
+    client->recorder_pipefd[0] = -1;
+    fprintf(stderr, "[drive] ffmpeg forked: pid=%d file=%s size=%s\n",
+            client->recorder_pid, filename, size_str);
+}
+
 Client *make_client(Drive *env) {
     Client *client = (Client *)calloc(1, sizeof(Client));
     client->recorder_pid = 0;
@@ -2755,7 +2829,6 @@ Client *make_client(Drive *env) {
         float scale = 6.0f;
         client->width = (int)roundf(map_width * scale / 2.0f) * 2;
         client->height = (int)roundf(map_height * scale / 2.0f) * 2;
-        // Store original map dimensions for consistent rendering across scenarios
         client->original_map_width = map_width;
         client->original_map_height = map_height;
 
@@ -2764,52 +2837,7 @@ Client *make_client(Drive *env) {
         InitWindow(client->width, client->height, "PufferDrive Headless");
         SetTargetFPS(6000);
 
-        // Set up ffmpeg process for video recording
-        if (pipe(client->recorder_pipefd) == -1) {
-            fprintf(stderr, "Failed to create pipe for video recording\n");
-            free(client);
-            return NULL;
-        }
-
-        char size_str[64];
-        snprintf(size_str, sizeof(size_str), "%dx%d", (int)client->width, (int)client->height);
-
-        // Build output filename using scenario_id and video_suffix
-        char filename[320];
-        if (env->video_suffix[0] != '\0') {
-            snprintf(filename, sizeof(filename), "%s%s.mp4", env->scenario_id, env->video_suffix);
-        } else {
-            snprintf(filename, sizeof(filename), "%s.mp4", env->scenario_id);
-        }
-
-        client->recorder_pid = fork();
-        if (client->recorder_pid == -1) {
-            fprintf(stderr, "Failed to fork ffmpeg process\n");
-            close(client->recorder_pipefd[0]);
-            close(client->recorder_pipefd[1]);
-            free(client);
-            return NULL;
-        }
-
-        if (client->recorder_pid == 0) {
-            // Child process: run ffmpeg
-            close(client->recorder_pipefd[1]);
-            dup2(client->recorder_pipefd[0], STDIN_FILENO);
-            close(client->recorder_pipefd[0]);
-            for (int fd = 3; fd < 256; fd++) {
-                close(fd);
-            }
-            execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba",
-                   "-s", size_str, "-r", "30", "-i", "-", "-c:v", "libx264",
-                   "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
-                   "-crf", "23", "-loglevel", "error", filename, NULL);
-            fprintf(stderr, "Failed to exec ffmpeg\n");
-            _exit(1);
-        }
-
-        close(client->recorder_pipefd[0]);  // Close read end in parent
-        fprintf(stderr, "[drive] ffmpeg forked: pid=%d file=%s size=%s\n",
-                client->recorder_pid, filename, size_str);
+        start_video_recorder(client, env->video_basename);
     }
 
     // Load textures and models (for both window and headless modes)
@@ -3646,32 +3674,24 @@ void c_render(Drive *env) {
     EndDrawing();
 }
 
-// Set the video filename suffix for headless rendering
-void set_video_suffix(Drive *env, const char *suffix) {
-    if (suffix) {
-        strncpy(env->video_suffix, suffix, sizeof(env->video_suffix) - 1);
-        env->video_suffix[sizeof(env->video_suffix) - 1] = '\0';
+// Set the full mp4 basename (without ".mp4") for headless rendering.
+// If a recorder is already running for this env, it's stopped and a new one
+// is started so multiple basenames can be used in a single env lifetime.
+void set_video_suffix(Drive *env, const char *basename) {
+    if (basename) {
+        strncpy(env->video_basename, basename, sizeof(env->video_basename) - 1);
+        env->video_basename[sizeof(env->video_basename) - 1] = '\0';
     } else {
-        env->video_suffix[0] = '\0';
+        env->video_basename[0] = '\0';
+    }
+
+    if (env->client != NULL && env->render_mode == RENDER_HEADLESS) {
+        start_video_recorder(env->client, env->video_basename);
     }
 }
 
 void close_client(Client *client) {
-    // Clean up video recording if active
-    if (client->recorder_pid > 0) {
-        // Close the write end of the pipe to signal EOF to ffmpeg
-        if (client->recorder_pipefd[1] >= 0) {
-            close(client->recorder_pipefd[1]);
-            client->recorder_pipefd[1] = -1;
-        }
-        // Wait for ffmpeg to finish
-        int status;
-        waitpid(client->recorder_pid, &status, 0);
-        fprintf(stderr, "[drive] ffmpeg process finished with status %d\n", status);
-        client->recorder_pid = 0;
-    }
-
-    // Unload models and textures
+    stop_video_recorder(client);
     for (int i = 0; i < 6; i++) {
         UnloadModel(client->cars[i]);
     }

@@ -65,15 +65,17 @@ class TestDriveConfig(unittest.TestCase):
         self.assertEqual(args["package"], "ocean")
         self.assertEqual(args["env_name"], "puffer_drive")
         self.assertEqual(args["policy_name"], "Drive")
-        self.assertEqual(args["rnn_name"], "Recurrent")
+        # Architecture is selected via [base].policy_architecture; rnn_name
+        # is a stale top-level alias that's only set when explicitly passed.
+        self.assertEqual(args["policy_architecture"], "Transformer")
         self.assertEqual(args["env"]["num_agents"], 1024)
         self.assertEqual(args["env"]["action_type"], "discrete")
-        self.assertEqual(args["policy"]["input_size"], 64)
+        self.assertEqual(args["policy"]["input_size"], 128)
         self.assertEqual(args["policy"]["hidden_size"], 256)
         self.assertEqual(args["rnn"]["input_size"], 256)
         self.assertEqual(args["rnn"]["hidden_size"], 256)
-        self.assertEqual(args["vec"]["num_workers"], 16)
-        self.assertEqual(args["vec"]["num_envs"], 16)
+        self.assertEqual(args["vec"]["num_workers"], 8)
+        self.assertEqual(args["vec"]["num_envs"], 8)
 
         # --- Tunable hyperparameters (tested at high strictness) ---
         if ASSERTION_LEVEL >= 3:

@@ -963,8 +963,17 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
         # NOTE: Setting threads to 1 is required for co-player policies to work
         # inside environment evaluation. Higher values cause deadlock.
-        torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
+        # set_num_interop_threads can only be called once per process; on
+        # subsequent vector-construction calls (e.g. multiple renders) it
+        # raises RuntimeError. Guard so that's idempotent.
+        try:
+            torch.set_num_threads(1)
+        except RuntimeError:
+            pass
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
         import os
 
         os.environ["OMP_NUM_THREADS"] = "1"
