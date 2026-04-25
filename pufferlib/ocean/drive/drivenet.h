@@ -52,7 +52,7 @@ DriveNet *init_drivenet(Weights *weights, int num_agents, int dynamics_model, bo
     int hidden_size = 256;
     int input_size = 64;
 
-    int base_ego_dim = (dynamics_model == JERK) ? 10 : 7;
+    int base_ego_dim = (dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
     net->conditioning_dims = (use_rc ? 3 : 0) + (use_ec ? 1 : 0) + (use_dc ? 1 : 0);
     net->ego_dim = base_ego_dim + net->conditioning_dims;
 

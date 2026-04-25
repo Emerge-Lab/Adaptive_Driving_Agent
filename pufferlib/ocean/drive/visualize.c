@@ -366,6 +366,8 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
         .reward_offroad_collision = conf.reward_offroad_collision,
         .reward_goal = conf.reward_goal,
         .reward_goal_post_respawn = conf.reward_goal_post_respawn,
+        .reward_lane_align = 0.0f,  // Lane reward disabled for visualization
+        .reward_vel_align = 1.0f,
         .goal_radius = conf.goal_radius,
         .goal_behavior = conf.goal_behavior,
         .goal_target_distance = conf.goal_target_distance,

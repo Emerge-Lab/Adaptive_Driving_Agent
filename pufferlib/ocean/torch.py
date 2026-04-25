@@ -31,7 +31,9 @@ class Drive(nn.Module):
         self.conditioning_dims = (3 if self.use_rc else 0) + (1 if self.use_ec else 0) + (1 if self.use_dc else 0)
 
         # Determine ego dimension from environment's dynamics model
-        base_ego_dim = 10 if env.dynamics_model == "jerk" else 7
+        # Use binding constants for ego dimensions (includes lane features)
+        from pufferlib.ocean.drive import binding
+        base_ego_dim = binding.EGO_FEATURES_JERK if env.dynamics_model == "jerk" else binding.EGO_FEATURES_CLASSIC
         self.ego_dim = base_ego_dim + self.conditioning_dims
         print(f"ego dimensions: {self.ego_dim}", flush=True)
         self.ego_encoder = nn.Sequential(

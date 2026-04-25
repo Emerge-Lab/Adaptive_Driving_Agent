@@ -73,7 +73,17 @@
 #define OFFROAD_IDX 1
 #define REACHED_GOAL_IDX 2
 #define LANE_ALIGNED_IDX 3
-#define AVG_DISPLACEMENT_ERROR_IDX 4
+#define LANE_DIST_IDX 4
+#define LANE_ANGLE_IDX 5
+#define AVG_DISPLACEMENT_ERROR_IDX 6
+
+// Lane alignment constants (from GIGAFLOW)
+#define LANE_DISTANCE_NORMALIZATION 4.0f
+#define LANE_SELECTION_DISTANCE_WEIGHT 0.7f
+#define LANE_SELECTION_HEADING_WEIGHT 0.3f
+#define LANE_SWITCH_THRESHOLD 0.5f
+#define LANE_ALIGN_COS_THRESHOLD 0.965f  // ~15 degrees
+#define MAX_CHECKED_LANES 32
 
 // Grid cell size
 #define GRID_CELL_SIZE 5.0f
@@ -113,8 +123,10 @@
 #define PARTNER_FEATURES 7
 
 // Ego features depend on dynamics model
-#define EGO_FEATURES_CLASSIC 7
-#define EGO_FEATURES_JERK 10
+// Classic: goal_x, goal_y, speed, width, length, collision, respawn, lane_dist, lane_angle
+#define EGO_FEATURES_CLASSIC 9
+// Jerk: + steering_angle, a_long, a_lat
+#define EGO_FEATURES_JERK 12
 
 // Jerk action space (for JERK dynamics model)
 static const float JERK_LONG[4] = {-15.0f, -4.0f, 0.0f, 4.0f};
@@ -210,7 +222,7 @@ struct Entity {
     float init_goal_y;
     int mark_as_expert;
     int collision_state;
-    float metrics_array[5]; // metrics_array: [collision, offroad, reached_goal, lane_aligned
+    float metrics_array[7]; // metrics_array: [collision, offroad, reached_goal, lane_aligned, lane_dist, lane_angle, avg_disp_error]
     float x;
     float y;
     float z;
@@ -221,6 +233,7 @@ struct Entity {
     float heading_x;
     float heading_y;
     int current_lane_idx;
+    int current_lane_geometry_idx;
     int valid;
     int respawn_timestep;
     int respawn_count;
@@ -349,6 +362,8 @@ struct Drive {
     float dt;
     float reward_goal;
     float reward_goal_post_respawn;
+    float reward_lane_align;
+    float reward_vel_align;
     float goal_radius;
     float goal_speed;
     int max_controlled_agents;
@@ -698,6 +713,10 @@ void set_start_position(Drive *env) {
         e->metrics_array[OFFROAD_IDX] = 0.0f;      // offroad
         e->metrics_array[REACHED_GOAL_IDX] = 0.0f; // reached goal
         e->metrics_array[LANE_ALIGNED_IDX] = 0.0f; // lane aligned
+        e->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;  // far from lane
+        e->metrics_array[LANE_ANGLE_IDX] = 0.0f;   // no alignment
+        e->current_lane_idx = -1;
+        e->current_lane_geometry_idx = -1;
         e->respawn_timestep = -1;
         e->stopped = 0;
         e->removed = 0;
@@ -1195,6 +1214,108 @@ int collision_check(Drive *env, int agent_idx) {
     return car_collided_with_index;
 }
 
+// ============================================================================
+// Lane Alignment Helper Functions (from GIGAFLOW / PufferDrive 3.0)
+// ============================================================================
+
+// Normalize heading to [-π, π]
+float normalize_heading(float h) {
+    while (h > M_PI) h -= 2.0f * M_PI;
+    while (h < -M_PI) h += 2.0f * M_PI;
+    return h;
+}
+
+// Compute signed heading difference between agent and lane, normalized to [-π, π]
+float compute_heading_diff(float agent_heading, float lane_heading) {
+    float diff = normalize_heading(agent_heading - lane_heading);
+    return diff;
+}
+
+// Find closest segment on lane polyline, return signed lateral distance
+// Positive = right of lane center, Negative = left of lane center
+float find_closest_segment_on_lane(Entity *lane, float px, float py, int *segment_idx) {
+    if (!lane || lane->array_size < 2) {
+        *segment_idx = 0;
+        return LANE_DISTANCE_NORMALIZATION;
+    }
+
+    float min_dist = LANE_DISTANCE_NORMALIZATION * 10.0f;
+    int best_idx = 0;
+    float best_signed_dist = 0.0f;
+
+    for (int i = 0; i < lane->array_size - 1; i++) {
+        float x1 = lane->traj_x[i];
+        float y1 = lane->traj_y[i];
+        float x2 = lane->traj_x[i + 1];
+        float y2 = lane->traj_y[i + 1];
+
+        float dx = x2 - x1;
+        float dy = y2 - y1;
+        float seg_len_sq = dx * dx + dy * dy;
+
+        if (seg_len_sq < 1e-6f) continue;
+
+        // Project point onto segment
+        float t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq;
+        t = fmaxf(0.0f, fminf(1.0f, t));
+
+        float closest_x = x1 + t * dx;
+        float closest_y = y1 + t * dy;
+
+        float dist = sqrtf((px - closest_x) * (px - closest_x) + (py - closest_y) * (py - closest_y));
+
+        if (dist < min_dist) {
+            min_dist = dist;
+            best_idx = i;
+
+            // Compute signed distance (cross product gives sign)
+            // Positive if point is to the right of the lane direction
+            float cross = dx * (py - y1) - dy * (px - x1);
+            best_signed_dist = (cross >= 0) ? dist : -dist;
+        }
+    }
+
+    *segment_idx = best_idx;
+    return best_signed_dist;
+}
+
+// Compute lane heading using weighted average of neighboring segments
+float compute_multi_segment_alignment(Entity *lane, int segment_idx) {
+    if (!lane || lane->array_size < 2) return 0.0f;
+
+    // Clamp to valid range
+    if (segment_idx < 0) segment_idx = 0;
+    if (segment_idx >= lane->array_size - 1) segment_idx = lane->array_size - 2;
+
+    float sum_heading = 0.0f;
+    float sum_weight = 0.0f;
+
+    // Consider current segment and neighbors
+    for (int offset = -1; offset <= 1; offset++) {
+        int idx = segment_idx + offset;
+        if (idx < 0 || idx >= lane->array_size - 1) continue;
+
+        float dx = lane->traj_x[idx + 1] - lane->traj_x[idx];
+        float dy = lane->traj_y[idx + 1] - lane->traj_y[idx];
+        float heading = atan2f(dy, dx);
+
+        // Weight by distance from main segment (center segment has highest weight)
+        float weight = (offset == 0) ? 2.0f : 1.0f;
+
+        // Handle angle wrapping for averaging
+        if (sum_weight > 0) {
+            float diff = heading - (sum_heading / sum_weight);
+            if (diff > M_PI) heading -= 2.0f * M_PI;
+            else if (diff < -M_PI) heading += 2.0f * M_PI;
+        }
+
+        sum_heading += weight * heading;
+        sum_weight += weight;
+    }
+
+    return (sum_weight > 0) ? normalize_heading(sum_heading / sum_weight) : 0.0f;
+}
+
 int check_lane_aligned(Entity *car, Entity *lane, int geometry_idx) {
     // Validate lane geometry length
     if (!lane || lane->array_size < 2)
@@ -1246,7 +1367,10 @@ void reset_agent_metrics(Drive *env, int agent_idx) {
     agent->metrics_array[COLLISION_IDX] = 0.0f;    // vehicle collision
     agent->metrics_array[OFFROAD_IDX] = 0.0f;      // offroad
     agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f; // lane aligned
+    agent->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;  // far from lane
+    agent->metrics_array[LANE_ANGLE_IDX] = 0.0f;   // no alignment
     agent->collision_state = 0;
+    agent->current_lane_geometry_idx = -1;
 }
 
 float point_to_segment_distance_2d(float px, float py, float x1, float y1, float x2, float y2) {
@@ -1329,43 +1453,84 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
         if (collided == OFFROAD)
             break;
 
-        // Find closest point on the road centerline to the agent
+        // Find closest lane using GIGAFLOW-style scoring (distance + heading)
         if (entity->type == ROAD_LANE) {
             int entity_idx = entity_list[i].entity_idx;
-            int geometry_idx = entity_list[i].geometry_idx;
 
-            float start[2] = {entity->traj_x[geometry_idx], entity->traj_y[geometry_idx]};
-            float end[2] = {entity->traj_x[geometry_idx + 1], entity->traj_y[geometry_idx + 1]};
+            // Skip if already checked this lane
+            static int checked_lanes[MAX_CHECKED_LANES];
+            static int num_checked = 0;
+            if (i == 0) num_checked = 0;  // Reset at start of loop
+            int already_checked = 0;
+            for (int c = 0; c < num_checked; c++) {
+                if (checked_lanes[c] == entity_idx) {
+                    already_checked = 1;
+                    break;
+                }
+            }
+            if (already_checked) continue;
+            if (num_checked < MAX_CHECKED_LANES) checked_lanes[num_checked++] = entity_idx;
 
-            float dist = point_to_segment_distance_2d(agent->x, agent->y, start[0], start[1], end[0], end[1]);
-            float heading_diff = fabsf(atan2f(end[1] - start[1], end[0] - start[0]) - agent->heading);
+            // Find closest segment on this lane (returns signed distance)
+            int segment_idx;
+            float signed_dist = find_closest_segment_on_lane(entity, agent->x, agent->y, &segment_idx);
+            float abs_dist = fabsf(signed_dist);
+            if (abs_dist > LANE_DISTANCE_NORMALIZATION) continue;
 
-            // Normalize heading difference to [0, pi]
-            if (heading_diff > M_PI)
-                heading_diff = 2.0f * M_PI - heading_diff;
+            // Compute lane heading using multi-segment alignment
+            float lane_heading = compute_multi_segment_alignment(entity, segment_idx);
 
-            // Penalize if heading differs by more than 30 degrees
-            if (heading_diff > (M_PI / 6.0f))
-                dist += 3.0f;
+            // Compute heading alignment penalty (0.0 = perfect, 1.0 = opposite)
+            float heading_diff = fabsf(compute_heading_diff(agent->heading, lane_heading));
+            float heading_penalty = heading_diff / M_PI;
 
-            if (dist < min_distance) {
-                min_distance = dist;
+            // Normalize distance for scoring
+            float distance_penalty = abs_dist / LANE_DISTANCE_NORMALIZATION;
+
+            // Combined score using defined weights
+            float score = LANE_SELECTION_DISTANCE_WEIGHT * distance_penalty +
+                          LANE_SELECTION_HEADING_WEIGHT * heading_penalty;
+
+            // Hysteresis: penalize switching away from current lane
+            if (agent->current_lane_idx != entity_idx && agent->current_lane_idx != -1) {
+                score += LANE_SWITCH_THRESHOLD;
+            }
+
+            // Track best candidate
+            if (score < min_distance) {  // Using min_distance to store best score
+                min_distance = score;
                 closest_lane_entity_idx = entity_idx;
-                closest_lane_geometry_idx = geometry_idx;
+                closest_lane_geometry_idx = segment_idx;
             }
         }
     }
 
-    // check if aligned with closest lane and set current lane
-    // 4.0m threshold: agents more than 4 meters from any lane are considered off-road
-    if (min_distance > 4.0f || closest_lane_entity_idx == -1) {
-        agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f;
-        agent->current_lane_idx = -1;
-    } else {
+    // Update lane metrics using GIGAFLOW Frenet coordinates
+    if (closest_lane_entity_idx != -1) {
+        Entity *lane = &env->entities[closest_lane_entity_idx];
+
+        // Recompute signed distance and heading for best lane
+        int segment_idx;
+        float signed_dist = find_closest_segment_on_lane(lane, agent->x, agent->y, &segment_idx);
+        float lane_heading = compute_multi_segment_alignment(lane, segment_idx);
+        float theta_f = compute_heading_diff(agent->heading, lane_heading);
+
+        // Store lane metrics
         agent->current_lane_idx = closest_lane_entity_idx;
-        int lane_aligned =
-            check_lane_aligned(agent, &env->entities[closest_lane_entity_idx], closest_lane_geometry_idx);
+        agent->current_lane_geometry_idx = closest_lane_geometry_idx;
+        agent->metrics_array[LANE_DIST_IDX] = signed_dist;
+        agent->metrics_array[LANE_ANGLE_IDX] = cosf(theta_f);
+
+        // Binary lane aligned flag (within ~15 degrees)
+        int lane_aligned = (fabsf(agent->metrics_array[LANE_ANGLE_IDX]) > LANE_ALIGN_COS_THRESHOLD) ? 1 : 0;
         agent->metrics_array[LANE_ALIGNED_IDX] = lane_aligned;
+    } else {
+        // Not on any lane
+        agent->current_lane_idx = -1;
+        agent->current_lane_geometry_idx = -1;
+        agent->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;
+        agent->metrics_array[LANE_ANGLE_IDX] = 0.0f;
+        agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f;
     }
 
     // Check for vehicle collisions
@@ -1724,7 +1889,7 @@ void c_close(Drive *env) {
 
 void allocate(Drive *env) {
     init(env);
-    int base_ego_dim = (env->dynamics_model == JERK) ? 10 : 7;
+    int base_ego_dim = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
     int conditioning_dims = (env->use_rc ? 3 : 0) + (env->use_ec ? 1 : 0) + (env->use_dc ? 1 : 0);
     int ego_dim = base_ego_dim + conditioning_dims;
 
@@ -2029,7 +2194,7 @@ void c_get_road_edge_polylines(Drive *env, float *x_out, float *y_out, int *leng
 }
 
 void compute_observations(Drive *env) {
-    int base_ego_dim = (env->dynamics_model == JERK) ? 10 : 7;
+    int base_ego_dim = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
     int conditioning_dims = (env->use_rc ? 3 : 0) + (env->use_ec ? 1 : 0) + (env->use_dc ? 1 : 0);
     int ego_dim = base_ego_dim + conditioning_dims;
     int max_obs = ego_dim + 7 * (MAX_AGENTS - 1) + 7 * MAX_ROAD_SEGMENT_OBSERVATIONS;
@@ -2065,15 +2230,21 @@ void compute_observations(Drive *env) {
         obs[5] = (ego_entity->collision_state > 0) ? 1.0f : 0.0f;
         obs[6] = (ego_entity->respawn_timestep != -1) ? 1 : 0;
 
+        // Lane alignment observations (GIGAFLOW Frenet coordinates)
+        float lane_center_dist = ego_entity->metrics_array[LANE_DIST_IDX] / LANE_DISTANCE_NORMALIZATION;
+        lane_center_dist = fmaxf(-1.0f, fminf(1.0f, lane_center_dist));  // Clamp to [-1, 1]
+        obs[7] = lane_center_dist;
+        obs[8] = ego_entity->metrics_array[LANE_ANGLE_IDX];  // cos(theta_f), already in [-1, 1]
+
         if (env->dynamics_model == JERK) {
-            obs[7] = ego_entity->steering_angle / M_PI;
+            obs[9] = ego_entity->steering_angle / M_PI;
             // Asymmetric normalization for a_long to match action space
-            obs[8] =
+            obs[10] =
                 (ego_entity->a_long < 0) ? ego_entity->a_long / (-JERK_LONG[0]) : ego_entity->a_long / JERK_LONG[3];
-            obs[9] = ego_entity->a_lat / JERK_LAT[2];
+            obs[11] = ego_entity->a_lat / JERK_LAT[2];
         }
 
-        int obs_idx = (env->dynamics_model == JERK) ? 10 : 7;
+        int obs_idx = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
         // Add conditioning weights to observations
         if (env->use_rc) {
             obs[obs_idx++] = env->collision_weights[i];
@@ -2294,6 +2465,10 @@ void c_reset(Drive *env) {
         env->entities[agent_idx].metrics_array[OFFROAD_IDX] = 0.0f;
         env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 0.0f;
         env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX] = 0.0f;
+        env->entities[agent_idx].metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;
+        env->entities[agent_idx].metrics_array[LANE_ANGLE_IDX] = 0.0f;
+        env->entities[agent_idx].current_lane_idx = -1;
+        env->entities[agent_idx].current_lane_geometry_idx = -1;
         env->entities[agent_idx].stopped = 0;
         env->entities[agent_idx].removed = 0;
 
@@ -2322,6 +2497,10 @@ void respawn_agent(Drive *env, int agent_idx) {
     env->entities[agent_idx].metrics_array[OFFROAD_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX] = 0.0f;
+    env->entities[agent_idx].metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;
+    env->entities[agent_idx].metrics_array[LANE_ANGLE_IDX] = 0.0f;
+    env->entities[agent_idx].current_lane_idx = -1;
+    env->entities[agent_idx].current_lane_geometry_idx = -1;
 
     env->entities[agent_idx].respawn_timestep = env->timestep;
     env->entities[agent_idx].collided_before_goal = 0;
@@ -2481,6 +2660,29 @@ void c_step(Drive *env) {
                 env->logs[i].speed_at_goal = current_speed;
             } else if (is_co_player) {
                 env->co_player_logs[i].speed_at_goal = current_speed;
+            }
+        }
+
+        // Lane alignment reward (GIGAFLOW formula)
+        // Only apply if reward_lane_align > 0 (disabled by default)
+        if (env->reward_lane_align > 0.0f) {
+            float cos_theta = env->entities[agent_idx].metrics_array[LANE_ANGLE_IDX];
+            float theta_f = acosf(fminf(fmaxf(cos_theta, -1.0f), 1.0f));  // Get |θ_f| from cos
+
+            // GIGAFLOW Rl-align: min(cos,0) + vel_align*min(cos*v,0) + 0.0025*(1-|θ|/(π/2))
+            float against_lane_penalty = fminf(cos_theta, 0.0f);  // Negative when >90° off
+            float vel_aligned_penalty = env->reward_vel_align * fminf(cos_theta * current_speed, 0.0f);
+            float alignment_bonus = 0.0025f * (1.0f - theta_f / (M_PI / 2.0f));
+
+            float lane_align_reward = env->reward_lane_align * env->dt *
+                (against_lane_penalty + vel_aligned_penalty + alignment_bonus);
+
+            env->rewards[i] += lane_align_reward;
+
+            if (is_ego) {
+                env->logs[i].episode_return += lane_align_reward;
+            } else if (is_co_player) {
+                env->co_player_logs[i].episode_return += lane_align_reward;
             }
         }
 
@@ -2728,7 +2930,9 @@ void draw_agent_obs(Drive *env, int agent_index, int mode, int obs_only, int las
         return;
     }
 
-    int ego_dim = (env->dynamics_model == JERK) ? 10 : 7;
+    int base_ego_dim = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
+    int conditioning_dims = (env->use_rc ? 3 : 0) + (env->use_ec ? 1 : 0) + (env->use_dc ? 1 : 0);
+    int ego_dim = base_ego_dim + conditioning_dims;
     int max_obs = ego_dim + 7 * (MAX_AGENTS - 1) + 7 * MAX_ROAD_SEGMENT_OBSERVATIONS;
     float (*observations)[max_obs] = (float (*)[max_obs])env->observations;
     float *agent_obs = &observations[agent_index][0];

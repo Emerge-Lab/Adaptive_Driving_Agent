@@ -40,6 +40,8 @@ void demo() {
         .dynamics_model = CLASSIC,
         .reward_vehicle_collision = -1.0f,
         .reward_offroad_collision = -1.0f,
+        .reward_lane_align = 0.0f,
+        .reward_vel_align = 1.0f,
         .goal_radius = 2.0f,
         .dt = 0.1f,
         .map_name = "resources/drive/binaries/training/map_000.bin",

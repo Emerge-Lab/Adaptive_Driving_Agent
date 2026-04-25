@@ -30,6 +30,8 @@ class Drive(pufferlib.PufferEnv):
         reward_offroad_collision=-0.1,
         reward_goal=1.0,
         reward_goal_post_respawn=0.5,
+        reward_lane_align=0.0,  # GIGAFLOW lane alignment reward (0 = disabled)
+        reward_vel_align=1.0,   # Velocity alignment coefficient for lane reward
         goal_behavior=0,
         goal_target_distance=10.0,
         goal_radius=2.0,
@@ -82,6 +84,8 @@ class Drive(pufferlib.PufferEnv):
         self.reward_offroad_collision = reward_offroad_collision
         self.reward_goal = reward_goal
         self.reward_goal_post_respawn = reward_goal_post_respawn
+        self.reward_lane_align = reward_lane_align
+        self.reward_vel_align = reward_vel_align
         self.goal_radius = goal_radius
         self.goal_speed = goal_speed
         self.goal_behavior = goal_behavior
@@ -304,6 +308,8 @@ class Drive(pufferlib.PufferEnv):
                 reward_offroad_collision=reward_offroad_collision,
                 reward_goal=reward_goal,
                 reward_goal_post_respawn=reward_goal_post_respawn,
+                reward_lane_align=self.reward_lane_align,
+                reward_vel_align=self.reward_vel_align,
                 goal_radius=goal_radius,
                 goal_speed=goal_speed,
                 goal_behavior=self.goal_behavior,
@@ -512,7 +518,9 @@ class Drive(pufferlib.PufferEnv):
         if observations.shape[0] != self.total_co_players:
             raise ValueError(f"Expected {self.total_co_players} observations, got {observations.shape[0]}")
 
-        return np.concatenate([observations[:, :7], self.cached_conditioning_array, observations[:, 7:]], axis=1)
+        # Use dynamic base_ego_dim based on dynamics model
+        base_ego_dim = binding.EGO_FEATURES_JERK if self.dynamics_model == "jerk" else binding.EGO_FEATURES_CLASSIC
+        return np.concatenate([observations[:, :base_ego_dim], self.cached_conditioning_array, observations[:, base_ego_dim:]], axis=1)
 
     def _set_co_player_conditioning(self):
         """Sample and store conditioning values for each environment and update all caches"""
@@ -704,6 +712,8 @@ class Drive(pufferlib.PufferEnv):
                         offroad_behavior=self.offroad_behavior,
                         reward_goal=self.reward_goal,
                         reward_goal_post_respawn=self.reward_goal_post_respawn,
+                        reward_lane_align=self.reward_lane_align,
+                        reward_vel_align=self.reward_vel_align,
                         goal_speed=self.goal_speed,
                         goal_target_distance=self.goal_target_distance,
                         dt=self.dt,

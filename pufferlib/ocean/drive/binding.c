@@ -102,6 +102,8 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->reward_offroad_collision = conf.reward_offroad_collision;
     env->reward_goal = conf.reward_goal;
     env->reward_goal_post_respawn = conf.reward_goal_post_respawn;
+    env->reward_lane_align = (float)unpack(kwargs, "reward_lane_align");
+    env->reward_vel_align = (float)unpack(kwargs, "reward_vel_align");
     env->scenario_length = conf.scenario_length;
 
     env->termination_mode = conf.termination_mode;
