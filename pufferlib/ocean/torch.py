@@ -36,7 +36,18 @@ class Drive(nn.Module):
 
         base_ego_dim = binding.EGO_FEATURES_JERK if env.dynamics_model == "jerk" else binding.EGO_FEATURES_CLASSIC
         self.ego_dim = base_ego_dim + self.conditioning_dims
-        print(f"ego dimensions: {self.ego_dim}", flush=True)
+        cond_flags = []
+        if self.use_rc: cond_flags.append("reward(3)")
+        if self.use_ec: cond_flags.append("entropy(1)")
+        if self.use_dc: cond_flags.append("discount(1)")
+        cond_str = "+".join(cond_flags) if cond_flags else "none"
+        print(
+            f"[Drive policy] dynamics={env.dynamics_model} ego_dim={self.ego_dim} "
+            f"(base={base_ego_dim}+cond={self.conditioning_dims}: {cond_str}) "
+            f"obs_dim={self.observation_size} max_partners={self.max_partner_objects} "
+            f"max_road={self.max_road_objects} hidden={hidden_size}",
+            flush=True,
+        )
         self.ego_encoder = nn.Sequential(
             pufferlib.pytorch.layer_init(nn.Linear(self.ego_dim, input_size)),
             nn.LayerNorm(input_size),
