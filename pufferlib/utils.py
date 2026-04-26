@@ -231,6 +231,13 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
 
         env_kwargs = copy.deepcopy(config.get("env_config", {}))
         env_kwargs["render_mode"] = 1  # RENDER_HEADLESS
+        # Render env runs alongside training and has to fit in the same VRAM /
+        # RAM budget — override the training num_agents (often 1024+) down to a
+        # render-sized footprint so we don't OOM on first render call.
+        env_kwargs["num_agents"] = min(env_kwargs.get("num_agents", 64), 64)
+        if env_kwargs.get("num_ego_agents") is not None:
+            env_kwargs["num_ego_agents"] = min(env_kwargs["num_ego_agents"], 32)
+        env_kwargs["num_maps"] = min(env_kwargs.get("num_maps", 5), 5)
 
         if human_replay:
             env_kwargs["co_player_enabled"] = False

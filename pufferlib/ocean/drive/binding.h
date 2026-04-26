@@ -371,10 +371,11 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
 
         // Enforce constraint: must have at least 1 ego per world (if egos remain)
         if (world_egos == 0 && remaining_egos > 0) {
-            fprintf(
-                stderr,
-                "[shared_population_play] WARNING: World %d has no ego agents but %d egos remain. Skipping world.\n",
-                env_count, remaining_egos);
+            // Silenced: noisy during normal training. Re-enable for debug.
+            // fprintf(
+            //     stderr,
+            //     "[shared_population_play] WARNING: World %d has no ego agents but %d egos remain. Skipping world.\n",
+            //     env_count, remaining_egos);
 
             // Rollback the agent assignments for this world
             total_agent_count -= env->active_agent_count;
@@ -403,8 +404,9 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
         PyList_SetItem(ego_agent_ids, env_count, ego_list);
         PyList_SetItem(coplayer_ids, env_count, coplayer_list);
 
-        printf("World %d (map %d): %d agents (%d egos, %d co-players)\n", env_count, map_id, env->active_agent_count,
-               world_egos, world_coplayers);
+        // Silenced: noisy during normal training. Re-enable for debug.
+        // printf("World %d (map %d): %d agents (%d egos, %d co-players)\n", env_count, map_id, env->active_agent_count,
+        //        world_egos, world_coplayers);
 
         env_count++;
 
