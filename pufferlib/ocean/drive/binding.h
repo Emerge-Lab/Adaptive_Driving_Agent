@@ -216,7 +216,8 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
     }
 
     int num_coplayers = num_agents - num_ego_agents;
-    printf("Creating worlds for %d total agents (%d egos, %d co-players)\n", num_agents, num_ego_agents, num_coplayers);
+    // Silenced: noisy during normal training. Re-enable for debug.
+    // printf("Creating worlds for %d total agents (%d egos, %d co-players)\n", num_agents, num_ego_agents, num_coplayers);
 
     // Create shuffled agent role array (0 = coplayer, 1 = ego)
     int *agent_roles = malloc(num_agents * sizeof(int));
@@ -295,7 +296,8 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
 
         // CRITICAL FIX: Skip maps with 0 active agents
         if (env->active_agent_count == 0) {
-            printf("Skipping map %d (0 active agents)\n", map_id);
+            // Silenced: noisy during normal training. Re-enable for debug.
+            // printf("Skipping map %d (0 active agents)\n", map_id);
             for (int j = 0; j < env->num_entities; j++) {
                 free_entity(&env->entities[j]);
             }
@@ -450,8 +452,9 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
     PyTuple_SetItem(tuple, 3, resized_ego_ids);
     PyTuple_SetItem(tuple, 4, resized_coplayer_ids);
 
-    printf("Total: %d agents across %d worlds (egos: %d, co-players: %d)\n", total_agent_count, env_count,
-           total_egos_assigned, total_coplayers_assigned);
+    // Silenced: noisy during normal training. Re-enable for debug.
+    // printf("Total: %d agents across %d worlds (egos: %d, co-players: %d)\n", total_agent_count, env_count,
+    //        total_egos_assigned, total_coplayers_assigned);
 
     return tuple;
 }

@@ -237,7 +237,7 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         env_kwargs["num_agents"] = min(env_kwargs.get("num_agents", 64), 64)
         if env_kwargs.get("num_ego_agents") is not None:
             env_kwargs["num_ego_agents"] = min(env_kwargs["num_ego_agents"], 32)
-        env_kwargs["num_maps"] = min(env_kwargs.get("num_maps", 5), 5)
+        env_kwargs["num_maps"] = min(env_kwargs.get("num_maps", 500), 500)
 
         if human_replay:
             env_kwargs["co_player_enabled"] = False
