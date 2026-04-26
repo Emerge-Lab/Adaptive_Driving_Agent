@@ -238,9 +238,12 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
             if "adaptive" in env_name:
                 env_kwargs["human_replay_mode"] = True
 
+        # Force Serial backend for render: raylib's GLFW needs DISPLAY, which
+        # xvfb-run sets in the parent process. A Multiprocessing worker would
+        # spawn without DISPLAY and segfault on InitWindow.
         render_args = {
             "env": env_kwargs,
-            "vec": config.get("vec", {"num_envs": 1, "backend": "Serial"}),
+            "vec": {"num_envs": 1, "backend": "Serial"},
             "package": config.get("package", "ocean"),
         }
 
