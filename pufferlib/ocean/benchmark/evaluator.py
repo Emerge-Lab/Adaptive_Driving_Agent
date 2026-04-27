@@ -633,102 +633,99 @@ class HumanReplayEvaluator:
     def rollout(self, args, puffer_env, policy):
         """Roll out policy in env with human replays. Store statistics.
 
-        In human replay mode, only the SDC (self-driving car) is controlled by the policy
-        while all other agents replay their human trajectories. This tests how compatible
-        the policy is with (static) human partners.
+        In human replay mode, only the SDC is controlled by the policy while
+        all other agents replay their human trajectories. This tests how
+        compatible the policy is with static human partners.
 
-        Args:
-            args: Config dict with train settings (device, rnn_name, etc.)
-            puffer_env: PufferLib environment wrapper
-            policy: Trained policy to evaluate
-
-        Returns:
-            dict: Aggregated metrics including delta metrics for adaptive agents
+        Runs `num_rollouts` independent rollouts (env is reset between each,
+        which resamples the map/agent slice). Reports per-key mean across
+        rollouts, plus `<key>_std` so you can see variance once the per-batch
+        score saturates.
         """
         import numpy as np
         import torch
         import pufferlib
 
+        num_rollouts = int(args.get("eval", {}).get("human_replay_num_rollouts", 1) or 1)
         num_agents = puffer_env.observation_space.shape[0]
         device = args["train"]["device"]
-
-        obs, info = puffer_env.reset()
-
         k_scenarios = args["env"].get("k_scenarios", 1)
 
-        # Detect architecture from policy object
         is_transformer = hasattr(policy, "horizon") and hasattr(policy, "transformer")
         is_recurrent = hasattr(policy, "lstm")
 
-        if is_recurrent:
-            state = dict(
-                lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
-                lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
-            )
-        elif is_transformer:
-            state = dict(
-                transformer_context=torch.zeros(num_agents, policy.horizon, policy.hidden_size, device=device),
-                transformer_position=torch.zeros(1, dtype=torch.long, device=device),
-            )
-        else:
-            state = {}
+        def _fresh_state():
+            if is_recurrent:
+                return dict(
+                    lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
+                    lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
+                )
+            if is_transformer:
+                return dict(
+                    transformer_context=torch.zeros(num_agents, policy.horizon, policy.hidden_size, device=device),
+                    transformer_position=torch.zeros(1, dtype=torch.long, device=device),
+                )
+            return {}
 
-        collected_infos = []
-        scenario_metrics = {}  # Store scenario-specific metrics (scenario_0_*, scenario_1_*, etc.)
-        delta_metrics = None
+        per_rollout_aggregates = []
+        per_rollout_scenario = []
+        per_rollout_delta = []
 
-        # Loop through scenarios
-        for scenario in range(k_scenarios):
-            for time_idx in range(self.sim_steps):
-                # Step policy
-                with torch.no_grad():
-                    ob_tensor = torch.as_tensor(obs).to(device)
-                    logits, value = policy.forward_eval(ob_tensor, state)
-                    action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-                    action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
+        for rollout_idx in range(num_rollouts):
+            obs, _ = puffer_env.reset()
+            state = _fresh_state()
+            collected_infos = []
+            scenario_metrics = {}
+            delta_metrics = {}
 
-                if isinstance(logits, torch.distributions.Normal):
-                    action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
+            for scenario in range(k_scenarios):
+                for time_idx in range(self.sim_steps):
+                    with torch.no_grad():
+                        ob_tensor = torch.as_tensor(obs).to(device)
+                        logits, value = policy.forward_eval(ob_tensor, state)
+                        action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                        action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
 
-                obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
+                    if isinstance(logits, torch.distributions.Normal):
+                        action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
 
-                # Reset transformer context on mid-scenario terminations (not at scenario boundaries)
-                if is_transformer:
-                    is_last_step = time_idx == self.sim_steps - 1
-                    if not is_last_step:
-                        done_mask = dones | truncs
-                        if done_mask.any():
-                            done_indices = np.where(done_mask)[0]
-                            state["transformer_context"][done_indices] = 0.0
+                    obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
 
-                # Collect infos
-                if len(info_list) > 0:
                     for info_dict in info_list:
-                        if isinstance(info_dict, dict):
-                            if "ada_delta_score" in info_dict:
-                                delta_metrics = info_dict
-                            elif any(k.startswith("scenario_") for k in info_dict.keys()):
-                                # Scenario-specific metrics (scenario_0_*, scenario_1_*, etc.)
-                                scenario_metrics.update(info_dict)
-                            elif "score" in info_dict:
-                                collected_infos.append(info_dict)
+                        if not isinstance(info_dict, dict):
+                            continue
+                        if "ada_delta_score" in info_dict:
+                            delta_metrics = info_dict
+                        elif any(k.startswith("scenario_") for k in info_dict.keys()):
+                            scenario_metrics.update(info_dict)
+                        elif "score" in info_dict:
+                            collected_infos.append(info_dict)
 
-        # Return the last info dict which contains delta metrics for adaptive agents
-        if collected_infos:
-            metric_keys = collected_infos[0].keys()
-            aggregated = {}
-            for key in metric_keys:
-                values = [info.get(key, 0) for info in collected_infos]
-                aggregated[key] = np.mean(values)
+            if collected_infos:
+                rollout_agg = {
+                    k: float(np.mean([d.get(k, 0) for d in collected_infos]))
+                    for k in collected_infos[0].keys()
+                }
+            else:
+                rollout_agg = {}
+            per_rollout_aggregates.append(rollout_agg)
+            per_rollout_scenario.append(scenario_metrics)
+            per_rollout_delta.append(delta_metrics)
 
-            # Merge scenario-specific metrics if they exist
-            if scenario_metrics:
-                aggregated.update(scenario_metrics)
+        # Mean + std across rollouts (std only meaningful for >1 rollout)
+        final = {}
+        for dicts in (per_rollout_aggregates, per_rollout_scenario, per_rollout_delta):
+            keys = {k for d in dicts for k in d.keys()}
+            for k in keys:
+                vals = [float(d[k]) for d in dicts if k in d]
+                if not vals:
+                    continue
+                final[k] = float(np.mean(vals))
+                if len(vals) > 1:
+                    final[f"{k}_std"] = float(np.std(vals, ddof=0))
 
-            # Merge delta metrics if they exist
-            if delta_metrics:
-                aggregated.update(delta_metrics)
+        final["n_rollouts"] = num_rollouts
+        final["n_agents_per_rollout"] = num_agents
+        final["n_total_evals"] = num_rollouts * num_agents
 
-            return aggregated
-
-        return {}
+        return final

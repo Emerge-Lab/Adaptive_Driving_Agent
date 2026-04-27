@@ -447,8 +447,12 @@ void add_log(Drive *env) {
                 threshold = 0.9f; // Require ≥90% completion for 5+ goals
             }
 
-            int collision_occurred =
-                (env->goal_behavior == GOAL_RESPAWN) ? e->collided_before_goal : env->logs[i].collision_rate;
+            // Use the "before goal" flag in respawn AND stop modes so that a
+            // post-goal rear-end (which the SDC can't avoid once it has stopped)
+            // does not deny the score award.
+            int collision_occurred = (env->goal_behavior == GOAL_RESPAWN || env->goal_behavior == GOAL_STOP)
+                                         ? e->collided_before_goal
+                                         : env->logs[i].collision_rate;
 
             if (frac_goal_reached > threshold && !collision_occurred) {
                 env->log.score += 1.0f;
@@ -492,8 +496,10 @@ void add_log(Drive *env) {
                 co_threshold = 0.9f;
             }
 
-            int co_collision_occurred =
-                (env->goal_behavior == GOAL_RESPAWN) ? e->collided_before_goal : env->co_player_logs[i].collision_rate;
+            // Same post-goal-collision exemption as the ego score check above.
+            int co_collision_occurred = (env->goal_behavior == GOAL_RESPAWN || env->goal_behavior == GOAL_STOP)
+                                            ? e->collided_before_goal
+                                            : env->co_player_logs[i].collision_rate;
 
             if (co_frac_goal_reached > co_threshold && !co_collision_occurred) {
                 env->co_player_log.score += 1.0f;
@@ -2588,8 +2594,11 @@ void c_step(Drive *env) {
         int is_co_player = env->entities[agent_idx].is_co_player;
         int reached_goal = env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX];
 
-        // Handle collisions - SAME REWARD for both ego and co-players
-        if (collision_state > 0) {
+        // Handle collisions - SAME REWARD for both ego and co-players.
+        // Skip for agents already stopped (e.g. after reaching the goal in
+        // GOAL_STOP mode): the policy isn't driving anymore, so a rear-end
+        // shouldn't count against its collision/offroad metrics.
+        if (collision_state > 0 && !env->entities[agent_idx].stopped) {
             if (collision_state == VEHICLE_COLLISION) {
                 env->rewards[i] = env->collision_weights[i];
 

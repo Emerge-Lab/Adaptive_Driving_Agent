@@ -30,6 +30,12 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
         conditioning_type = conditioning.get("type", "none")
         # Resolve map_dir on the parent so the child can't silently fall back to the ini default
         map_dir = eval_config.get("map_dir") or env_config.get("map_dir")
+        # Adaptive runs override k_scenarios and the resulting episode length;
+        # the child must use the same values or it will build a model whose
+        # positional_embedding shape doesn't match the trained checkpoint.
+        k_scenarios = env_config.get("k_scenarios", 1)
+        scenario_length = env_config.get("scenario_length", 91)
+        train_horizon = config.get("horizon", scenario_length * k_scenarios)
 
         cmd = [
             sys.executable,
@@ -54,6 +60,19 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             *(["--eval.map-dir", str(map_dir)] if map_dir else []),
             "--eval.num-maps",
             str(eval_config.get("num_maps", 20)),
+            "--env.k-scenarios",
+            str(k_scenarios),
+            "--env.scenario-length",
+            str(scenario_length),
+            "--train.horizon",
+            str(train_horizon),
+            # For eval we want stop-on-goal, not respawn (the training default).
+            # With respawn, `score` counts goal-reachings per scenario and varies
+            # with spawn luck; ada_delta_score becomes dominated by spawn noise.
+            # With stop, score is 0/1 per (agent, scenario) and ada_delta_score
+            # is the clean per-scenario success-rate delta.
+            "--env.goal-behavior",
+            "2",
             "--env.conditioning.type",
             conditioning_type,
             "--env.conditioning.collision-weight-lb",
@@ -95,14 +114,13 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
         if not (hasattr(logger, "wandb") and logger.wandb):
             return
 
-        log_data = {
-            "eval/human_replay_collision_rate": metrics.get("collision_rate", 0),
-            "eval/human_replay_offroad_rate": metrics.get("offroad_rate", 0),
-            "eval/human_replay_completion_rate": metrics.get("completion_rate", 0),
-            "eval/human_replay_score": metrics.get("score", 0),
-        }
+        # Forward every metric the evaluator emitted under eval/human_replay_*.
+        # This includes `<key>_std` (variance across rollouts), eval-scale metadata
+        # (n_rollouts, n_agents_per_rollout, n_total_evals), and the full
+        # ada_delta_*/scenario_* family without an explicit allow-list.
+        log_data = {}
         for k, v in metrics.items():
-            if k.startswith("ada_delta_") or k.startswith("first_scenario_") or k.startswith("last_scenario_"):
+            if isinstance(v, (int, float)):
                 log_data[f"eval/human_replay_{k}"] = v
         logger.wandb.log(log_data, step=global_step)
 
