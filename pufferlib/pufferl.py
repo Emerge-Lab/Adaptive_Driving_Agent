@@ -622,7 +622,15 @@ class PuffeRL:
             prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
             mb_prio = (self.segments * prio_probs[idx, None]) ** -anneal_beta
-            mb_obs = self.observations[idx]
+            # When cpu_offload=True, self.observations lives on CPU but `idx`
+            # is on the training device (GPU). PyTorch refuses cross-device
+            # fancy indexing, so move the index to CPU for the gather, then
+            # ship the resulting minibatch to the device. Buffer was allocated
+            # with pin_memory=True (see __init__) so the H2D copy is fast.
+            if config["cpu_offload"]:
+                mb_obs = self.observations[idx.cpu()].to(device, non_blocking=True)
+            else:
+                mb_obs = self.observations[idx]
             mb_actions = self.actions[idx]
             mb_logprobs = self.logprobs[idx]
             mb_rewards = self.rewards[idx]
