@@ -277,6 +277,33 @@ class PuffeRL:
 
         self.optimizer = optimizer
 
+        # ---- Resume optimizer / epoch / global_step from trainer_state.pt ----
+        # When --load-model-path points at a checkpoint that has a sibling
+        # trainer_state.pt (which the trainer writes alongside every model
+        # checkpoint), restore optimizer momentum + counters so the resumed
+        # run continues mid-cosine instead of warm-restarting at peak LR with
+        # cold Adam moments.
+        resume_epoch = 0
+        resume_global_step = 0
+        load_path = config.get("load_model_path")
+        if load_path:
+            state_path = os.path.join(os.path.dirname(load_path), "trainer_state.pt")
+            if os.path.exists(state_path):
+                try:
+                    # weights_only=False: trainer_state.pt contains optimizer
+                    # state (with class refs), not just tensors.
+                    saved = torch.load(state_path, map_location=config["device"], weights_only=False)
+                    optimizer.load_state_dict(saved["optimizer_state_dict"])
+                    resume_epoch = int(saved.get("update", 0))
+                    resume_global_step = int(saved.get("global_step", 0))
+                    print(
+                        f"[trainer-state] Resumed optimizer state from {state_path}\n"
+                        f"[trainer-state]   epoch={resume_epoch}  global_step={resume_global_step}",
+                        flush=True,
+                    )
+                except Exception as e:
+                    print(f"[trainer-state] WARNING: could not load {state_path}: {e}", flush=True)
+
         # Logging
         self.logger = logger
         if logger is None:
@@ -294,9 +321,19 @@ class PuffeRL:
                 silent=True,
             )
 
-        # Learning rate scheduler
+        # Learning rate scheduler — if resuming, advance to the saved epoch
+        # position so cosine annealing continues smoothly.
         epochs = config["total_timesteps"] // config["batch_size"]
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+        last_epoch_arg = -1
+        if resume_epoch > 0:
+            # CosineAnnealingLR requires `initial_lr` in each param_group when
+            # last_epoch != -1; old optimizer states sometimes lack it.
+            for group in optimizer.param_groups:
+                group.setdefault("initial_lr", config["learning_rate"])
+            last_epoch_arg = resume_epoch - 1  # next .step() lands on resume_epoch
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=epochs, last_epoch=last_epoch_arg
+        )
         self.total_epochs = epochs
 
         # Automatic mixed precision
@@ -310,9 +347,9 @@ class PuffeRL:
         # Initializations
         self.config = config
         self.vecenv = vecenv
-        self.epoch = 0
-        self.global_step = 0
-        self.last_log_step = 0
+        self.epoch = resume_epoch
+        self.global_step = resume_global_step
+        self.last_log_step = resume_global_step
         self.last_log_time = time.time()
         self.start_time = time.time()
         self.utilization = Utilization()
@@ -1252,9 +1289,12 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         policy = model.to(local_rank)
 
     if args["neptune"]:
-        logger = NeptuneLogger(args)
+        logger = NeptuneLogger(args, load_id=args.get("load_id"))
     elif args["wandb"]:
-        logger = WandbLogger(args)
+        # Pass load_id so the wandb logger resumes the existing run instead
+        # of creating a fresh one. WandbLogger uses resume="allow", so wandb
+        # picks up where the original run left off (history, name, tags).
+        logger = WandbLogger(args, load_id=args.get("load_id"))
 
     train_config = dict(
         **args["train"],
@@ -1262,6 +1302,10 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         eval=args.get("eval", {}),
         env_config=args.get("env", {}),
         policy_architecture=args.get("policy_architecture", "Recurrent"),
+        # Surface load paths so PuffeRL can resume optimizer/scheduler state
+        # from a sibling trainer_state.pt when --load-model-path is set.
+        load_model_path=args.get("load_model_path"),
+        load_id=args.get("load_id"),
     )
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 

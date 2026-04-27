@@ -260,6 +260,10 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         if human_replay:
             env_kwargs["co_player_enabled"] = False
             env_kwargs["max_controlled_agents"] = 1
+            # Match the eval subprocess: stop-on-goal so the rendered agent
+            # halts when it reaches the goal instead of respawning. Keeps
+            # renders semantically aligned with the eval/human_replay_* metrics.
+            env_kwargs["goal_behavior"] = 2
             if "adaptive" in env_name:
                 env_kwargs["human_replay_mode"] = True
 
