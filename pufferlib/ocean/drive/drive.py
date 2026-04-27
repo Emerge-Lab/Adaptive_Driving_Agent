@@ -65,6 +65,9 @@ class Drive(pufferlib.PufferEnv):
         use_all_maps=False,
         report_all_scenarios=False,
         map_seed=None,
+        external_co_player_actions=False,
+        worker_idx=0,
+        co_player_conditioning_shm=None,
     ):
         # env
         self.dt = dt
@@ -185,6 +188,16 @@ class Drive(pufferlib.PufferEnv):
         self.population_play = co_player_enabled
         self.num_agents = num_agents
         self.num_ego_agents = num_ego_agents if self.population_play else num_agents
+        # When True, co-player actions are filled into self.actions[co_player_ids]
+        # by the *main* process (centralized GPU inference). Worker's step()
+        # then skips the local CPU forward in get_co_player_actions().
+        self.external_co_player_actions = bool(external_co_player_actions)
+        self.worker_idx = int(worker_idx)
+        # SHM view (numpy) of the per-worker conditioning slice. Env writes
+        # sampled conditioning here so the main process can read it before
+        # running the centralized co-player forward. None when conditioning
+        # is disabled or when running the per-worker CPU path.
+        self.co_player_conditioning_shm = co_player_conditioning_shm
 
         # Co-player conditioning setup
         self.co_player_conditioning = co_player_policy.get("conditioning")
@@ -278,10 +291,18 @@ class Drive(pufferlib.PufferEnv):
         if self.population_play:
             self.co_player_policy_name = co_player_policy.get("policy_name")
             self.co_player_rnn_name = co_player_policy.get("rnn_name")
-            self.co_player_policy = co_player_policy.get("co_player_policy_func")
-            # Co-player runs in forked subprocess - must stay on CPU (CUDA doesn't work with fork)
-            self.co_player_device = torch.device("cpu")
-            self._set_co_player_state()
+            if self.external_co_player_actions:
+                # Main owns the policy + state on GPU; worker only needs the
+                # action slots (co_player_ids) to be filled via shared memory
+                # before vec_step. Skip the per-worker CPU model entirely.
+                self.co_player_policy = None
+                self.co_player_device = None
+            else:
+                self.co_player_policy = co_player_policy.get("co_player_policy_func")
+                # Co-player runs in forked subprocess - must stay on CPU
+                # (CUDA doesn't work with fork)
+                self.co_player_device = torch.device("cpu")
+                self._set_co_player_state()
 
         super().__init__(buf=buf)
         if self.population_play:
@@ -357,7 +378,13 @@ class Drive(pufferlib.PufferEnv):
         info = []
         if self.population_play:
             info.append(self.ego_ids)
-            self._reset_co_player_state()
+            if self.external_co_player_actions:
+                # Main owns the policy state. Re-sample conditioning so the
+                # SHM reflects the new env state for the next forward pass.
+                if self.co_player_condition_type and self.co_player_condition_type != "none":
+                    self._set_co_player_conditioning()
+            else:
+                self._reset_co_player_state()
         self.tick = 0
         return self.observations, info
 
@@ -580,6 +607,20 @@ class Drive(pufferlib.PufferEnv):
             else:
                 self.cached_conditioning_array = np.empty((0, len(conditioning_dims)), dtype=np.float32)
 
+        # Mirror the freshly-sampled conditioning into the shared-memory
+        # buffer so the main process (centralized co-player on GPU) sees the
+        # latest values before its next forward pass. SHM rows beyond
+        # `total_co_players` are left at whatever value they previously held;
+        # main only reads rows for active co-players.
+        if (
+            self.co_player_conditioning_shm is not None
+            and self.cached_conditioning_array.shape[1] > 0
+            and self.total_co_players > 0
+        ):
+            shm = self.co_player_conditioning_shm
+            n = min(self.total_co_players, shm.shape[0])
+            shm[:n, :] = self.cached_conditioning_array[:n, :]
+
     def _aggregate_scenario_metrics(self, scenario_infos):
         """Aggregate metrics from all infos collected during a scenario."""
         if not scenario_infos:
@@ -636,9 +677,12 @@ class Drive(pufferlib.PufferEnv):
 
         self.actions[self.ego_ids] = actions
 
-        if self.population_play:
+        if self.population_play and not self.external_co_player_actions:
             co_player_actions = self.get_co_player_actions()
             self.actions[self.co_player_ids] = co_player_actions
+        # When external_co_player_actions=True, the main process has already
+        # written co-player actions into self.actions[co_player_ids] via the
+        # shared-memory action buffer; nothing to do here.
 
         binding.vec_step(self.c_envs)
 
@@ -681,9 +725,17 @@ class Drive(pufferlib.PufferEnv):
 
             self.current_scenario = (self.current_scenario + 1) % self.k_scenarios
 
-            # Reset coplayer LSTM state at scenario boundary so coplayer behaves consistently
+            # Reset coplayer LSTM/Transformer state at scenario boundary so
+            # the partner behaves consistently.
             if self.population_play:
-                self._reset_co_player_state()
+                if self.external_co_player_actions:
+                    # Main owns the policy state, but the env still owns
+                    # conditioning sampling — resample now so the next
+                    # forward pass on the main side uses fresh values.
+                    if self.co_player_condition_type and self.co_player_condition_type != "none":
+                        self._set_co_player_conditioning()
+                else:
+                    self._reset_co_player_state()
 
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0

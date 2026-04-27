@@ -427,8 +427,11 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
                 k = k.view(n_idx, T, H, D).transpose(1, 2)
                 v = v.view(n_idx, T, H, D).transpose(1, 2)
 
-                state["k_cache"][li][indices] = k
-                state["v_cache"][li][indices] = v
+                # Defensive cast: under autocast or mixed-precision, k/v can
+                # come out in a different dtype than the cache; PyTorch refuses
+                # cross-dtype `index_put`. Match the cache's dtype.
+                state["k_cache"][li][indices] = k.to(state["k_cache"][li].dtype)
+                state["v_cache"][li][indices] = v.to(state["v_cache"][li].dtype)
 
                 attn_out = F.scaled_dot_product_attention(
                     q, k, v, attn_mask=causal_mask, is_causal=False

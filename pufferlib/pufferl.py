@@ -310,15 +310,50 @@ class PuffeRL:
             self.logger = NoLogger(config)
 
         if self.population_play:
+            # Under external_co_player_actions, driver_env.co_player_policy is
+            # None (worker doesn't load it); the GPU-bound copy lives on the
+            # vecenv as co_player_policy_func.
+            export_co_player = (
+                getattr(vecenv, "co_player_policy_func", None) or vecenv.driver_env.co_player_policy
+            )
             co_player_path = f"resources/drive/{config['env']}_co_player.bin"
             export_args = {"env_name": config["env"], "path": co_player_path, **config}
             export(
                 args=export_args,
                 env_name=config["env"],
                 vecenv=vecenv,
-                policy=vecenv.driver_env.co_player_policy,
+                policy=export_co_player,
                 path=co_player_path,
                 silent=True,
+            )
+
+        # ---- Centralized GPU co-player inference (when enabled) ------------
+        self.external_co_player = bool(
+            self.population_play
+            and getattr(vecenv, "co_player_policy_func", None) is not None
+            and config.get("env_config", {}).get("external_co_player_actions", False)
+        )
+        if self.external_co_player:
+            co_policy = vecenv.co_player_policy_func.to(config["device"])
+            co_policy.eval()
+            self.co_player_policy = co_policy
+            self.co_player_conditioning_dims = getattr(vecenv, "co_player_conditioning_dims", 0)
+            # One state dict per worker (each worker holds its own slice of
+            # co_players; the per-worker batch size is num_co_players_per_env).
+            num_co_per_worker = vecenv.driver_env.num_co_players
+            num_workers = vecenv.num_workers
+            self._co_player_num_per_worker = num_co_per_worker
+            # Per-worker state dicts. Start each as an empty dict so that
+            # `forward_eval` lazily allocates the K/V cache on first call with
+            # the correct (obs-derived) dtype — avoiding a cache dtype that
+            # mismatches the layer-output dtype during reset_eval_state's
+            # cache-prime path.
+            self.co_player_state = {w: {} for w in range(num_workers)}
+            print(
+                f"[external co-player] Loaded co-player on {device}; "
+                f"per-worker batch={num_co_per_worker}, conditioning_dims={self.co_player_conditioning_dims}, "
+                f"num_workers={num_workers}",
+                flush=True,
             )
 
         # Learning rate scheduler — if resuming, advance to the saved epoch
@@ -373,6 +408,92 @@ class PuffeRL:
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
+    def _fill_external_co_player_actions(self, full_obs, ego_ids_per_env, env_id, dones, truncs):
+        """Centralized co-player inference on GPU.
+
+        Workers receive co_player actions via the shared `actions` SHM buffer
+        (filled here) instead of running per-worker CPU forward passes.
+
+        Args:
+            full_obs: numpy obs from vecenv.recv(), shape
+                (num_agents_per_recv_batch, *obs_shape). Includes BOTH ego
+                and co-player rows; we slice the co-player rows by complement
+                of ego_ids_per_env.
+            ego_ids_per_env: list[list[int]] — per-env ego indices (info dict).
+            env_id: numpy array of agent indices for the current recv batch.
+            dones, truncs: numpy bool per-agent done/trunc flags.
+        """
+        import numpy as np
+        import torch
+
+        device = self.config["device"]
+        agents_per_worker = self.vecenv.agents_per_worker
+        num_envs_per_worker = getattr(self.vecenv, "envs_per_worker", 1)
+        num_agents_per_env = agents_per_worker // num_envs_per_worker
+        # batch_size > 1 packs multiple workers into one recv; we handle the
+        # batch_size=1 case (the production setup) here. Generalizing to
+        # batch_size>1 is straightforward (loop over workers in the batch).
+        batch_size = self.vecenv.batch_size
+        if batch_size != 1:
+            raise NotImplementedError(
+                "external_co_player_actions currently only supports batch_size=1; "
+                f"got batch_size={batch_size}."
+            )
+
+        # Map env_id back to a worker index so we know which co_player_state
+        # to use and which row of vecenv.actions to write to.
+        worker_id = int(env_id[0]) // agents_per_worker
+
+        # Build co_player_ids = all_local_ids \ ego_ids (within this env).
+        ego_ids = ego_ids_per_env[0] if ego_ids_per_env else []
+        ego_set = {int(i) for i in ego_ids}
+        all_ids = list(range(num_agents_per_env))
+        co_ids = [i for i in all_ids if i not in ego_set]
+        if not co_ids:
+            return  # no co-players in this env this step
+
+        # Slice the co-player observations.
+        co_obs_np = full_obs[co_ids]
+        co_obs = torch.as_tensor(co_obs_np, device=device)
+        if self.co_player_conditioning_dims > 0:
+            # Pull this worker's conditioning slice from the SHM buffer the
+            # env wrote at scenario boundaries (or at env init). Insert right
+            # after the base ego_features — matches drive.py's
+            # `_add_co_player_conditioning` exactly.
+            cond_shm = self.vecenv.co_player_conditioning  # (num_workers, max_co, cdim)
+            cond_np = cond_shm[worker_id, : len(co_ids), :]  # only the rows we'll use
+            cond = torch.as_tensor(cond_np, device=device, dtype=co_obs.dtype)
+            from pufferlib.ocean.drive import binding as _b
+            base_ego_dim = (
+                _b.EGO_FEATURES_JERK
+                if self.vecenv.driver_env.dynamics_model == "jerk"
+                else _b.EGO_FEATURES_CLASSIC
+            )
+            co_obs = torch.cat([co_obs[:, :base_ego_dim], cond, co_obs[:, base_ego_dim:]], dim=1)
+
+        # Reset cache rows for any co-players that just terminated (stay
+        # consistent with the per-worker reset semantics).
+        co_dones = (dones | truncs)[co_ids]
+        if co_dones.any():
+            done_idx = torch.as_tensor(np.where(co_dones)[0], device=device, dtype=torch.long)
+            self.co_player_policy.reset_eval_state(self.co_player_state[worker_id], done_indices=done_idx)
+
+        with torch.no_grad():
+            logits, _ = self.co_player_policy.forward_eval(co_obs, self.co_player_state[worker_id])
+
+        # Match the per-worker code path: argmax for discrete actions.
+        if isinstance(logits, tuple):
+            co_action = torch.cat([l.argmax(dim=-1, keepdim=True) for l in logits], dim=-1)
+        else:
+            co_action = logits.argmax(dim=-1)
+        co_action_np = co_action.cpu().numpy().reshape(len(co_ids), -1)
+
+        # Write directly to the worker's slot in the shared-memory action
+        # buffer. The worker's env.step() will call vec_step using these
+        # actions because it has external_co_player_actions=True.
+        co_action_view = self.vecenv.actions[worker_id]  # shape (agents_per_worker, *atn_shape)
+        co_action_view[co_ids] = co_action_np.reshape((len(co_ids),) + co_action_view.shape[1:])
+
     def evaluate(self):
         profile = self.profile
         epoch = self.epoch
@@ -406,6 +527,11 @@ class PuffeRL:
                 batch_size = self.vecenv.batch_size
                 # Filter info to get only the ego_ids lists (not the metrics dicts)
                 ego_ids_per_env = [item for item in info if isinstance(item, list)]
+
+                if self.external_co_player:
+                    # Run co-player forward on GPU before the ego-only slicing
+                    # below (we need the FULL obs array to extract co-player obs).
+                    self._fill_external_co_player_actions(o, ego_ids_per_env, env_id, d, t)
 
                 if batch_size > 1:
                     total_agents = len(o)
