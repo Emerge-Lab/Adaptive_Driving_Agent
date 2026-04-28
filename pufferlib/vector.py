@@ -415,7 +415,9 @@ class Multiprocessing:
         # boundaries) can deposit values for the main process to read before
         # each forward pass. Sized to the worst-case `co_players_per_worker`.
         env_k0 = env_kwargs[0] if env_kwargs else {}
-        external_coplayer_flag = env_k0.get("external_co_player_actions", False) and env_k0.get("co_player_enabled", False)
+        external_coplayer_flag = env_k0.get("external_co_player_actions", False) and env_k0.get(
+            "co_player_enabled", False
+        )
         co_player_conditioning_dim = 0
         if external_coplayer_flag:
             cond = env_k0.get("co_player_policy", {}).get("conditioning", {}) or {}

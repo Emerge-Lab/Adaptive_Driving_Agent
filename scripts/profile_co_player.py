@@ -56,9 +56,7 @@ def build_co_player_policy(
         "jerk": binding.EGO_FEATURES_JERK,
     }[dynamics_model]
     conditioning_dims = (
-        (3 if reward_conditioned else 0)
-        + (1 if entropy_conditioned else 0)
-        + (1 if discount_conditioned else 0)
+        (3 if reward_conditioned else 0) + (1 if entropy_conditioned else 0) + (1 if discount_conditioned else 0)
     )
     ego_features += conditioning_dims
     max_road_objects = binding.MAX_ROAD_SEGMENT_OBSERVATIONS
@@ -140,9 +138,15 @@ def main():
     rng = np.random.default_rng(0)
     obs_np = rng.standard_normal((args.num_co_players, num_obs), dtype=np.float32)
     # Last feature of each road object is categorical [0, 7); fill with valid ints.
-    ego_features = num_obs - (binding.MAX_AGENTS - 1) * binding.PARTNER_FEATURES - binding.MAX_ROAD_SEGMENT_OBSERVATIONS * binding.ROAD_FEATURES
+    ego_features = (
+        num_obs
+        - (binding.MAX_AGENTS - 1) * binding.PARTNER_FEATURES
+        - binding.MAX_ROAD_SEGMENT_OBSERVATIONS * binding.ROAD_FEATURES
+    )
     road_start = ego_features + (binding.MAX_AGENTS - 1) * binding.PARTNER_FEATURES
-    road_view = obs_np[:, road_start:].reshape(args.num_co_players, binding.MAX_ROAD_SEGMENT_OBSERVATIONS, binding.ROAD_FEATURES)
+    road_view = obs_np[:, road_start:].reshape(
+        args.num_co_players, binding.MAX_ROAD_SEGMENT_OBSERVATIONS, binding.ROAD_FEATURES
+    )
     road_view[:, :, -1] = rng.integers(0, 7, size=road_view.shape[:2])
     obs = torch.from_numpy(obs_np).to(device).to(dtype)
     state = _make_state(args.num_co_players, args.horizon, 256, device, dtype)
@@ -181,8 +185,7 @@ def main():
         enc_elapsed = time.perf_counter() - t0
     enc_ms = 1000.0 * enc_elapsed / args.iters
     print(
-        f"encode_observations alone: {enc_ms:.2f} ms/call "
-        f"({enc_ms / per_call_ms * 100:.1f}% of forward_eval)",
+        f"encode_observations alone: {enc_ms:.2f} ms/call ({enc_ms / per_call_ms * 100:.1f}% of forward_eval)",
         flush=True,
     )
 

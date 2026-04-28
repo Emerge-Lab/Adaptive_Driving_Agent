@@ -217,7 +217,8 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
 
     int num_coplayers = num_agents - num_ego_agents;
     // Silenced: noisy during normal training. Re-enable for debug.
-    // printf("Creating worlds for %d total agents (%d egos, %d co-players)\n", num_agents, num_ego_agents, num_coplayers);
+    // printf("Creating worlds for %d total agents (%d egos, %d co-players)\n", num_agents, num_ego_agents,
+    // num_coplayers);
 
     // Create shuffled agent role array (0 = coplayer, 1 = ego)
     int *agent_roles = malloc(num_agents * sizeof(int));

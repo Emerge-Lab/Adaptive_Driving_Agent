@@ -374,9 +374,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
 
     def _make_kv_cache(self, batch_size, device, dtype):
         return [
-            torch.zeros(
-                batch_size, self.num_heads, self.horizon, self.head_dim, device=device, dtype=dtype
-            )
+            torch.zeros(batch_size, self.num_heads, self.horizon, self.head_dim, device=device, dtype=dtype)
             for _ in range(self.num_layers)
         ]
 
@@ -433,9 +431,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
                 state["k_cache"][li][indices] = k.to(state["k_cache"][li].dtype)
                 state["v_cache"][li][indices] = v.to(state["v_cache"][li].dtype)
 
-                attn_out = F.scaled_dot_product_attention(
-                    q, k, v, attn_mask=causal_mask, is_causal=False
-                )
+                attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=causal_mask, is_causal=False)
                 attn_out = attn_out.transpose(1, 2).reshape(n_idx, T, self.hidden_size)
                 attn_out = F.linear(attn_out, attn.out_proj.weight, attn.out_proj.bias)
                 x = layer_input + attn_out
@@ -491,10 +487,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         k_cache = state.get("k_cache")
         v_cache = state.get("v_cache")
         need_alloc = (
-            k_cache is None
-            or v_cache is None
-            or k_cache[0].shape[0] != B
-            or k_cache[0].shape[2] != self.horizon
+            k_cache is None or v_cache is None or k_cache[0].shape[0] != B or k_cache[0].shape[2] != self.horizon
         )
         if need_alloc:
             k_cache = self._make_kv_cache(B, device, hidden.dtype)

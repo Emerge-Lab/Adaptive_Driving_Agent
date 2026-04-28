@@ -703,8 +703,7 @@ class HumanReplayEvaluator:
 
             if collected_infos:
                 rollout_agg = {
-                    k: float(np.mean([d.get(k, 0) for d in collected_infos]))
-                    for k in collected_infos[0].keys()
+                    k: float(np.mean([d.get(k, 0) for d in collected_infos])) for k in collected_infos[0].keys()
                 }
             else:
                 rollout_agg = {}

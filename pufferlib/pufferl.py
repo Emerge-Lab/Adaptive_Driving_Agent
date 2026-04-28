@@ -313,9 +313,7 @@ class PuffeRL:
             # Under external_co_player_actions, driver_env.co_player_policy is
             # None (worker doesn't load it); the GPU-bound copy lives on the
             # vecenv as co_player_policy_func.
-            export_co_player = (
-                getattr(vecenv, "co_player_policy_func", None) or vecenv.driver_env.co_player_policy
-            )
+            export_co_player = getattr(vecenv, "co_player_policy_func", None) or vecenv.driver_env.co_player_policy
             co_player_path = f"resources/drive/{config['env']}_co_player.bin"
             export_args = {"env_name": config["env"], "path": co_player_path, **config}
             export(
@@ -366,9 +364,7 @@ class PuffeRL:
             for group in optimizer.param_groups:
                 group.setdefault("initial_lr", config["learning_rate"])
             last_epoch_arg = resume_epoch - 1  # next .step() lands on resume_epoch
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=epochs, last_epoch=last_epoch_arg
-        )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, last_epoch=last_epoch_arg)
         self.total_epochs = epochs
 
         # Automatic mixed precision
@@ -437,8 +433,7 @@ class PuffeRL:
         batch_size = self.vecenv.batch_size
         if batch_size != 1:
             raise NotImplementedError(
-                "external_co_player_actions currently only supports batch_size=1; "
-                f"got batch_size={batch_size}."
+                f"external_co_player_actions currently only supports batch_size=1; got batch_size={batch_size}."
             )
 
         # Map env_id back to a worker index so we know which co_player_state
@@ -487,10 +482,9 @@ class PuffeRL:
             cond_np = cond_shm[worker_id, : len(co_ids), :]  # only the rows we'll use
             cond = torch.as_tensor(cond_np, device=device, dtype=co_obs.dtype)
             from pufferlib.ocean.drive import binding as _b
+
             base_ego_dim = (
-                _b.EGO_FEATURES_JERK
-                if self.vecenv.driver_env.dynamics_model == "jerk"
-                else _b.EGO_FEATURES_CLASSIC
+                _b.EGO_FEATURES_JERK if self.vecenv.driver_env.dynamics_model == "jerk" else _b.EGO_FEATURES_CLASSIC
             )
             co_obs = torch.cat([co_obs[:, :base_ego_dim], cond, co_obs[:, base_ego_dim:]], dim=1)
 

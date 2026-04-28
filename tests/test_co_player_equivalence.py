@@ -28,7 +28,11 @@ def _make_obs(B, num_obs, seed=0):
     rng = np.random.default_rng(seed)
     obs = rng.standard_normal((B, num_obs), dtype=np.float32)
     # Last feature of each road object is categorical [0, 7); fix it.
-    ego_features = num_obs - (binding.MAX_AGENTS - 1) * binding.PARTNER_FEATURES - binding.MAX_ROAD_SEGMENT_OBSERVATIONS * binding.ROAD_FEATURES
+    ego_features = (
+        num_obs
+        - (binding.MAX_AGENTS - 1) * binding.PARTNER_FEATURES
+        - binding.MAX_ROAD_SEGMENT_OBSERVATIONS * binding.ROAD_FEATURES
+    )
     road_start = ego_features + (binding.MAX_AGENTS - 1) * binding.PARTNER_FEATURES
     road_view = obs[:, road_start:].reshape(B, binding.MAX_ROAD_SEGMENT_OBSERVATIONS, binding.ROAD_FEATURES)
     road_view[:, :, -1] = rng.integers(0, 7, size=road_view.shape[:2])
@@ -43,7 +47,9 @@ def _step_seq_legacy(policy, obs_seq, reset_at=None, reset_rows=None):
             if reset_at is not None and i == reset_at:
                 state["transformer_context"][reset_rows] = 0
             logits, value = policy._forward_eval_legacy(obs, state)
-            outs.append((tuple(l.clone() for l in logits) if isinstance(logits, tuple) else (logits.clone(),), value.clone()))
+            outs.append(
+                (tuple(l.clone() for l in logits) if isinstance(logits, tuple) else (logits.clone(),), value.clone())
+            )
     return outs
 
 
@@ -55,7 +61,9 @@ def _step_seq_cached(policy, obs_seq, reset_at=None, reset_rows=None):
             if reset_at is not None and i == reset_at:
                 policy.reset_eval_state(state, done_indices=reset_rows)
             logits, value = policy.forward_eval(obs, state)
-            outs.append((tuple(l.clone() for l in logits) if isinstance(logits, tuple) else (logits.clone(),), value.clone()))
+            outs.append(
+                (tuple(l.clone() for l in logits) if isinstance(logits, tuple) else (logits.clone(),), value.clone())
+            )
     return outs
 
 
@@ -105,7 +113,7 @@ def main():
     cases = []
     cases.append(("CPU fp32 / 200 steps / no reset", "cpu", torch.float32, 200, None, None, 5e-5))
     cases.append(("CPU bf16 / 200 steps / no reset", "cpu", torch.bfloat16, 200, None, None, 0.1))
-    cases.append(("CPU fp32 / 200 steps / reset@95",  "cpu", torch.float32, 200, 95, torch.tensor([3, 17, 42]), 5e-5))
+    cases.append(("CPU fp32 / 200 steps / reset@95", "cpu", torch.float32, 200, 95, torch.tensor([3, 17, 42]), 5e-5))
     if torch.cuda.is_available():
         cases.append(("CUDA fp32 / 200 steps / no reset", "cuda", torch.float32, 200, None, None, 5e-3))
         cases.append(("CUDA bf16 / 200 steps / no reset", "cuda", torch.bfloat16, 200, None, None, 0.5))

@@ -37,9 +37,12 @@ class Drive(nn.Module):
         base_ego_dim = binding.EGO_FEATURES_JERK if env.dynamics_model == "jerk" else binding.EGO_FEATURES_CLASSIC
         self.ego_dim = base_ego_dim + self.conditioning_dims
         cond_flags = []
-        if self.use_rc: cond_flags.append("reward(3)")
-        if self.use_ec: cond_flags.append("entropy(1)")
-        if self.use_dc: cond_flags.append("discount(1)")
+        if self.use_rc:
+            cond_flags.append("reward(3)")
+        if self.use_ec:
+            cond_flags.append("entropy(1)")
+        if self.use_dc:
+            cond_flags.append("discount(1)")
         cond_str = "+".join(cond_flags) if cond_flags else "none"
         print(
             f"[Drive policy] dynamics={env.dynamics_model} ego_dim={self.ego_dim} "
