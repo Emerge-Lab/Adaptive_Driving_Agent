@@ -379,10 +379,16 @@ class Drive(pufferlib.PufferEnv):
         if self.population_play:
             info.append(self.ego_ids)
             if self.external_co_player_actions:
-                # Main owns the policy state. Re-sample conditioning so the
-                # SHM reflects the new env state for the next forward pass.
-                if self.co_player_condition_type and self.co_player_condition_type != "none":
-                    self._set_co_player_conditioning()
+                # Pass the real co_player_ids so main does not have to
+                # guess by complement (which would include padding slots
+                # and pollute the shared KV cache).
+                info.append({"_external_co_player_ids": self.co_player_ids})
+                # Tell main to drop the K/V cache, mirroring OFF's
+                # `_reset_co_player_state()` here. Initial conditioning
+                # was written to SHM in `_set_env_variables` and stays
+                # valid across the episode (matching OFF, which doesn't
+                # re-sample at reset either).
+                info.append({"_external_reset_co_cache": True})
             else:
                 self._reset_co_player_state()
         self.tick = 0
@@ -726,14 +732,15 @@ class Drive(pufferlib.PufferEnv):
             self.current_scenario = (self.current_scenario + 1) % self.k_scenarios
 
             # Reset coplayer LSTM/Transformer state at scenario boundary so
-            # the partner behaves consistently.
+            # the partner behaves consistently. The OFF (per-worker) path
+            # does not re-sample conditioning here — it sticks with the
+            # values written to SHM at init/resample — so neither do we.
             if self.population_play:
                 if self.external_co_player_actions:
-                    # Main owns the policy state, but the env still owns
-                    # conditioning sampling — resample now so the next
-                    # forward pass on the main side uses fresh values.
-                    if self.co_player_condition_type and self.co_player_condition_type != "none":
-                        self._set_co_player_conditioning()
+                    # Signal main to drop the K/V cache so scenario N+1
+                    # starts fresh, mirroring the per-worker OFF path's
+                    # `_reset_co_player_state()` here.
+                    info.append({"_external_reset_co_cache": True})
                 else:
                     self._reset_co_player_state()
 
@@ -816,6 +823,8 @@ class Drive(pufferlib.PufferEnv):
 
         if self.population_play:
             info.append(self.ego_ids)
+            if self.external_co_player_actions:
+                info.append({"_external_co_player_ids": self.co_player_ids})
 
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 

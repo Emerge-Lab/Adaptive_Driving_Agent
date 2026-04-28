@@ -408,7 +408,7 @@ class PuffeRL:
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
-    def _fill_external_co_player_actions(self, full_obs, ego_ids_per_env, env_id, dones, truncs):
+    def _fill_external_co_player_actions(self, full_obs, info, env_id, dones, truncs):
         """Centralized co-player inference on GPU.
 
         Workers receive co_player actions via the shared `actions` SHM buffer
@@ -416,10 +416,13 @@ class PuffeRL:
 
         Args:
             full_obs: numpy obs from vecenv.recv(), shape
-                (num_agents_per_recv_batch, *obs_shape). Includes BOTH ego
-                and co-player rows; we slice the co-player rows by complement
-                of ego_ids_per_env.
-            ego_ids_per_env: list[list[int]] — per-env ego indices (info dict).
+                (num_agents_per_recv_batch, *obs_shape).
+            info: the raw info list from vecenv.recv(). Must contain a dict
+                with key "_external_co_player_ids" giving the actual list of
+                co-player agent indices (worker-local). Computing this from
+                complement-of-ego_ids is wrong: many slots are padding or
+                otherwise inactive, and forwarding garbage obs through them
+                pollutes the shared KV cache.
             env_id: numpy array of agent indices for the current recv batch.
             dones, truncs: numpy bool per-agent done/trunc flags.
         """
@@ -428,8 +431,6 @@ class PuffeRL:
 
         device = self.config["device"]
         agents_per_worker = self.vecenv.agents_per_worker
-        num_envs_per_worker = getattr(self.vecenv, "envs_per_worker", 1)
-        num_agents_per_env = agents_per_worker // num_envs_per_worker
         # batch_size > 1 packs multiple workers into one recv; we handle the
         # batch_size=1 case (the production setup) here. Generalizing to
         # batch_size>1 is straightforward (loop over workers in the batch).
@@ -442,15 +443,37 @@ class PuffeRL:
 
         # Map env_id back to a worker index so we know which co_player_state
         # to use and which row of vecenv.actions to write to.
-        worker_id = int(env_id[0]) // agents_per_worker
+        # For population_play, recv() returns ego-only agent ids
+        # (vecenv.ego_agent_ids), so divide by the per-worker ego count, not
+        # the full agent count.
+        ego_agents_per_worker = getattr(self.vecenv, "ego_agents_per_worker", agents_per_worker)
+        worker_id = int(env_id[0]) // ego_agents_per_worker
 
-        # Build co_player_ids = all_local_ids \ ego_ids (within this env).
-        ego_ids = ego_ids_per_env[0] if ego_ids_per_env else []
-        ego_set = {int(i) for i in ego_ids}
-        all_ids = list(range(num_agents_per_env))
-        co_ids = [i for i in all_ids if i not in ego_set]
+        # Pull the actual co_player_ids from info (the env knows them).
+        # Also check for the scenario-boundary cache reset signal.
+        co_ids = None
+        reset_cache = False
+        for item in info:
+            if isinstance(item, dict):
+                if "_external_co_player_ids" in item:
+                    co_ids = list(item["_external_co_player_ids"])
+                if item.get("_external_reset_co_cache"):
+                    reset_cache = True
+        if co_ids is None:
+            raise RuntimeError(
+                "external_co_player_actions=True but the env did not "
+                "publish '_external_co_player_ids' in info. Is drive.py up to date?"
+            )
         if not co_ids:
             return  # no co-players in this env this step
+
+        # Drop the cache at scenario boundaries — mirrors the per-worker
+        # OFF path's _reset_co_player_state() which fully reinits state.
+        # Replacing the dict makes forward_eval lazy-allocate fresh K/V on
+        # the next call, matching legacy behavior bit-for-bit at scenario
+        # boundaries.
+        if reset_cache:
+            self.co_player_state[worker_id] = {}
 
         # Slice the co-player observations.
         co_obs_np = full_obs[co_ids]
@@ -471,12 +494,9 @@ class PuffeRL:
             )
             co_obs = torch.cat([co_obs[:, :base_ego_dim], cond, co_obs[:, base_ego_dim:]], dim=1)
 
-        # Reset cache rows for any co-players that just terminated (stay
-        # consistent with the per-worker reset semantics).
-        co_dones = (dones | truncs)[co_ids]
-        if co_dones.any():
-            done_idx = torch.as_tensor(np.where(co_dones)[0], device=device, dtype=torch.long)
-            self.co_player_policy.reset_eval_state(self.co_player_state[worker_id], done_indices=done_idx)
+        # NOTE: the OFF (per-worker) path only resets cache at scenario
+        # boundary or reset(), never for individual done agents. So we
+        # don't reset per-done here either — it would diverge from OFF.
 
         with torch.no_grad():
             logits, _ = self.co_player_policy.forward_eval(co_obs, self.co_player_state[worker_id])
@@ -531,7 +551,7 @@ class PuffeRL:
                 if self.external_co_player:
                     # Run co-player forward on GPU before the ego-only slicing
                     # below (we need the FULL obs array to extract co-player obs).
-                    self._fill_external_co_player_actions(o, ego_ids_per_env, env_id, d, t)
+                    self._fill_external_co_player_actions(o, info, env_id, d, t)
 
                 if batch_size > 1:
                     total_agents = len(o)

@@ -435,12 +435,18 @@ class Multiprocessing:
                     dtype=np.float32,
                     buffer=self.shm["co_player_conditioning"],
                 )
-                # Each env_kwargs gets its worker's slice as a numpy view.
-                # Worker also needs its index so it knows which row to write.
+                # CRITICAL: pufferlib.vector.make() builds env_kwargs as
+                # `[env_kwargs] * num_envs`, which is a list of N references
+                # to the SAME dict. Mutating env_kwargs[i] modifies all
+                # entries. We have to replace each slot with a per-env
+                # copy before adding worker_idx / SHM-slice entries.
                 for i in range(len(env_kwargs)):
                     w_idx = i // envs_per_worker
-                    env_kwargs[i]["worker_idx"] = w_idx
-                    env_kwargs[i]["co_player_conditioning_shm"] = self.co_player_conditioning[w_idx]
+                    env_kwargs[i] = {
+                        **env_kwargs[i],
+                        "worker_idx": w_idx,
+                        "co_player_conditioning_shm": self.co_player_conditioning[w_idx],
+                    }
         self._co_player_conditioning_dim = co_player_conditioning_dim
 
         self.buf = dict(
