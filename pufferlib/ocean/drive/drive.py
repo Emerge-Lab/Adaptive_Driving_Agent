@@ -1013,9 +1013,14 @@ def _to_int32(v, default=0):
     return v
 
 
-def save_map_binary(map_data, output_file, unique_map_id):
-    trajectory_length = 91
-    """Saves map data in a binary format readable by C"""
+def save_map_binary(map_data, output_file, unique_map_id, trajectory_length=91):
+    """Saves map data in a binary format readable by C.
+
+    `trajectory_length` is how many frames per object/road to write. The
+    C reader is parametric on the per-binary `array_size` header, so any
+    value works. Default 91 matches the legacy WOMD/short-window setup;
+    nuplan scenes go up to 201 frames so pass `trajectory_length=201`
+    to capture the full data."""
     with open(output_file, "wb") as f:
         # Get metadata
         metadata = map_data.get("metadata", {})
@@ -1153,20 +1158,20 @@ def save_map_binary(map_data, output_file, unique_map_id):
             f.write(struct.pack("i", _to_int32(road.get("mark_as_expert", 0))))
 
 
-def load_map(map_name, unique_map_id, binary_output=None):
+def load_map(map_name, unique_map_id, binary_output=None, trajectory_length=91):
     """Loads a JSON map and optionally saves it as binary"""
     with open(map_name, "r") as f:
         map_data = json.load(f)
 
     if binary_output:
-        save_map_binary(map_data, binary_output, unique_map_id)
+        save_map_binary(map_data, binary_output, unique_map_id, trajectory_length=trajectory_length)
 
 
 def _process_single_map(args):
     """Worker function to process a single map file"""
-    i, map_path, binary_path = args
+    i, map_path, binary_path, trajectory_length = args
     try:
-        load_map(str(map_path), i, str(binary_path))
+        load_map(str(map_path), i, str(binary_path), trajectory_length=trajectory_length)
         return (i, map_path.name, True, None)
     except Exception as e:
         return (i, map_path.name, False, str(e))
@@ -1177,6 +1182,8 @@ def process_all_maps(
     max_maps=50_000,
     num_workers=None,
     shuffle=False,
+    trajectory_length=91,
+    output_subdir=None,
 ):
     """Process all maps and save them as binaries using multiprocessing
 
@@ -1196,7 +1203,7 @@ def process_all_maps(
 
     # Path to the training data
     data_dir = Path(data_folder)
-    dataset_name = data_dir.name
+    dataset_name = output_subdir if output_subdir is not None else data_dir.name
 
     # Create the binaries directory if it doesn't exist
     binary_dir = Path(f"resources/drive/binaries/{dataset_name}")
@@ -1214,7 +1221,7 @@ def process_all_maps(
     for i, map_path in enumerate(json_files[:max_maps]):
         binary_file = f"map_{i:03d}.bin"
         binary_path = binary_dir / binary_file
-        tasks.append((i, map_path, binary_path))
+        tasks.append((i, map_path, binary_path, trajectory_length))
 
     # Process maps in parallel with progress bar
     with Pool(num_workers) as pool:
