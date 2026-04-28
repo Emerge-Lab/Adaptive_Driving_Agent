@@ -5,8 +5,24 @@ set -e
 # Mirrors nuplan_transformer_local_k3.sh but loads each policy via
 # --load-model-path. New wandb runs created with `_resume` tag suffix.
 #
-# Caveats: same as nuplan_transformer_local_resume.sh. Optimizer/LR state
-# resets; cosine annealing restarts. If destabilizes, lower --train.learning-rate.
+# Runs out of /workspace/ADA-cp-gpu and enables BOTH new optimizations:
+#   --env.external-co-player-actions True : centralized GPU co-player forward
+#                                           (the big k=3 win — see equivalence
+#                                           test in /tmp/morning_summary.md)
+#   --train.cpu-offload True              : moves the obs buffer to pinned RAM
+#                                           so we can use nw=32 without GPU OOM
+#                                           (was OOM-bound at nw=20 on 32 GiB)
+# Combined: ~22x speedup over the original nw=16/no-flags baseline (110h ETA
+# becomes ~5h on a single GPU).
+#
+# RAM CAVEAT: cpu_offload puts ~120 GiB obs buffer in pinned RAM. With 4
+# concurrent k=3 runs on the box, that's 480 GiB of 503 total — borderline.
+# If you launch other large jobs on the box at the same time, the kernel may
+# OOM-kill (this is what happened when nw=48 was tried). Monitor `free -g`.
+#
+# Caveats: same resume notes as nuplan_transformer_local_resume.sh. Optimizer/
+# LR state resets; cosine annealing restarts. If destabilizes, lower
+# --train.learning-rate.
 #
 # Override GPUs:    GPUS="4 5 6 7" bash <script>     (default already 4-7)
 # Stop everything:  tmux kill-session -t adaptive_local_k3_resume
@@ -31,9 +47,11 @@ K_SCENARIOS=3
 SCENARIO_LENGTH=91
 HORIZON=$((K_SCENARIOS * SCENARIO_LENGTH))     # 273
 
-# Memory-fit knobs (must match original — nw=20 OOMed)
-NUM_WORKERS=16
-NUM_ENVS=16
+# With cpu_offload=True the obs buffer lives in pinned RAM, freeing the GPU
+# from the 32 GiB ceiling that previously forced nw=16 here. nw=32 fits easily
+# on a 5090 (peak ~18 GiB) and matches the adaptive ini default.
+NUM_WORKERS=32
+NUM_ENVS=32
 MINIBATCH_MULTIPLIER=200
 MAX_MINIBATCH_SIZE=54600
 
@@ -102,6 +120,7 @@ xvfb-run -a puffer train puffer_adaptive_drive \
   --train.horizon $HORIZON \
   --train.minibatch-multiplier $MINIBATCH_MULTIPLIER \
   --train.max-minibatch-size $MAX_MINIBATCH_SIZE \
+  --train.cpu-offload True \
   --train.checkpoint-interval 10 \
   --train.render-interval 10 \
   --train.seed $SEED \
@@ -124,6 +143,7 @@ xvfb-run -a puffer train puffer_adaptive_drive \
   --env.co-player-policy.conditioning.entropy-weight-ub $EUB \
   --env.co-player-policy.conditioning.discount-weight-lb $DLB \
   --env.co-player-policy.conditioning.discount-weight-ub $DISCOUNT_UB \
+  --env.external-co-player-actions True \
   --eval.map-dir resources/drive/binaries/nuplan \
   --eval.human-replay-eval True \
   --eval.eval-interval 10"

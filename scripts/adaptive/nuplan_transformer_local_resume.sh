@@ -6,6 +6,14 @@ set -e
 # loads each policy from disk via --load-model-path and uses a new wandb tag
 # suffixed _resume so the new runs are identifiable in wandb.
 #
+# Runs out of /workspace/ADA-cp-gpu (the worktree). The k=2 baseline already
+# saturates a 32 GiB GPU at nw=32 + torch.compile + minibatch_size=36400; adding
+# the centralized co-player on the same GPU (--env.external-co-player-actions
+# True) pushes past the GPU memory ceiling and OOMs during a train step. So we
+# do NOT enable that flag here — the modest k=2 speedup (~1.36x) isn't worth
+# the GPU memory pressure. cpu_offload also disabled (k=2 obs buffer fits on
+# GPU; offloading would just add H2D overhead).
+#
 # Caveats:
 #   - This creates NEW wandb runs (not a continuation of the killed ones).
 #     Find them in adaptive_aligned with the matching `_resume` tag and pair
@@ -14,6 +22,8 @@ set -e
 #     all reset. Cosine LR annealing will start from peak again. If that
 #     destabilizes a converged-ish policy, drop --train.learning-rate by ~3x.
 #   - The latest model_*.pt for each wid is selected at launch time.
+#   - The worktree's experiments/ is a symlink to /workspace/ADA/experiments,
+#     so checkpoint paths resolve correctly.
 #
 # Override GPUs:    GPUS="0 1 2 3" bash <script>     (default already 0-3)
 # Stop everything:  tmux kill-session -t adaptive_local_resume

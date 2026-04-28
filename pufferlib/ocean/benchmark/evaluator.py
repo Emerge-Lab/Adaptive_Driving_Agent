@@ -671,6 +671,30 @@ class HumanReplayEvaluator:
         per_rollout_scenario = []
         per_rollout_delta = []
 
+        # Per-(rollout, scenario, agent) success tracking. An agent is marked
+        # "successful in scenario s" when it terminates with a positive reward
+        # at any step of s — this is the goal-reach signal in stop-on-goal eval
+        # (goal_behavior=2). Agents that collide / go offroad terminate with
+        # negative reward; agents that time out stay non-terminal. The 0.5
+        # threshold is conservative: reward_goal default is 1.0 and the only
+        # other positive per-step reward is reward_lane_align (0.01-ish), so
+        # a single tick can't accumulate to 0.5 from lane reward alone.
+        goal_reward_threshold = float(
+            args.get("eval", {}).get("recovery_goal_reward_threshold", 0.5)
+        )
+        # CONTROL: when env var RECOVERY_CACHE_RESET_PER_SCENARIO=1, reset
+        # the policy's K/V cache (= "_fresh_state") at every scenario
+        # boundary. This kills any cross-scenario context the Transformer
+        # would have used, isolating "is the cache helping?" from "is the
+        # per-scenario obs alone enough?". Env var because pufferl's
+        # argparser doesn't auto-create new --eval.* flags.
+        cache_reset_per_scenario = os.environ.get(
+            "RECOVERY_CACHE_RESET_PER_SCENARIO", "0"
+        ) == "1"
+        if cache_reset_per_scenario:
+            print("[recovery] CONTROL mode: resetting K/V cache at every scenario boundary", flush=True)
+        success_arr = np.zeros((num_rollouts, k_scenarios, num_agents), dtype=bool)
+
         for rollout_idx in range(num_rollouts):
             obs, _ = puffer_env.reset()
             state = _fresh_state()
@@ -679,6 +703,8 @@ class HumanReplayEvaluator:
             delta_metrics = {}
 
             for scenario in range(k_scenarios):
+                if scenario > 0 and cache_reset_per_scenario:
+                    state = _fresh_state()
                 for time_idx in range(self.sim_steps):
                     with torch.no_grad():
                         ob_tensor = torch.as_tensor(obs).to(device)
@@ -690,6 +716,18 @@ class HumanReplayEvaluator:
                         action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
 
                     obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
+
+                    # Mark per-agent success this scenario: a +reward_goal spike
+                    # at any tick == goal reached. In stop-on-goal mode the env
+                    # does NOT set `dones` per agent (the agent just stops moving),
+                    # so we can't gate on dones. The only step-level reward that
+                    # crosses `goal_reward_threshold` is the goal reward itself
+                    # (lane_align is ~0.01/step, so even integrated it can't
+                    # reach 0.5 in one tick). We OR across the scenario so the
+                    # success flag sticks even if subsequent ticks are 0.
+                    rewards_arr = np.asarray(rewards).reshape(-1)
+                    success_arr[rollout_idx, scenario] |= (rewards_arr > goal_reward_threshold)
+
 
                     for info_dict in info_list:
                         if not isinstance(info_dict, dict):
@@ -726,5 +764,22 @@ class HumanReplayEvaluator:
         final["n_rollouts"] = num_rollouts
         final["n_agents_per_rollout"] = num_agents
         final["n_total_evals"] = num_rollouts * num_agents
+
+        # ----- Raw per-(rollout, agent, scenario) success log -----
+        # No fancy aggregation here. We dump the full success grid as a flat
+        # list of records, one per (rollout, agent), with success bools per
+        # scenario. Any conditional rate (e.g., P(succeed s_k | fail s_0)) is
+        # a one-liner over this data downstream.
+        #
+        # Schema: list of {"rollout": int, "agent": int, "s0": int, ...,
+        # "s_{k-1}": int} — one record per (rollout, agent) pair.
+        records = []
+        for r in range(num_rollouts):
+            for a in range(num_agents):
+                rec = {"rollout": int(r), "agent": int(a)}
+                for s_idx in range(k_scenarios):
+                    rec[f"s{s_idx}"] = int(success_arr[r, s_idx, a])
+                records.append(rec)
+        final["per_agent_success_log"] = records
 
         return final
