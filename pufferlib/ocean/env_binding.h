@@ -722,6 +722,27 @@ static PyObject *vec_close(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+// Render-mode helpers: stash env[0]->client into a global before vec_close so
+// raylib + ffmpeg pipe survive the map swap, then re-attach to env[0] of the
+// freshly built vec. Single-slot global: render envs are single-env.
+static PyObject *vec_donate_client(PyObject *self, PyObject *args) {
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec || vec->num_envs == 0) {
+        Py_RETURN_NONE;
+    }
+    c_donate_client(vec->envs[0]);
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_adopt_client(PyObject *self, PyObject *args) {
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec || vec->num_envs == 0) {
+        Py_RETURN_NONE;
+    }
+    c_adopt_client(vec->envs[0]);
+    Py_RETURN_NONE;
+}
+
 static PyObject *get_global_agent_state(PyObject *self, PyObject *args) {
     if (PyTuple_Size(args) != 7) {
         PyErr_SetString(PyExc_TypeError, "get_global_agent_state requires 7 arguments");
@@ -1056,6 +1077,10 @@ static PyMethodDef methods[] = {
     {"vec_render", vec_render, METH_VARARGS, "Render the vector of environments"},
     {"vec_set_video_suffix", vec_set_video_suffix, METH_VARARGS, "Set video filename suffix for headless rendering"},
     {"vec_close", vec_close, METH_VARARGS, "Close the vector of environments"},
+    {"vec_donate_client", vec_donate_client, METH_VARARGS,
+     "Stash env[0]->client into a global so it survives a subsequent vec_close (render only)"},
+    {"vec_adopt_client", vec_adopt_client, METH_VARARGS,
+     "Re-attach the previously donated client to env[0] of the new vec (render only)"},
     {"shared", (PyCFunction)my_shared, METH_VARARGS | METH_KEYWORDS, "Shared state"},
     {"get_global_agent_state", get_global_agent_state, METH_VARARGS, "Get global agent state"},
     {"vec_get_global_agent_state", vec_get_global_agent_state, METH_VARARGS, "Get agent state from vectorized env"},

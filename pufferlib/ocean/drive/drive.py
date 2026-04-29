@@ -68,6 +68,7 @@ class Drive(pufferlib.PufferEnv):
         external_co_player_actions=False,
         worker_idx=0,
         co_player_conditioning_shm=None,
+        map_rand_per_scenario=False,
     ):
         # env
         self.dt = dt
@@ -192,6 +193,21 @@ class Drive(pufferlib.PufferEnv):
         # by the *main* process (centralized GPU inference). Worker's step()
         # then skips the local CPU forward in get_co_player_actions().
         self.external_co_player_actions = bool(external_co_player_actions)
+        # When True (and adaptive_drive with k>1), at every scenario boundary
+        # we re-init the C envs with FRESH map_ids (and freshly sampled co-
+        # player conditioning). The agents are spawned on a brand-new map
+        # while the EGO POLICY's K/V cache (held in main / pufferl) is NOT
+        # touched — so past-scenario context is the only stable signal that
+        # carries across scenarios. This is the experimental setup that
+        # actually exercises in-context adaptation.
+        self.map_rand_per_scenario = bool(map_rand_per_scenario)
+        # When True, _reinit_envs_with_new_maps() donates env[0]->client to a
+        # C-side global before vec_close and re-attaches it to the new env[0]
+        # afterwards. This keeps the raylib window + ffmpeg pipe alive across
+        # the swap (raylib's CloseWindow → InitWindow cycle segfaults under
+        # xvfb), so a single mp4 captures all k scenarios with the maps
+        # rotating mid-stream. Set True only on the single-env render driver.
+        self._render_keep_client_on_swap = False
         self.worker_idx = int(worker_idx)
         # SHM view (numpy) of the per-worker conditioning slice. Env writes
         # sampled conditioning here so the main process can read it before
@@ -627,6 +643,86 @@ class Drive(pufferlib.PufferEnv):
             n = min(self.total_co_players, shm.shape[0])
             shm[:n, :] = self.cached_conditioning_array[:n, :]
 
+    def _reinit_envs_with_new_maps(self):
+        """Close + recreate the C envs with FRESHLY sampled map_ids.
+
+        Used in two places:
+          - The resample boundary (every `resample_frequency` ticks): full
+            episode reset, also resets `current_scenario` upstream of here.
+          - The scenario boundary when `map_rand_per_scenario=True`: only
+            the env's physical state changes (new map, new agents, new
+            partner conditioning); the EGO POLICY's K/V cache (in main /
+            pufferl) is NOT touched, so cross-scenario context survives.
+        """
+        if self._render_keep_client_on_swap:
+            binding.vec_donate_client(self.c_envs)
+        binding.vec_close(self.c_envs)
+        self._set_env_variables()
+        env_ids = []
+        seed = np.random.randint(0, 2**32 - 1)
+        for i in range(self.num_envs):
+            cur = self.agent_offsets[i]
+            nxt = self.agent_offsets[i + 1]
+            env_id = binding.env_init(
+                self.observations[cur:nxt],
+                self.actions[cur:nxt],
+                self.rewards[cur:nxt],
+                self.terminals[cur:nxt],
+                self.truncations[cur:nxt],
+                seed,
+                action_type=self._action_type_flag,
+                human_agent_idx=self.human_agent_idx,
+                dynamics_model=self.dynamics_model,
+                reward_vehicle_collision=self.reward_vehicle_collision,
+                reward_offroad_collision=self.reward_offroad_collision,
+                goal_radius=self.goal_radius,
+                goal_behavior=self.goal_behavior,
+                collision_behavior=self.collision_behavior,
+                offroad_behavior=self.offroad_behavior,
+                reward_goal=self.reward_goal,
+                reward_goal_post_respawn=self.reward_goal_post_respawn,
+                reward_lane_align=self.reward_lane_align,
+                reward_vel_align=self.reward_vel_align,
+                goal_speed=self.goal_speed,
+                goal_target_distance=self.goal_target_distance,
+                dt=self.dt,
+                scenario_length=(int(self.scenario_length) if self.scenario_length is not None else None),
+                max_controlled_agents=self.max_controlled_agents,
+                map_id=self.map_ids[i],
+                use_rc=self.reward_conditioned,
+                use_ec=self.entropy_conditioned,
+                use_dc=self.discount_conditioned,
+                collision_weight_lb=self.collision_weight_lb,
+                collision_weight_ub=self.collision_weight_ub,
+                offroad_weight_lb=self.offroad_weight_lb,
+                offroad_weight_ub=self.offroad_weight_ub,
+                goal_weight_lb=self.goal_weight_lb,
+                goal_weight_ub=self.goal_weight_ub,
+                entropy_weight_lb=self.entropy_weight_lb,
+                entropy_weight_ub=self.entropy_weight_ub,
+                discount_weight_lb=self.discount_weight_lb,
+                discount_weight_ub=self.discount_weight_ub,
+                max_agents=nxt - cur,
+                ini_file=self.ini_file,
+                population_play=self.population_play,
+                num_co_players=len(self.local_co_player_ids[i]),
+                co_player_ids=self.local_co_player_ids[i],
+                ego_agent_ids=self.local_ego_ids[i],
+                num_ego_agents=len(self.local_ego_ids[i]),
+                init_steps=self.init_steps,
+                init_mode=self.init_mode,
+                control_mode=self.control_mode,
+                map_dir=self.map_dir,
+                render_mode=self._render_mode_int,
+            )
+            env_ids.append(env_id)
+        self.c_envs = binding.vectorize(*env_ids)
+        if self._render_keep_client_on_swap:
+            binding.vec_adopt_client(self.c_envs)
+
+        binding.vec_reset(self.c_envs, seed)
+        self.terminals[:] = 1
+
     def _aggregate_scenario_metrics(self, scenario_infos):
         """Aggregate metrics from all infos collected during a scenario."""
         if not scenario_infos:
@@ -744,6 +840,17 @@ class Drive(pufferlib.PufferEnv):
                 else:
                     self._reset_co_player_state()
 
+            # MAP ROTATION per scenario: re-init the C envs with new map_ids
+            # while leaving the EGO POLICY's K/V cache (held in main) alone.
+            # This forces the policy to actually USE its past-scenario context
+            # because the current scene is genuinely new.
+            if (
+                self.adaptive_driving_agent
+                and self.map_rand_per_scenario
+                and self.current_scenario != 0  # we just incremented above; 0 means we already wrapped to next episode
+            ):
+                self._reinit_envs_with_new_maps()
+
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             will_resample = 1
@@ -757,69 +864,7 @@ class Drive(pufferlib.PufferEnv):
                     self.current_scenario_infos = []
                     self.current_scenario = 0
 
-                binding.vec_close(self.c_envs)
-                self._set_env_variables()
-                env_ids = []
-                seed = np.random.randint(0, 2**32 - 1)
-                for i in range(self.num_envs):
-                    cur = self.agent_offsets[i]
-                    nxt = self.agent_offsets[i + 1]
-                    env_id = binding.env_init(
-                        self.observations[cur:nxt],
-                        self.actions[cur:nxt],
-                        self.rewards[cur:nxt],
-                        self.terminals[cur:nxt],
-                        self.truncations[cur:nxt],
-                        seed,
-                        action_type=self._action_type_flag,
-                        human_agent_idx=self.human_agent_idx,
-                        dynamics_model=self.dynamics_model,
-                        reward_vehicle_collision=self.reward_vehicle_collision,
-                        reward_offroad_collision=self.reward_offroad_collision,
-                        goal_radius=self.goal_radius,
-                        goal_behavior=self.goal_behavior,
-                        collision_behavior=self.collision_behavior,
-                        offroad_behavior=self.offroad_behavior,
-                        reward_goal=self.reward_goal,
-                        reward_goal_post_respawn=self.reward_goal_post_respawn,
-                        reward_lane_align=self.reward_lane_align,
-                        reward_vel_align=self.reward_vel_align,
-                        goal_speed=self.goal_speed,
-                        goal_target_distance=self.goal_target_distance,
-                        dt=self.dt,
-                        scenario_length=(int(self.scenario_length) if self.scenario_length is not None else None),
-                        max_controlled_agents=self.max_controlled_agents,
-                        map_id=self.map_ids[i],
-                        use_rc=self.reward_conditioned,
-                        use_ec=self.entropy_conditioned,
-                        use_dc=self.discount_conditioned,
-                        collision_weight_lb=self.collision_weight_lb,
-                        collision_weight_ub=self.collision_weight_ub,
-                        offroad_weight_lb=self.offroad_weight_lb,
-                        offroad_weight_ub=self.offroad_weight_ub,
-                        goal_weight_lb=self.goal_weight_lb,
-                        goal_weight_ub=self.goal_weight_ub,
-                        entropy_weight_lb=self.entropy_weight_lb,
-                        entropy_weight_ub=self.entropy_weight_ub,
-                        discount_weight_lb=self.discount_weight_lb,
-                        discount_weight_ub=self.discount_weight_ub,
-                        max_agents=nxt - cur,
-                        ini_file=self.ini_file,
-                        population_play=self.population_play,
-                        num_co_players=len(self.local_co_player_ids[i]),
-                        co_player_ids=self.local_co_player_ids[i],
-                        ego_agent_ids=self.local_ego_ids[i],
-                        num_ego_agents=len(self.local_ego_ids[i]),
-                        init_steps=self.init_steps,
-                        init_mode=self.init_mode,
-                        control_mode=self.control_mode,
-                        map_dir=self.map_dir,
-                    )
-                    env_ids.append(env_id)
-                self.c_envs = binding.vectorize(*env_ids)
-
-                binding.vec_reset(self.c_envs, seed)
-                self.terminals[:] = 1
+                self._reinit_envs_with_new_maps()
 
         if self.population_play:
             info.append(self.ego_ids)

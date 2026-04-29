@@ -13,6 +13,7 @@
 #include "raymath.h"
 #include "rlgl.h"
 #include <time.h>
+#include <errno.h>
 #include "error.h"
 
 // Render modes
@@ -1878,6 +1879,27 @@ void init(Drive *env) {
 }
 
 void close_client(Client *client);
+
+// Render-mode helper: stash env->client across vec_close + re-vectorize so the
+// raylib window + ffmpeg pipe survive a map swap. Needed because raylib's
+// CloseWindow → InitWindow cycle segfaults on LoadModel under our xvfb-headless
+// setup (stale GL state). We keep a single global slot — the renderer is
+// always single-env, single-window. Multi-env render would need an array.
+static Client *g_donated_client = NULL;
+
+void c_donate_client(Drive *env) {
+    if (env->client != NULL) {
+        g_donated_client = env->client;
+        env->client = NULL;  // c_close now no-ops the client teardown.
+    }
+}
+
+void c_adopt_client(Drive *env) {
+    if (g_donated_client != NULL) {
+        env->client = g_donated_client;
+        g_donated_client = NULL;
+    }
+}
 
 void c_close(Drive *env) {
     if (env->client != NULL) {

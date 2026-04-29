@@ -289,10 +289,18 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         for view_mode in view_modes:
             render_env = load_env(env_name, render_args)
             try:
-                map_ids = getattr(render_env.driver_env, "map_ids", None)
+                driver = render_env.driver_env
+                map_ids = getattr(driver, "map_ids", None)
                 map_id = int(map_ids[0]) if map_ids is not None and len(map_ids) > 0 else 0
                 view = _VIEW_NAMES.get(int(view_mode), "view")
                 basename = f"epoch_{epoch:06d}_{mode}_k{k_scenarios}_map{map_id:03d}_{view}"
+
+                # Tell the env to keep raylib + ffmpeg alive across map swaps so
+                # the in-step _reinit_envs_with_new_maps() at scenario boundaries
+                # doesn't kill the render. Single mp4 captures all k scenarios
+                # with the maps rotating mid-stream.
+                if getattr(driver, "map_rand_per_scenario", False):
+                    driver._render_keep_client_on_swap = True
 
                 policy.eval()
                 rollout_loop(
