@@ -226,11 +226,13 @@ class Drive(pufferlib.PufferEnv):
 
         self._action_type_flag = 0 if action_type == "discrete" else 1
 
-        # Check if resources directory exists (check map_001 since some datasets start at 001)
-        binary_path = f"{map_dir}/map_001.bin"
+        # Check if resources directory exists (try both map_000 and map_001)
+        binary_path = f"{map_dir}/map_000.bin"
+        if not os.path.exists(binary_path):
+            binary_path = f"{map_dir}/map_001.bin"
         if not os.path.exists(binary_path):
             raise FileNotFoundError(
-                f"Required file {binary_path} not found. Please ensure the Drive maps are downloaded and installed correctly per docs."
+                f"Required files not found in {map_dir}. Please ensure the Drive maps are downloaded and installed correctly per docs."
             )
 
         # Check maps availability
