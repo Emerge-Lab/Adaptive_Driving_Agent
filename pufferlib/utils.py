@@ -480,8 +480,8 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
         env_config = config.get("env_config", config.get("env", {}))
         k_scenarios = env_config.get("k_scenarios", 2)
 
-        # Build command for human replay rendering
-        cmd = [
+        # Base command for human replay rendering (per-map --map-name added inside loop)
+        base_cmd = [
             "xvfb-run",
             "-a",
             "-s",
@@ -511,7 +511,20 @@ def render_human_replay_videos(config, policy_bin_path, output_dir, num_maps=5, 
         videos_to_log_world = []
         videos_to_log_agent = []
 
+        # Greptile fix: vary --map-name per iteration so the loop renders different maps
+        # rather than the same one repeatedly. Try both map_NNN.bin naming patterns
+        # (some datasets start at 000, others at 001).
+        map_dir = "resources/drive/binaries/training"
         for map_idx in range(num_maps):
+            map_path_a = os.path.join(map_dir, f"map_{map_idx:03d}.bin")
+            map_path_b = os.path.join(map_dir, f"map_{map_idx + 1:03d}.bin")
+            if os.path.exists(map_path_a):
+                cmd = base_cmd + ["--map-name", map_path_a]
+            elif os.path.exists(map_path_b):
+                cmd = base_cmd + ["--map-name", map_path_b]
+            else:
+                print(f"No map binary found for index {map_idx} in {map_dir}, skipping")
+                continue
             result = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True, text=True, timeout=600, env=env_vars)
 
             vids_exist = os.path.exists("resources/drive/output_topdown.mp4") and os.path.exists(
