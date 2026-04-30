@@ -70,6 +70,7 @@ class Drive(pufferlib.PufferEnv):
         co_player_conditioning_shm=None,
         map_rand_per_scenario=False,
         condition_rand_per_scenario=False,
+        entropy_curriculum_enabled=False,
     ):
         # env
         self.dt = dt
@@ -211,6 +212,18 @@ class Drive(pufferlib.PufferEnv):
         # introducing the agent-identity misalignment that map_rand causes.
         # Independent of map_rand_per_scenario.
         self.condition_rand_per_scenario = bool(condition_rand_per_scenario)
+        # When True, partner's entropy_weight_ub is annealed up over training:
+        # the user-passed co_player_entropy_weight_ub is treated as the FINAL
+        # value, and a 4-stage schedule scales it 0.05 → 0.20 → 0.50 → 1.0 of
+        # the final, advancing every 30 episodes per worker. The other
+        # conditioning dims (collision/offroad/discount) sample at full range
+        # throughout. Reason: we observed ada_delta peaking early in training
+        # then drifting toward 0 as scores saturate; the curriculum keeps the
+        # task in an informative-difficulty regime for longer.
+        self.entropy_curriculum_enabled = bool(entropy_curriculum_enabled)
+        self._entropy_curriculum_episodes_seen = 0
+        self._pending_entropy_log = None
+        self._entropy_curriculum_final_ub = None  # set lazily once we know co_player_entropy_weight_ub
         # When True, _reinit_envs_with_new_maps() donates env[0]->client to a
         # C-side global before vec_close and re-attaches it to the new env[0]
         # afterwards. This keeps the raylib window + ffmpeg pipe alive across
@@ -592,6 +605,25 @@ class Drive(pufferlib.PufferEnv):
 
     def _set_co_player_conditioning(self):
         """Sample and store conditioning values for each environment and update all caches"""
+        # Entropy curriculum: scale entropy_ub based on episodes seen so far.
+        # Schedule: stage 0 = 0.05*final, stage 1 = 0.20*final, stage 2 = 0.50*final,
+        # stage 3 = 1.00*final. Each stage = 30 episodes per worker (≈30 epochs
+        # given ~1 episode/epoch with our nw=32 nv=32 setup).
+        if self.entropy_curriculum_enabled and self.co_player_entropy_conditioned:
+            if self._entropy_curriculum_final_ub is None:
+                self._entropy_curriculum_final_ub = self.co_player_entropy_weight_ub
+            n = self._entropy_curriculum_episodes_seen
+            if n < 30:
+                ratio = 0.05
+            elif n < 60:
+                ratio = 0.20
+            elif n < 90:
+                ratio = 0.50
+            else:
+                ratio = 1.00
+            self.co_player_entropy_weight_ub = ratio * self._entropy_curriculum_final_ub
+            self._entropy_curriculum_episodes_seen += 1
+
         # Update co-player counts and indices
         self.num_co_players_per_env = np.array([len(ids) for ids in self.local_co_player_ids], dtype=np.int32)
         self.total_co_players = self.num_co_players_per_env.sum()
@@ -638,6 +670,23 @@ class Drive(pufferlib.PufferEnv):
                 self.cached_conditioning_array = self.env_conditioning[self.co_player_env_indices]
             else:
                 self.cached_conditioning_array = np.empty((0, len(conditioning_dims)), dtype=np.float32)
+
+        # Stash sampled entropy stats for wandb. Index of the entropy column
+        # within env_conditioning depends on which dims are active above:
+        #   reward(3) -> [collision, offroad, goal] then entropy then discount
+        if self.co_player_entropy_conditioned and self.env_conditioning.shape[1] > 0:
+            entropy_col = 3 if self.co_player_reward_conditioned else 0
+            sampled = self.env_conditioning[:, entropy_col]
+            self._pending_entropy_log = {
+                "co_player/entropy_weight_ub": float(self.co_player_entropy_weight_ub),
+                "co_player/entropy_sampled_mean": float(sampled.mean()),
+                "co_player/entropy_sampled_min": float(sampled.min()),
+                "co_player/entropy_sampled_max": float(sampled.max()),
+            }
+            if self.entropy_curriculum_enabled:
+                self._pending_entropy_log["co_player/entropy_curriculum_episodes"] = int(
+                    self._entropy_curriculum_episodes_seen
+                )
 
         # Mirror the freshly-sampled conditioning into the shared-memory
         # buffer so the main process (centralized co-player on GPU) sees the
@@ -813,6 +862,13 @@ class Drive(pufferlib.PufferEnv):
                 else:
                     # Non-adaptive mode: always append
                     info.append(log)
+
+            # Surface the entropy bound + sampled distribution that
+            # _set_co_player_conditioning stashed at the most recent reset.
+            # Drained on emit so each fresh sampling gets logged exactly once.
+            if self._pending_entropy_log is not None:
+                info.append(self._pending_entropy_log)
+                self._pending_entropy_log = None
 
         if self.tick % self.scenario_length == 0:
             if self.adaptive_driving_agent and self.current_scenario_infos:
