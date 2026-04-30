@@ -256,6 +256,13 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         if env_kwargs.get("num_ego_agents") is not None:
             env_kwargs["num_ego_agents"] = min(env_kwargs["num_ego_agents"], 32)
         env_kwargs["num_maps"] = min(env_kwargs.get("num_maps", 500), 500)
+        # Force per-env inline co-player inference for the render env. Training
+        # runs with external_co_player_actions=True expect PufferL's centralized
+        # GPU inference path to write co-player actions into shared memory each
+        # step. The render env is a single Serial env with no central path
+        # attached — without this override the SHM is never written, co-players
+        # freeze, and training-style renders show stuck partners.
+        env_kwargs["external_co_player_actions"] = False
 
         if human_replay:
             env_kwargs["co_player_enabled"] = False

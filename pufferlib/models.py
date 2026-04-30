@@ -528,13 +528,27 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             k_cache[li].index_copy_(2, slot_t, k)
             v_cache[li].index_copy_(2, slot_t, v)
 
-            attn_out = F.scaled_dot_product_attention(
-                q,
-                k_cache[li],
-                v_cache[li],
-                attn_mask=attn_mask,
-                is_causal=False,
-            )
+            if state.get("_probe_attention", False):
+                # Manual softmax attention so we can stash the weights. SDPA's
+                # functional form doesn't return weights. Math is identical to
+                # the SDPA call below but we capture (B, H, 1, horizon) weights
+                # per layer per step into state["_attn_weights"].
+                scale = 1.0 / math.sqrt(D)
+                logits = torch.matmul(q, k_cache[li].transpose(-2, -1)) * scale  # (B, H, 1, horizon)
+                logits = logits.masked_fill(~attn_mask, float("-inf"))
+                weights = F.softmax(logits, dim=-1)  # (B, H, 1, horizon)
+                attn_out = torch.matmul(weights, v_cache[li])  # (B, H, 1, D)
+                state.setdefault("_attn_weights", []).append(
+                    {"layer": li, "slot": int(slot_t.item()), "weights": weights.detach().cpu()}
+                )
+            else:
+                attn_out = F.scaled_dot_product_attention(
+                    q,
+                    k_cache[li],
+                    v_cache[li],
+                    attn_mask=attn_mask,
+                    is_causal=False,
+                )
             attn_out = attn_out.transpose(1, 2).reshape(B, 1, self.hidden_size)
             attn_out = F.linear(attn_out, attn.out_proj.weight, attn.out_proj.bias)
             x = x + attn_out

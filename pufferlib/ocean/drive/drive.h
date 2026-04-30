@@ -3324,8 +3324,16 @@ void draw_scene(Drive *env, Client *client, int mode, int obs_only, int lasers, 
                 Color car_color = GRAY; // default for static
                 if (is_expert)
                     car_color = GOLD; // expert replay
-                if (is_active_agent)
-                    car_color = BLUE; // policy-controlled
+                if (is_active_agent) {
+                    // Distinguish ego (magenta) from co-player (blue) so renders
+                    // make it obvious which policy controls which car. Without
+                    // this both look identical and behavioral debugging is
+                    // ambiguous.
+                    if (env->entities[i].is_ego)
+                        car_color = MAGENTA;
+                    else
+                        car_color = BLUE;
+                }
                 if (is_active_agent && env->entities[i].collision_state > 0)
                     car_color = RED;
                 rlSetLineWidth(3.0f);
@@ -3523,10 +3531,17 @@ void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_
     Color road = (Color){35, 35, 37, 255};
 
     if (env->render_mode == RENDER_HEADLESS) {
-        // Headless rendering mode
-        // Use ORIGINAL map dimensions for consistent resolution across scenarios
-        // This prevents resolution changes when k_scenarios > 1 and maps have different sizes
-        float render_map_height = client->original_map_height;
+        // Headless rendering mode.
+        // Use the CURRENT env's grid bounds for camera fovy. The original code
+        // used client->original_map_height (captured once at make_client) for
+        // "consistent resolution across scenarios", but with map_rand_per_scenario
+        // the new map can have entirely different bounds. Locking to scenario 0's
+        // dims meant new maps got cropped or off-centered, even though the env
+        // state was correct (ego scores stay ~0.99 in s_1; the agents are fine,
+        // just rendered outside the camera view). Read live so the camera always
+        // frames the actual current map.
+        float live_map_height = env->grid_map->top_left_y - env->grid_map->bottom_right_y;
+        float render_map_height = live_map_height > 0.0f ? live_map_height : client->original_map_height;
 
         Camera3D camera = {0};
 

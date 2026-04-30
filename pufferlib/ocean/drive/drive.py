@@ -69,6 +69,7 @@ class Drive(pufferlib.PufferEnv):
         worker_idx=0,
         co_player_conditioning_shm=None,
         map_rand_per_scenario=False,
+        condition_rand_per_scenario=False,
     ):
         # env
         self.dt = dt
@@ -201,6 +202,15 @@ class Drive(pufferlib.PufferEnv):
         # carries across scenarios. This is the experimental setup that
         # actually exercises in-context adaptation.
         self.map_rand_per_scenario = bool(map_rand_per_scenario)
+        # When True (only meaningful for k_scenarios > 1, with co_player_enabled):
+        # at every scenario boundary within an episode, partner conditioning is
+        # re-sampled from the configured ranges. The same partner POLICY weights
+        # are used, but the partner's effective behavior changes per scenario
+        # because conditioning shifts. This gives the ego policy a meaningful
+        # latent variable (partner type) to encode in its K/V cache without
+        # introducing the agent-identity misalignment that map_rand causes.
+        # Independent of map_rand_per_scenario.
+        self.condition_rand_per_scenario = bool(condition_rand_per_scenario)
         # When True, _reinit_envs_with_new_maps() donates env[0]->client to a
         # C-side global before vec_close and re-attaches it to the new env[0]
         # afterwards. This keeps the raylib window + ffmpeg pipe alive across
@@ -850,6 +860,21 @@ class Drive(pufferlib.PufferEnv):
                 and self.current_scenario != 0  # we just incremented above; 0 means we already wrapped to next episode
             ):
                 self._reinit_envs_with_new_maps()
+            # PARTNER CONDITIONING ROTATION per scenario: resample the partner's
+            # conditioning vector. The partner POLICY is unchanged but its
+            # effective behavior shifts (e.g. high-entropy stochastic vs
+            # low-entropy deterministic) — the ego must encode partner type
+            # from s_0 observations. Skipped when map_rand fired above
+            # (reinit already re-samples conditioning via _set_env_variables).
+            elif (
+                self.adaptive_driving_agent
+                and self.condition_rand_per_scenario
+                and self.population_play
+                and self.current_scenario != 0
+                and self.co_player_condition_type is not None
+                and self.co_player_condition_type != "none"
+            ):
+                self._set_co_player_conditioning()
 
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
