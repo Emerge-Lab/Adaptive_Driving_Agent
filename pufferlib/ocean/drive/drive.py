@@ -71,6 +71,8 @@ class Drive(pufferlib.PufferEnv):
         map_rand_per_scenario=False,
         condition_rand_per_scenario=False,
         entropy_curriculum_enabled=False,
+        k_eff_curriculum_enabled=False,
+        k_eff_curriculum_episodes_per_stage=30,
     ):
         # env
         self.dt = dt
@@ -224,6 +226,25 @@ class Drive(pufferlib.PufferEnv):
         self._entropy_curriculum_episodes_seen = 0
         self._pending_entropy_log = None
         self._entropy_curriculum_final_ub = None  # set lazily once we know co_player_entropy_weight_ub
+        # When True, the ego's K/V cache is reset at SOME within-episode
+        # scenario boundaries based on the curriculum stage. K_max is the
+        # configured `k_scenarios`; the curriculum has 3 stages of
+        # `k_eff_curriculum_episodes_per_stage` episodes each:
+        #   Stage 0: k_eff=1     (reset at every within-episode boundary)
+        #   Stage 1: k_eff=2     (reset at boundaries where current_scenario%2==0)
+        #   Stage 2: k_eff=k_max (no within-episode resets)
+        # Implementation: at the boundary that should reset, we set
+        # truncations[ego_ids]=1 and terminals[ego_ids]=1 for the current
+        # step. pufferl picks up done_mask=t+d to reset transformer_position
+        # at eval time; create_episode_mask uses terminals to block
+        # cross-boundary attention during training. K_max=4 with stages
+        # k_eff∈{1,2,4} gives clean splits (boundaries 1,2,3 → reset {all},
+        # {middle only}, {none}). For other K_max, only k_eff=1 and k_max
+        # produce uniform stages.
+        self.k_eff_curriculum_enabled = bool(k_eff_curriculum_enabled)
+        self.k_eff_curriculum_episodes_per_stage = int(k_eff_curriculum_episodes_per_stage)
+        self._k_eff_curriculum_episodes_seen = 0
+        self._pending_k_eff_log = None
         # When True, _reinit_envs_with_new_maps() donates env[0]->client to a
         # C-side global before vec_close and re-attaches it to the new env[0]
         # afterwards. This keeps the raylib window + ffmpeg pipe alive across
@@ -603,6 +624,34 @@ class Drive(pufferlib.PufferEnv):
             [observations[:, :base_ego_dim], self.cached_conditioning_array, observations[:, base_ego_dim:]], axis=1
         )
 
+    def _current_k_eff(self):
+        """Effective k for the ego's K/V cache horizon at the current
+        curriculum stage. Returns k_scenarios (i.e. K_max) when the
+        curriculum is disabled or has finished. Stages last
+        `k_eff_curriculum_episodes_per_stage` episodes each:
+            stage 0 → k_eff = 1
+            stage 1 → k_eff = 2
+            stage 2+ → k_eff = K_max
+        """
+        if not self.k_eff_curriculum_enabled:
+            return self.k_scenarios
+        n = self._k_eff_curriculum_episodes_seen
+        s = self.k_eff_curriculum_episodes_per_stage
+        if n < s:
+            return 1
+        elif n < 2 * s:
+            return 2
+        else:
+            return self.k_scenarios
+
+    def _k_eff_should_reset_at_current_boundary(self):
+        """True when the just-crossed scenario boundary should cut the ego
+        K/V cache under the current curriculum stage. Caller must already
+        have ensured this is a within-episode boundary (current_scenario != 0
+        after the modulo increment)."""
+        k_eff = self._current_k_eff()
+        return self.current_scenario % k_eff == 0
+
     def _set_co_player_conditioning(self):
         """Sample and store conditioning values for each environment and update all caches"""
         # Entropy curriculum: scale entropy_ub based on episodes seen so far.
@@ -869,6 +918,9 @@ class Drive(pufferlib.PufferEnv):
             if self._pending_entropy_log is not None:
                 info.append(self._pending_entropy_log)
                 self._pending_entropy_log = None
+            if self._pending_k_eff_log is not None:
+                info.append(self._pending_k_eff_log)
+                self._pending_k_eff_log = None
 
         if self.tick % self.scenario_length == 0:
             if self.adaptive_driving_agent and self.current_scenario_infos:
@@ -932,6 +984,21 @@ class Drive(pufferlib.PufferEnv):
             ):
                 self._set_co_player_conditioning()
 
+            # k_eff curriculum: at within-episode scenario boundaries, decide
+            # whether to cut the ego's K/V cache. Setting truncations=1 (and
+            # terminals=1) at this step makes pufferl drop the cache via
+            # done_mask=t+d, and during training, create_episode_mask blocks
+            # cross-boundary attention. current_scenario != 0 excludes the
+            # episode boundary itself (which is reset by the normal episode-
+            # done logic). Reset rule: cut if current_scenario % k_eff == 0.
+            if (
+                self.adaptive_driving_agent
+                and self.current_scenario != 0
+                and self._k_eff_should_reset_at_current_boundary()
+            ):
+                self.truncations[self.ego_ids] = 1
+                self.terminals[self.ego_ids] = 1
+
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             will_resample = 1
@@ -944,6 +1011,16 @@ class Drive(pufferlib.PufferEnv):
                     self.scenario_metrics = []
                     self.current_scenario_infos = []
                     self.current_scenario = 0
+
+                # Advance k_eff curriculum once per real episode and stash
+                # the new stage's k_eff for wandb. Done before reinit so the
+                # log reflects the stage that the next episode will run at.
+                if self.k_eff_curriculum_enabled:
+                    self._k_eff_curriculum_episodes_seen += 1
+                    self._pending_k_eff_log = {
+                        "ego_curriculum/k_eff": int(self._current_k_eff()),
+                        "ego_curriculum/episodes_seen": int(self._k_eff_curriculum_episodes_seen),
+                    }
 
                 self._reinit_envs_with_new_maps()
 
