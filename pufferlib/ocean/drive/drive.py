@@ -71,6 +71,7 @@ class Drive(pufferlib.PufferEnv):
         map_rand_per_scenario=False,
         condition_rand_per_scenario=False,
         entropy_curriculum_enabled=False,
+        entropy_curriculum_episodes_start=0,
         k_eff_curriculum_enabled=False,
         k_eff_curriculum_episodes_per_stage=30,
     ):
@@ -223,7 +224,12 @@ class Drive(pufferlib.PufferEnv):
         # then drifting toward 0 as scores saturate; the curriculum keeps the
         # task in an informative-difficulty regime for longer.
         self.entropy_curriculum_enabled = bool(entropy_curriculum_enabled)
-        self._entropy_curriculum_episodes_seen = 0
+        # When resuming from a checkpoint of a curriculum run, the per-env
+        # episode counter isn't part of the model state — pass the original
+        # run's ending episode count here so the curriculum picks up at the
+        # right stage instead of restarting from stage 0. Each worker still
+        # advances its own counter from this starting value.
+        self._entropy_curriculum_episodes_seen = int(entropy_curriculum_episodes_start)
         self._pending_entropy_log = None
         self._entropy_curriculum_final_ub = None  # set lazily once we know co_player_entropy_weight_ub
         # When True, the ego's K/V cache is reset at SOME within-episode
