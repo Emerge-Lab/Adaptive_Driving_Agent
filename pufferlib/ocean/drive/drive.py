@@ -74,6 +74,7 @@ class Drive(pufferlib.PufferEnv):
         entropy_curriculum_episodes_start=0,
         k_eff_curriculum_enabled=False,
         k_eff_curriculum_episodes_per_stage=30,
+        ego_is_oracle=False,
     ):
         # env
         self.dt = dt
@@ -285,6 +286,53 @@ class Drive(pufferlib.PufferEnv):
             self.co_player_discount_weight_lb = self.co_player_conditioning.get("discount_weight_lb", 0.98)
             self.co_player_discount_weight_ub = self.co_player_conditioning.get("discount_weight_ub", 0.98)
 
+        # ----- Ego oracle (NEW, isolated machinery) -----
+        # When True, the ego's obs gets the partner's per-env conditioning
+        # vector appended at the END (after road_obs). Implementation:
+        #   1. Allocate a private `_c_observations` buffer the C side writes
+        #      into (sized to the C's expected obs_dim, no oracle slots).
+        #   2. The pufferl-facing `self.observations` buffer is sized
+        #      bigger (`+ oracle_dims`); each step we copy the C buffer
+        #      into the first part and write `_oracle_obs_per_env[env]`
+        #      into the trailing oracle slots for every ego row.
+        # No changes to [env.conditioning], pufferl, or reward — the
+        # oracle slots are pure obs signal that only the policy reads.
+        self.ego_is_oracle = bool(ego_is_oracle)
+        if self.ego_is_oracle:
+            # Determine the partner's conditioning dim count (== oracle width).
+            ct = self.co_player_condition_type
+            if ct is None or ct == "none":
+                raise ValueError(
+                    "ego_is_oracle=True requires co-player conditioning to be "
+                    "enabled (co_player_policy.conditioning.type != 'none')."
+                )
+            self._oracle_dims = (
+                (3 if self.co_player_reward_conditioned else 0)
+                + (1 if self.co_player_entropy_conditioned else 0)
+                + (1 if self.co_player_discount_conditioned else 0)
+            )
+            if self._oracle_dims == 0:
+                raise ValueError(
+                    "ego_is_oracle=True but partner conditioning resolved to 0 dims."
+                )
+            # Grow obs space so pufferl allocates a buffer wide enough to
+            # hold the appended oracle slots (placed AFTER road_obs, at
+            # offset = num_obs - oracle_dims). C still writes the smaller
+            # part into its own private `_c_observations` buffer.
+            self.num_obs += self._oracle_dims
+            self.single_observation_space = gymnasium.spaces.Box(
+                low=-1, high=1, shape=(self.num_obs,), dtype=np.float32
+            )
+            # Per-env oracle vector. Filled at every _set_co_player_conditioning
+            # call from a copy of `self.env_conditioning`. We don't allocate
+            # `_c_observations` or `_ego_env_indices` here — they need
+            # `num_envs`/`num_agents` which aren't known until later.
+            self._oracle_obs_per_env = None
+            self._c_observations = None
+            self._ego_env_indices = None
+        else:
+            self._oracle_dims = 0
+
         self.init_steps = init_steps
         self.init_mode_str = init_mode
         self.control_mode_str = control_mode
@@ -378,12 +426,34 @@ class Drive(pufferlib.PufferEnv):
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=co_player_atn_space.dtype)
             else:
                 self.co_player_actions = np.zeros(co_player_atn_space.shape, dtype=np.int32)
+
+        # Allocate the private C-only obs buffer + ego→env index map (oracle
+        # path only). C writes into `_c_observations` (no oracle slots);
+        # we copy + append into `self.observations` (which has oracle slots)
+        # every step/reset. `_oracle_obs_per_env` was filled by
+        # `_set_co_player_conditioning` during the prior `_set_env_variables`
+        # call (which always fires here because oracle requires co-player
+        # conditioning to be on).
+        if self.ego_is_oracle:
+            self._c_obs_dim = self.num_obs - self._oracle_dims
+            self._c_observations = np.zeros(
+                (self.num_agents, self._c_obs_dim), dtype=np.float32
+            )
+            self._rebuild_ego_env_indices()
+
         env_ids = []
         for i in range(self.num_envs):
             cur = self.agent_offsets[i]
             nxt = self.agent_offsets[i + 1]
+            # Oracle: hand C its own private obs slice (smaller, no oracle
+            # slots). Otherwise C uses the pufferl-provided buffer directly.
+            obs_slice_for_c = (
+                self._c_observations[cur:nxt]
+                if self.ego_is_oracle
+                else self.observations[cur:nxt]
+            )
             env_id = binding.env_init(
-                self.observations[cur:nxt],
+                obs_slice_for_c,
                 self.actions[cur:nxt],
                 self.rewards[cur:nxt],
                 self.terminals[cur:nxt],
@@ -441,6 +511,8 @@ class Drive(pufferlib.PufferEnv):
 
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
+        # Oracle: copy C obs into pufferl buffer + write oracle slots.
+        self._refresh_ego_oracle_obs()
         info = []
         if self.population_play:
             info.append(self.ego_ids)
@@ -630,6 +702,43 @@ class Drive(pufferlib.PufferEnv):
             [observations[:, :base_ego_dim], self.cached_conditioning_array, observations[:, base_ego_dim:]], axis=1
         )
 
+    def _rebuild_ego_env_indices(self):
+        """Recompute self._ego_env_indices: for the k-th ego in self.ego_ids
+        order, the env index it belongs to. Called at init and after every
+        _set_env_variables (since map re-roll may change per-env ego counts).
+        Oracle path only."""
+        if not self.ego_is_oracle:
+            return
+        ego_env_ids = []
+        if self.population_play:
+            for env_idx, env_egos in enumerate(self.local_ego_ids):
+                ego_env_ids.extend([env_idx] * len(env_egos))
+        else:
+            for env_idx in range(self.num_envs):
+                cur = int(self.agent_offsets[env_idx])
+                nxt = int(self.agent_offsets[env_idx + 1])
+                ego_env_ids.extend([env_idx] * (nxt - cur))
+        self._ego_env_indices = np.asarray(ego_env_ids, dtype=np.int64)
+
+    def _refresh_ego_oracle_obs(self):
+        """Copy C-side obs into the pufferl-facing buffer and write the
+        per-env partner-conditioning vector into the trailing oracle
+        slots for every ego row. No-op when oracle is off."""
+        if not self.ego_is_oracle:
+            return
+        c_dim = self._c_obs_dim
+        # Copy C output into the leading c_obs_dim columns. (Cannot slice
+        # the assignment to a single np.copyto because the buffers were
+        # allocated separately; numpy fast path is fine.)
+        self.observations[:, :c_dim] = self._c_observations
+        # Append partner conditioning to ego rows only. Non-ego rows keep
+        # whatever was there (zeros from allocation; pufferl filters out
+        # non-ego rows downstream anyway).
+        if len(self.ego_ids) > 0:
+            self.observations[self.ego_ids, c_dim:] = self._oracle_obs_per_env[
+                self._ego_env_indices
+            ]
+
     def _current_k_eff(self):
         """Effective k for the ego's K/V cache horizon at the current
         curriculum stage. Returns k_scenarios (i.e. K_max) when the
@@ -726,6 +835,19 @@ class Drive(pufferlib.PufferEnv):
             else:
                 self.cached_conditioning_array = np.empty((0, len(conditioning_dims)), dtype=np.float32)
 
+        # Oracle: sync per-env oracle vector with the freshly sampled
+        # partner conditioning. num_envs can change across
+        # _reinit_envs_with_new_maps (some maps yield no valid agents and
+        # get dropped C-side), so just take a fresh copy with the current
+        # shape rather than a fixed-size in-place write. Width invariant
+        # is checked by the assertion below.
+        if self.ego_is_oracle:
+            assert self.env_conditioning.shape[1] == self._oracle_dims, (
+                f"oracle width mismatch: env_conditioning has "
+                f"{self.env_conditioning.shape[1]} dims, oracle expects {self._oracle_dims}"
+            )
+            self._oracle_obs_per_env = self.env_conditioning.copy()
+
         # Stash sampled entropy stats for wandb. Index of the entropy column
         # within env_conditioning depends on which dims are active above:
         #   reward(3) -> [collision, offroad, goal] then entropy then discount
@@ -777,8 +899,13 @@ class Drive(pufferlib.PufferEnv):
         for i in range(self.num_envs):
             cur = self.agent_offsets[i]
             nxt = self.agent_offsets[i + 1]
+            obs_slice_for_c = (
+                self._c_observations[cur:nxt]
+                if self.ego_is_oracle
+                else self.observations[cur:nxt]
+            )
             env_id = binding.env_init(
-                self.observations[cur:nxt],
+                obs_slice_for_c,
                 self.actions[cur:nxt],
                 self.rewards[cur:nxt],
                 self.terminals[cur:nxt],
@@ -835,6 +962,10 @@ class Drive(pufferlib.PufferEnv):
             binding.vec_adopt_client(self.c_envs)
 
         binding.vec_reset(self.c_envs, seed)
+        # Oracle: per-env ego counts may have shifted with the new map IDs;
+        # rebuild the ego→env index map and refresh obs.
+        self._rebuild_ego_env_indices()
+        self._refresh_ego_oracle_obs()
         self.terminals[:] = 1
 
     def _aggregate_scenario_metrics(self, scenario_infos):
@@ -901,6 +1032,8 @@ class Drive(pufferlib.PufferEnv):
         # shared-memory action buffer; nothing to do here.
 
         binding.vec_step(self.c_envs)
+        # Oracle: copy C obs into pufferl buffer + write oracle slots.
+        self._refresh_ego_oracle_obs()
 
         self.tick += 1
         info = []

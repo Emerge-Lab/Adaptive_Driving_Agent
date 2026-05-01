@@ -470,8 +470,17 @@ class PuffeRL:
         if reset_cache:
             self.co_player_state[worker_id] = {}
 
-        # Slice the co-player observations.
-        co_obs_np = full_obs[co_ids]
+        # Slice the co-player observations. When the ego is in oracle mode
+        # (drive.py `ego_is_oracle=True`) the env's obs is wider than the
+        # partner policy expects — partner conditioning is appended to ego
+        # rows only. Strip trailing oracle dims by slicing columns to the
+        # env's `_c_obs_dim` (the C-side obs width). Defaults to None when
+        # oracle is off → take the full width as before.
+        co_obs_width = getattr(self.vecenv.driver_env, "_c_obs_dim", None)
+        if co_obs_width is None:
+            co_obs_np = full_obs[co_ids]
+        else:
+            co_obs_np = full_obs[co_ids, :co_obs_width]
         co_obs = torch.as_tensor(co_obs_np, device=device)
         if self.co_player_conditioning_dims > 0:
             # Pull this worker's conditioning slice from the SHM buffer the

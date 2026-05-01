@@ -47,8 +47,8 @@ K_SCENARIOS=2
 SCENARIO_LENGTH=201
 HORIZON=$((K_SCENARIOS * SCENARIO_LENGTH))     # 402
 
-NUM_WORKERS=32
-NUM_ENVS=32
+NUM_WORKERS=24
+NUM_ENVS=24
 MINIBATCH_MULTIPLIER=100
 MAX_MINIBATCH_SIZE=40200
 
@@ -92,7 +92,7 @@ xvfb-run -a puffer train puffer_adaptive_drive \
   --train.max-minibatch-size $MAX_MINIBATCH_SIZE \
   --train.cpu-offload True \
   --train.checkpoint-interval 10 \
-  --train.render-interval 10 \
+  --train.render-interval 30 \
   --train.seed $SEED \
   --vec.num-workers $NUM_WORKERS \
   --vec.num-envs $NUM_ENVS \
@@ -120,7 +120,8 @@ xvfb-run -a puffer train puffer_adaptive_drive \
   --env.entropy-curriculum-enabled $CURR \
   --eval.map-dir resources/drive/binaries/nuplan_201 \
   --eval.human-replay-eval True \
-  --eval.eval-interval 10"
+  --eval.human-replay-num-rollouts 50 \
+  --eval.eval-interval 5"
 
   tmux send-keys -t "$SESSION:$WIN" "$CMD" C-m
 done

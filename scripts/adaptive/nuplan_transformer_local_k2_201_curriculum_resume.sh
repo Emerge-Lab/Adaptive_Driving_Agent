@@ -84,7 +84,9 @@ for ((i=0; i<N_RUNS; i++)); do
   read -r LABEL EUB CURR PARTNER_ID WID EPISODES_START <<< "${RUNS[$i]}"
   GPU=${GPU_ARR[$i]}
   WIN="exp${i}_${LABEL//./}"
-  TAG="adaptive_diverse_${LABEL}_vs_${PARTNER_ID}_lane${LANE_REWARD}_k2_201_resume_from_${WID}"
+  # Shortened from the original launcher's tag to fit wandb's 64-char limit:
+  # ada_ instead of adaptive_diverse_, _r_ instead of _resume_from_.
+  TAG="ada_${LABEL}_vs_${PARTNER_ID}_lane${LANE_REWARD}_k2_201_r_${WID}"
   COPLAYER="experiments/puffer_drive_${PARTNER_ID}.pt"
   CKPT="${RESUME_CKPTS[$i]}"
 

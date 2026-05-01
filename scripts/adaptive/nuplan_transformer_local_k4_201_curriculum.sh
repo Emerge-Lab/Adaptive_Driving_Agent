@@ -19,8 +19,8 @@ set -e
 # rollout/training divergence.
 #
 # Comparison: 2 runs (curriculum vs no-curriculum), both at k_max=4
-# horizon=804, partner = n48teqjs at full e_ub=1.0. The only varying
-# factor is k_eff_curriculum_enabled.
+# horizon=804, partner = 6rauydj2 at e_ub=0.5 (entropy-sweep partner
+# trained ∈ [0, 0.5]). The only varying factor is k_eff_curriculum_enabled.
 #
 # Memory: horizon=804 is ~2× the k=2 (horizon=402) runs, so per-run
 # RAM ≈ 230GB. Two runs → ≈460GB peak. Cannot run alongside the k=2
@@ -37,14 +37,14 @@ RUNS=(
   "nocurr_k4  False"
 )
 
-COPLAYER=experiments/puffer_drive_n48teqjs.pt
+COPLAYER=experiments/puffer_drive_6rauydj2.pt
 
 COLLISION_LB=-2
 OFFROAD_LB=-2
 LANE_REWARD=0.01
 DISCOUNT_LB=0.4
 DISCOUNT_UB=1
-ENTROPY_UB=1.00
+ENTROPY_UB=0.50
 NUPLAN_NUM_MAPS=4999
 SEED=42
 
@@ -75,7 +75,7 @@ for ((i=0; i<N_RUNS; i++)); do
   read -r LABEL KCURR <<< "${RUNS[$i]}"
   GPU=${GPU_ARR[$i]}
   WIN="exp${i}_${LABEL//./}"
-  TAG="adaptive_kcurr_${LABEL}_vs_n48teqjs_lane${LANE_REWARD}_k4_201"
+  TAG="adaptive_kcurr_${LABEL}_vs_6rauydj2_lane${LANE_REWARD}_k4_201"
 
   if [ "$i" -eq 0 ]; then
     tmux rename-window -t "$SESSION:exp0" "$WIN"
