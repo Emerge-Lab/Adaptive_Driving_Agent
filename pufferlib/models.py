@@ -255,9 +255,22 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         else:
             self.input_projection = nn.Identity()
 
-        # Learnable positional embeddings
-        self.positional_embedding = nn.Parameter(torch.zeros(1, horizon, hidden_size))
-        nn.init.normal_(self.positional_embedding, std=0.02)
+        # Sinusoidal positional embedding (Vaswani et al.) — non-trainable.
+        # Switched from learnable PE so the transformer has temporal
+        # structure from initialization rather than having to learn it
+        # from gradients. Slot-tied: PE[i] is added when writing to
+        # cache slot i, identical for both forward (training) and
+        # forward_eval (rollout) paths via get_positional_embedding().
+        pe = torch.zeros(horizon, hidden_size)
+        position = torch.arange(0, horizon, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, hidden_size, 2, dtype=torch.float) * (-math.log(10000.0) / hidden_size)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        # register_buffer keeps it on the module's device but excludes it
+        # from .parameters() (no gradient updates).
+        self.register_buffer("positional_embedding", pe.unsqueeze(0))
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
