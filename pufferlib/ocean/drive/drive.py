@@ -75,6 +75,7 @@ class Drive(pufferlib.PufferEnv):
         k_eff_curriculum_enabled=False,
         k_eff_curriculum_episodes_per_stage=30,
         ego_is_oracle=False,
+        reward_only_last_scenario=False,
     ):
         # env
         self.dt = dt
@@ -298,6 +299,11 @@ class Drive(pufferlib.PufferEnv):
         # No changes to [env.conditioning], pufferl, or reward — the
         # oracle slots are pure obs signal that only the policy reads.
         self.ego_is_oracle = bool(ego_is_oracle)
+        self.reward_only_last_scenario = bool(reward_only_last_scenario)
+        if self.reward_only_last_scenario and not self.adaptive_driving_agent:
+            raise ValueError(
+                "reward_only_last_scenario=True requires adaptive_driving_agent=True (k_scenarios > 1)."
+            )
         if self.ego_is_oracle:
             # Determine the partner's conditioning dim count (== oracle width).
             ct = self.co_player_condition_type
@@ -1032,6 +1038,8 @@ class Drive(pufferlib.PufferEnv):
         # shared-memory action buffer; nothing to do here.
 
         binding.vec_step(self.c_envs)
+        if self.reward_only_last_scenario and self.current_scenario != self.k_scenarios - 1:
+            self.rewards[:] = 0
         # Oracle: copy C obs into pufferl buffer + write oracle slots.
         self._refresh_ego_oracle_obs()
 
@@ -1616,7 +1624,7 @@ if __name__ == "__main__":
     # test_performance()
     # Process the train dataset
     # process_all_maps(data_folder="/data/processed/training")
-    process_all_maps(data_folder="/workspace/ADA/GPUDrive-NuPlan-MiniSet/nuplan")
+    process_all_maps(data_folder="/workspace/ADA/data/nuplan-gpudrive/nuplan")
     # Process the validation/test dataset
     # process_all_maps(data_folder="data/processed/validation")
     # # Process the validation_interactive dataset
