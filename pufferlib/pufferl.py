@@ -680,7 +680,17 @@ class PuffeRL:
                             valid_mask = global_indices < self.transformer_position[transformer_key].shape[0]
                             valid_indices = global_indices[valid_mask]
                             if len(valid_indices) > 0:
-                                self.transformer_position[transformer_key][valid_indices] = -1
+                                # Reset position to 0 (was -1 in the legacy
+                                # path; -1 worked because (-1)%horizon picks
+                                # the last slot, but it makes the first
+                                # post-reset step write to slot horizon-1
+                                # instead of slot 0 — inconsistent with the
+                                # need_alloc / first-call branch which uses
+                                # 0. With the K/V cache now persisted, this
+                                # inconsistency would leak garbage into the
+                                # last slot. 0 makes post-reset identical
+                                # to first-call.
+                                self.transformer_position[transformer_key][valid_indices] = 0
                                 # Zero K/V cache rows for the agents whose
                                 # episode just ended. The policy must start
                                 # fresh in their next episode — without this,
