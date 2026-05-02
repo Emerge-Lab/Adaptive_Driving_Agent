@@ -213,6 +213,17 @@ class PuffeRL:
                 self.transformer_position = {
                     i * n: torch.zeros(n, dtype=torch.long, device=device) for i in range(num_chunks)
                 }
+            # K/V cache persistence for the streaming forward_eval path.
+            # The model lazy-allocates k_cache and v_cache (list of per-layer
+            # tensors) on first call when state.get("k_cache") is None. We
+            # persist them here so the next rollout step finds the cache
+            # already populated with past timesteps' projections — without
+            # this, every step would lazy-allocate fresh empty caches and
+            # the policy would attend only to the current step (silent bug
+            # discovered 2026-05-02; broke all in-context-learning runs
+            # prior to that). None initially → first call allocates.
+            self.transformer_k_cache = {i * n: None for i in range(num_chunks)}
+            self.transformer_v_cache = {i * n: None for i in range(num_chunks)}
 
         # Minibatching & gradient accumulation
         if self.adaptive_driving_agent:
@@ -539,6 +550,10 @@ class PuffeRL:
                 # Pre-allocate full buffer instead of empty
                 self.transformer_context[k] = torch.zeros(n, self.horizon, h, device=device)
                 self.transformer_position[k] = torch.zeros(1, dtype=torch.long, device=device)
+                # Drop K/V cache so the model lazy-allocates fresh on
+                # the first forward_eval call of this rollout.
+                self.transformer_k_cache[k] = None
+                self.transformer_v_cache[k] = None
 
         self.full_rows = 0
         while self.full_rows < self.segments:
@@ -613,6 +628,13 @@ class PuffeRL:
                 if config.get("rnn_name", "Recurrent") == "Transformer":
                     state["transformer_context"] = self.transformer_context[state_key]
                     state["transformer_position"] = self.transformer_position[state_key]
+                    # K/V cache for streaming attention. None on the first
+                    # call → model lazy-allocates (and resets pos to 0).
+                    # Subsequent calls reuse the populated cache, which is
+                    # the whole point: each step appends one new K/V slot
+                    # and the policy attends over the full accumulated past.
+                    state["k_cache"] = self.transformer_k_cache[state_key]
+                    state["v_cache"] = self.transformer_v_cache[state_key]
                     # Note: terminals not needed for eval since we're doing single-step inference
 
                 print(".", end="", flush=True)  # Prevents multiprocessing deadlock
@@ -642,6 +664,12 @@ class PuffeRL:
                     transformer_key = (env_id.start // batch_size) * batch_size
                     self.transformer_context[transformer_key] = state["transformer_context"]
                     self.transformer_position[transformer_key] = state["transformer_position"]
+                    # Persist the K/V cache the model just wrote/updated so
+                    # the next forward_eval call sees the accumulated past.
+                    # state.get(...) is defensive: model may not have set
+                    # these if it took the legacy path.
+                    self.transformer_k_cache[transformer_key] = state.get("k_cache")
+                    self.transformer_v_cache[transformer_key] = state.get("v_cache")
 
                     # Reset transformer context on episode boundaries
                     if done_mask.any():
@@ -653,6 +681,19 @@ class PuffeRL:
                             valid_indices = global_indices[valid_mask]
                             if len(valid_indices) > 0:
                                 self.transformer_position[transformer_key][valid_indices] = -1
+                                # Zero K/V cache rows for the agents whose
+                                # episode just ended. The policy must start
+                                # fresh in their next episode — without this,
+                                # past-episode tokens would leak into the new
+                                # episode's attention. Other rows in the
+                                # batch keep their accumulating cache.
+                                kc = self.transformer_k_cache[transformer_key]
+                                vc = self.transformer_v_cache[transformer_key]
+                                if kc is not None and vc is not None:
+                                    for c in kc:
+                                        c[valid_indices] = 0
+                                    for c in vc:
+                                        c[valid_indices] = 0
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
                 batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
