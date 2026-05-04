@@ -650,6 +650,13 @@ class HumanReplayEvaluator:
         num_agents = puffer_env.observation_space.shape[0]
         device = args["train"]["device"]
         k_scenarios = args["env"].get("k_scenarios", 1)
+        goal_behavior = int(args["env"].get("goal_behavior", 0))
+        # GOAL_TRIAL mode swaps the outer loop from `for scenario` to `for trial`
+        # (variable-length, ends on goal-reach OR per-trial timeout).
+        is_trial_mode = goal_behavior == 3
+        if is_trial_mode:
+            max_trials = int(args["env"].get("max_trials_per_episode", 2))
+            per_trial_timeout = int(args["env"].get("per_trial_timeout") or 0) or self.sim_steps
 
         is_transformer = hasattr(policy, "horizon") and hasattr(policy, "transformer")
         is_recurrent = hasattr(policy, "lstm")
@@ -689,7 +696,9 @@ class HumanReplayEvaluator:
         cache_reset_per_scenario = os.environ.get("RECOVERY_CACHE_RESET_PER_SCENARIO", "0") == "1"
         if cache_reset_per_scenario:
             print("[recovery] CONTROL mode: resetting K/V cache at every scenario boundary", flush=True)
-        success_arr = np.zeros((num_rollouts, k_scenarios, num_agents), dtype=bool)
+        # success_arr indexed by (rollout, scenario_or_trial, agent)
+        n_outer = max_trials if is_trial_mode else k_scenarios
+        success_arr = np.zeros((num_rollouts, n_outer, num_agents), dtype=bool)
 
         for rollout_idx in range(num_rollouts):
             obs, _ = puffer_env.reset()
@@ -698,41 +707,69 @@ class HumanReplayEvaluator:
             scenario_metrics = {}
             delta_metrics = {}
 
-            for scenario in range(k_scenarios):
-                if scenario > 0 and cache_reset_per_scenario:
-                    state = _fresh_state()
-                for time_idx in range(self.sim_steps):
+            if is_trial_mode:
+                # Trial mode: run up to max_trials * per_trial_timeout ticks.
+                # Per-agent trial counter advances on trial_ended_this_step.
+                # Capture trial outcome (reach=reward>thresh) at trial-end.
+                trial_idx = np.zeros(num_agents, dtype=np.int32)
+                rollout_complete = np.zeros(num_agents, dtype=bool)
+                max_steps = max_trials * per_trial_timeout
+                for time_idx in range(max_steps):
                     with torch.no_grad():
                         ob_tensor = torch.as_tensor(obs).to(device)
                         logits, value = policy.forward_eval(ob_tensor, state)
                         action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                         action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
-
                     if isinstance(logits, torch.distributions.Normal):
                         action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
-
                     obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
-
-                    # Mark per-agent success this scenario: a +reward_goal spike
-                    # at any tick == goal reached. In stop-on-goal mode the env
-                    # does NOT set `dones` per agent (the agent just stops moving),
-                    # so we can't gate on dones. The only step-level reward that
-                    # crosses `goal_reward_threshold` is the goal reward itself
-                    # (lane_align is ~0.01/step, so even integrated it can't
-                    # reach 0.5 in one tick). We OR across the scenario so the
-                    # success flag sticks even if subsequent ticks are 0.
                     rewards_arr = np.asarray(rewards).reshape(-1)
-                    success_arr[rollout_idx, scenario] |= rewards_arr > goal_reward_threshold
+                    reached = rewards_arr > goal_reward_threshold
 
+                    te = np.asarray(puffer_env.trial_ended_this_step).reshape(-1).astype(bool)
+                    end_idxs = np.where(te & ~rollout_complete)[0]
+                    for a in end_idxs:
+                        ti = int(trial_idx[a])
+                        if ti < max_trials:
+                            success_arr[rollout_idx, ti, a] = bool(reached[a])
+                            trial_idx[a] = ti + 1
+                            if trial_idx[a] >= max_trials:
+                                rollout_complete[a] = True
                     for info_dict in info_list:
                         if not isinstance(info_dict, dict):
                             continue
-                        if "ada_delta_score" in info_dict:
-                            delta_metrics = info_dict
-                        elif any(k.startswith("scenario_") for k in info_dict.keys()):
-                            scenario_metrics.update(info_dict)
-                        elif "score" in info_dict:
+                        if "score" in info_dict:
                             collected_infos.append(info_dict)
+                    if rollout_complete.all():
+                        break
+            else:
+                for scenario in range(k_scenarios):
+                    if scenario > 0 and cache_reset_per_scenario:
+                        state = _fresh_state()
+                    for time_idx in range(self.sim_steps):
+                        with torch.no_grad():
+                            ob_tensor = torch.as_tensor(obs).to(device)
+                            logits, value = policy.forward_eval(ob_tensor, state)
+                            action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                            action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
+
+                        if isinstance(logits, torch.distributions.Normal):
+                            action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
+
+                        obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
+
+                        rewards_arr = np.asarray(rewards).reshape(-1)
+                        success_arr[rollout_idx, scenario] |= rewards_arr > goal_reward_threshold
+
+                        for info_dict in info_list:
+                            if not isinstance(info_dict, dict):
+                                continue
+                            if "ada_delta_score" in info_dict:
+                                delta_metrics = info_dict
+                            elif any(k.startswith("scenario_") for k in info_dict.keys()):
+                                scenario_metrics.update(info_dict)
+                            elif "score" in info_dict:
+                                collected_infos.append(info_dict)
 
             if collected_infos:
                 rollout_agg = {
@@ -769,12 +806,24 @@ class HumanReplayEvaluator:
         # Schema: list of {"rollout": int, "agent": int, "s0": int, ...,
         # "s_{k-1}": int} — one record per (rollout, agent) pair.
         records = []
+        prefix = "t" if is_trial_mode else "s"
         for r in range(num_rollouts):
             for a in range(num_agents):
                 rec = {"rollout": int(r), "agent": int(a)}
-                for s_idx in range(k_scenarios):
-                    rec[f"s{s_idx}"] = int(success_arr[r, s_idx, a])
+                for s_idx in range(n_outer):
+                    rec[f"{prefix}{s_idx}"] = int(success_arr[r, s_idx, a])
                 records.append(rec)
         final["per_agent_success_log"] = records
+
+        # Per-trial aggregate metrics + ada_delta deltas (trial mode only).
+        # Computed from success_arr to give clean per-trial signal even when
+        # the env's vec_log path doesn't aggregate per-trial rates.
+        if is_trial_mode:
+            for k in range(n_outer):
+                trial_k_score = float(success_arr[:, k, :].mean())
+                final[f"trial_{k}_score"] = trial_k_score
+            t0 = float(success_arr[:, 0, :].mean())
+            for k in range(1, n_outer):
+                final[f"ada_delta_trial_{k}_minus_0"] = float(success_arr[:, k, :].mean()) - t0
 
         return final
