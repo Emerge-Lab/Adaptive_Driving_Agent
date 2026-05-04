@@ -255,11 +255,16 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         else:
             self.input_projection = nn.Identity()
 
-        # Learnable positional embeddings. Per-episode reset is applied in
-        # forward() (training) so the PE indexing matches forward_eval's
-        # cache-pos indexing under multi-episode-per-row rollouts.
-        self.positional_embedding = nn.Parameter(torch.zeros(1, horizon, hidden_size))
-        nn.init.normal_(self.positional_embedding, std=0.02)
+        # Sinusoidal positional embeddings (Vaswani et al.) — non-trainable.
+        # Per-episode reset is applied in forward() (training) so the PE
+        # indexing matches forward_eval's cache-pos indexing under
+        # multi-episode-per-row rollouts.
+        pe = torch.zeros(horizon, hidden_size)
+        position = torch.arange(0, horizon, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, hidden_size, 2, dtype=torch.float) * (-math.log(10000.0) / hidden_size))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("positional_embedding", pe.unsqueeze(0))
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
