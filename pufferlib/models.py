@@ -17,12 +17,6 @@ import math
 # Set PUFFER_TRANSFORMER_LEGACY_EVAL=1 to fall back to the pre-KV-cache path.
 _USE_LEGACY_EVAL = os.environ.get("PUFFER_TRANSFORMER_LEGACY_EVAL", "0") == "1"
 
-# Set PUFFER_VERIFY_CACHE=1 to enable diagnostic prints from forward_eval +
-# evaluate() rollout loop + training forward. Gated to avoid polluting
-# production runs. Used to verify the K/V cache actually persists across
-# rollout steps and resets correctly at episode boundaries.
-_VERIFY_CACHE = os.environ.get("PUFFER_VERIFY_CACHE", "0") == "1"
-
 
 class Default(nn.Module):
     """Default PyTorch policy. Flattens obs and applies a linear layer.
@@ -516,18 +510,6 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
                 k_cache = [c.to(hidden.dtype) for c in k_cache]
                 v_cache = [c.to(hidden.dtype) for c in v_cache]
 
-        # [VERIFY_CACHE] Track call counts and allocation events. Under the
-        # rnn_name plumbing bug, every step would have need_alloc=True (cache
-        # never persists). Post-fix, alloc fires only on episode boundaries
-        # (first call) and on dtype/shape changes — typically <1% of calls.
-        if _VERIFY_CACHE:
-            if not hasattr(self, "_fe_call_count"):
-                self._fe_call_count = 0
-                self._fe_alloc_count = 0
-            self._fe_call_count += 1
-            if need_alloc:
-                self._fe_alloc_count += 1
-
         slot_t = (pos % self.horizon).long()  # (1,) long tensor
 
         # Add the slot's positional embedding (slot-tied, matching the
@@ -594,17 +576,6 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         state["v_cache"] = v_cache
         state["transformer_position"] = pos + 1
         state["hidden"] = hidden_out
-
-        # [VERIFY_CACHE] Stash diagnostic state on the wrapper for the
-        # caller (pufferl.evaluate) to format and print. Cannot print
-        # directly here — the f-string with tensor .item()s breaks
-        # torch.compile / Dynamo with "Unknown format code 'f'".
-        if _VERIFY_CACHE:
-            self._fe_last_pos = pos
-            self._fe_last_slot = slot_t
-            self._fe_last_need_alloc = need_alloc
-            self._fe_last_attn_mask_sum = attn_mask.sum()
-            self._fe_last_k_cache_ref = k_cache  # ref only; for stats outside
 
         logits, values = self.policy.decode_actions(hidden_out)
         return logits, values

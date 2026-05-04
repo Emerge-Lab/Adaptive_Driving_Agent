@@ -13,12 +13,6 @@ import glob
 import ast
 import time
 import random
-
-# [VERIFY_CACHE] Gate diagnostic prints that trace K/V cache lifecycle
-# across rollout steps and training forward. Set PUFFER_VERIFY_CACHE=1 to
-# enable. Used to confirm post-rnn_name-fix that the cache persists across
-# rollout steps within an episode AND resets at episode boundaries.
-_VERIFY_CACHE = os.environ.get("PUFFER_VERIFY_CACHE", "0") == "1"
 import shutil
 import subprocess
 import argparse
@@ -663,57 +657,11 @@ class PuffeRL:
                     state["k_cache"] = self.transformer_k_cache[state_key]
                     state["v_cache"] = self.transformer_v_cache[state_key]
                     # Note: terminals not needed for eval since we're doing single-step inference
-                    # [VERIFY_CACHE] Log cache presence on first few rollout
-                    # steps + periodically. cache_present should be False
-                    # only on the very first step after init or after an
-                    # episode-boundary cache wipe; otherwise True.
-                    if _VERIFY_CACHE:
-                        if not hasattr(self, "_eval_step_count"):
-                            self._eval_step_count = 0
-                        self._eval_step_count += 1
 
                 # print(".", end="", flush=True)  # Prevents multiprocessing deadlock
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
-
-                # [VERIFY_CACHE] Format/print cache diagnostics OUTSIDE the
-                # compiled forward_eval region — Dynamo can't handle
-                # f-string of tensor .item()s. The wrapper stashed scalars
-                # on `policy` (or `policy.module` for DDP); we read them
-                # here. cache_alloc_ratio should be near 0 in steady state
-                # (lazy-alloc only fires on episode boundaries / first
-                # call); under the rnn_name bug it'd be ~1.0 (every step
-                # re-allocs).
-                if _VERIFY_CACHE and config.get("rnn_name", "Recurrent") == "Transformer":
-                    pol = self.policy.module if hasattr(self.policy, "module") else self.policy
-                    if hasattr(pol, "_fe_call_count"):
-                        n_calls = pol._fe_call_count
-                        if n_calls <= 5 or n_calls % 200 == 0:
-                            with torch.no_grad():
-                                slot_v = int(pol._fe_last_slot.item())
-                                pos_v = int(pol._fe_last_pos.item())
-                                attn_v = int(pol._fe_last_attn_mask_sum.item())
-                                kc = pol._fe_last_k_cache_ref
-                                k_at_slot_v = float(kc[0][:, :, slot_v, :].abs().mean().item())
-                                k_at_slot0_v = float(kc[0][:, :, 0, :].abs().mean().item())
-                            ratio_v = pol._fe_alloc_count / max(1, n_calls)
-                            print(
-                                "[CACHE] call={:5d} allocs={:4d} alloc_ratio={:.3f} "
-                                "need_alloc={} pos={:3d} slot={:3d} unmasked_slots={:3d} "
-                                "k_at_slot_t={:.4f} k_at_slot0={:.4f}".format(
-                                    n_calls,
-                                    pol._fe_alloc_count,
-                                    ratio_v,
-                                    bool(pol._fe_last_need_alloc),
-                                    pos_v,
-                                    slot_v,
-                                    attn_v,
-                                    k_at_slot_v,
-                                    k_at_slot0_v,
-                                ),
-                                flush=True,
-                            )
 
             profile("eval_copy", epoch)
             with torch.no_grad():
@@ -752,21 +700,6 @@ class PuffeRL:
                             global_indices = batch_start_in_group + done_indices
                             valid_mask = global_indices < self.transformer_position[transformer_key].shape[0]
                             valid_indices = global_indices[valid_mask]
-                            # [VERIFY_CACHE] Episode boundary fired — should
-                            # hit roughly once per episode_length steps in
-                            # the rollout. If this fires every step, the
-                            # done signal is leaking from somewhere it
-                            # shouldn't.
-                            if _VERIFY_CACHE:
-                                if not hasattr(self, "_eval_done_count"):
-                                    self._eval_done_count = 0
-                                self._eval_done_count += 1
-                                print(
-                                    f"[EPISODE_BOUNDARY] event={self._eval_done_count} "
-                                    f"chunk={transformer_key} dones={int(done_mask.sum())} "
-                                    f"valid_indices_len={len(valid_indices)}",
-                                    flush=True,
-                                )
                             if len(valid_indices) > 0:
                                 # Reset position to 0 (was -1 in the legacy
                                 # path; -1 worked because (-1)%horizon picks
@@ -951,34 +884,6 @@ class PuffeRL:
                 state["transformer_context"] = None
                 state["transformer_position"] = None
                 state["terminals"] = mb_terminals  # For episode boundary masking
-                # [VERIFY_CACHE] Once per train() call, log minibatch shape
-                # and terminal stats. Confirms the training forward gets a
-                # full (B, T, ...) sequence and that terminals at scenario
-                # boundary positions are non-zero IF the env writes them.
-                # Under the default config (map_rand=False), terminals
-                # should be 0 within-episode and 1 only at the final tick
-                # — so terminals.sum should equal segments_with_episode_end.
-                if _VERIFY_CACHE:
-                    if not hasattr(self, "_train_call_count"):
-                        self._train_call_count = 0
-                    self._train_call_count += 1
-                    if self._train_call_count <= 3 or self._train_call_count % 5 == 0:
-                        T = mb_terminals.shape[1]
-                        # Boundary at scenario_length-1 and at episode-end
-                        scen_boundary_pos = T // 2 - 1  # for k=2
-                        ep_end_pos = T - 1
-                        scen_boundary_terms = mb_terminals[:, scen_boundary_pos].sum().item() if T > 1 else 0
-                        ep_end_terms = mb_terminals[:, ep_end_pos].sum().item()
-                        total_terms = mb_terminals.sum().item()
-                        print(
-                            f"[TRAIN_FWD] call={self._train_call_count} "
-                            f"mb_obs.shape={tuple(mb_obs.shape)} "
-                            f"mb_terminals.shape={tuple(mb_terminals.shape)} "
-                            f"total_terms={int(total_terms)} "
-                            f"scen_boundary_terms(t={scen_boundary_pos})={int(scen_boundary_terms)} "
-                            f"ep_end_terms(t={ep_end_pos})={int(ep_end_terms)}",
-                            flush=True,
-                        )
 
             logits, newvalue = self.policy(mb_obs, state)
 
