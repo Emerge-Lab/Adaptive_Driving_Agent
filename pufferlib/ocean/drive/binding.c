@@ -261,5 +261,17 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "goals_reached_this_episode", log->goals_reached_this_episode);
     assign_to_dict(dict, "speed_at_goal", log->speed_at_goal);
     // assign_to_dict(dict, "avg_displacement_error", log->avg_displacement_error);
+
+    // GOAL_TRIAL metrics (zero under other goal_behavior).
+    assign_to_dict(dict, "n_trials_completed", log->n_trials_completed);
+    assign_to_dict(dict, "n_trials_goal_reached", log->n_trials_goal_reached);
+    assign_to_dict(dict, "n_trials_timed_out", log->n_trials_timed_out);
+    if (log->n_trials_completed > 0.0f) {
+        assign_to_dict(dict, "trial_mean_length", log->trial_total_length / log->n_trials_completed);
+        assign_to_dict(dict, "trial_goal_reach_rate", log->n_trials_goal_reached / log->n_trials_completed);
+    } else {
+        assign_to_dict(dict, "trial_mean_length", 0.0f);
+        assign_to_dict(dict, "trial_goal_reach_rate", 0.0f);
+    }
     return 0;
 }

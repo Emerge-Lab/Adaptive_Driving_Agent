@@ -198,6 +198,11 @@ struct Log {
     float avg_goal_weight;
     float avg_entropy_weight;
     float avg_discount_weight;
+    // Per-trial metrics (GOAL_TRIAL only). All zero under other goal_behavior.
+    float n_trials_completed;
+    float n_trials_goal_reached;
+    float n_trials_timed_out;
+    float trial_total_length;     // running sum, divided by n_trials_completed in add_log
 };
 
 typedef struct Entity Entity;
@@ -2785,13 +2790,26 @@ void c_step(Drive *env) {
             if (!reached && !timed_out) continue;
 
             if (env->trial_ended_this_step != NULL) env->trial_ended_this_step[i] = 1;
+            int trial_len = env->timestep - e->trial_start_timestep;
             e->trial_count++;
+            // Write directly to env->log (vec_log path picks it up). add_log
+            // does not fire under GOAL_TRIAL (scenario_length early-return
+            // is suppressed), so per-agent logs[i] aggregation is bypassed.
+            if (e->is_ego) {
+                env->log.n_trials_completed += 1.0f;
+                env->log.trial_total_length += (float)trial_len;
+                if (reached)
+                    env->log.n_trials_goal_reached += 1.0f;
+                else
+                    env->log.n_trials_timed_out += 1.0f;
+            }
             respawn_agent(env, agent_idx);
             e->trial_start_timestep = env->timestep;
 
             if (e->trial_count >= env->max_trials_per_episode) {
                 env->terminals[i] = 1;
                 e->trial_count = 0;
+                if (e->is_ego) env->log.n += 1.0f;  // vec_log denominator: episodes ended
             }
         }
     }
