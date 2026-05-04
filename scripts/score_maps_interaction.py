@@ -13,12 +13,13 @@ Note on bin_id: JSONs are sorted alphabetically and mapped to map_{i:03d}.bin
 where i starts at 1 (verified empirically from existing files in
 resources/drive/binaries/nuplan_201/). Sort order in this script must match.
 """
+
 import os, sys, json, glob, argparse, csv
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-PROXIMITY_M = 5.0   # meters
-V_MIN = 0.5         # m/s — exclude parked vehicles
+PROXIMITY_M = 5.0  # meters
+V_MIN = 0.5  # m/s — exclude parked vehicles
 INVALID_SENTINEL = -10000.0
 
 
@@ -69,7 +70,7 @@ def score_map(json_path, vehicle_only=True):
                 vy[t, i] = vel.get("y", 0.0)
                 valid[t, i] = True
 
-    speed = np.sqrt(vx ** 2 + vy ** 2)
+    speed = np.sqrt(vx**2 + vy**2)
     moving = speed > V_MIN
 
     interaction_events = 0
@@ -104,7 +105,7 @@ def score_map(json_path, vehicle_only=True):
             if others:
                 ox = px[t, others]
                 oy = py[t, others]
-                d_sdc = np.sqrt((ox - sdc_pos_t[0])**2 + (oy - sdc_pos_t[1])**2)
+                d_sdc = np.sqrt((ox - sdc_pos_t[0]) ** 2 + (oy - sdc_pos_t[1]) ** 2)
                 n_close_sdc = int((d_sdc < PROXIMITY_M).sum())
                 if n_close_sdc > 0:
                     sdc_interaction_steps += 1
@@ -144,7 +145,7 @@ def main():
 
     json_files = sorted(glob.glob(os.path.join(args.data_dir, "*.json")))
     if args.limit > 0:
-        json_files = json_files[:args.limit]
+        json_files = json_files[: args.limit]
     print(f"Found {len(json_files)} maps. Workers={args.workers}")
 
     # bin_id starts at 1 (matching existing map_001.bin onwards)
@@ -166,10 +167,19 @@ def main():
                 print(f"  {n_done}/{len(tasks)} done")
 
     # Save CSV
-    cols = ["bin_id", "scenario_id", "num_vehicles", "num_valid_vehicles",
-            "total_steps", "interaction_events", "sdc_interaction_steps",
-            "sdc_interactions_total", "unique_pairs_in_interaction",
-            "score_per_step", "json_path"]
+    cols = [
+        "bin_id",
+        "scenario_id",
+        "num_vehicles",
+        "num_valid_vehicles",
+        "total_steps",
+        "interaction_events",
+        "sdc_interaction_steps",
+        "sdc_interactions_total",
+        "unique_pairs_in_interaction",
+        "score_per_step",
+        "json_path",
+    ]
     with open(args.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()

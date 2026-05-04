@@ -66,13 +66,11 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             str(scenario_length),
             "--train.horizon",
             str(train_horizon),
-            # For eval we want stop-on-goal, not respawn (the training default).
-            # With respawn, `score` counts goal-reachings per scenario and varies
-            # with spawn luck; ada_delta_score becomes dominated by spawn noise.
-            # With stop, score is 0/1 per (agent, scenario) and ada_delta_score
-            # is the clean per-scenario success-rate delta.
+            # Match training goal_behavior. The "stop is cleaner" claim was wrong
+            # in practice — sparse reward under gb=2 produces worse drivers; gb=0
+            # respawn captures real efficiency adaptation in scen_1 vs scen_0.
             "--env.goal-behavior",
-            "2",
+            "0",
             "--env.conditioning.type",
             conditioning_type,
             "--env.conditioning.collision-weight-lb",
@@ -267,10 +265,8 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         if human_replay:
             env_kwargs["co_player_enabled"] = False
             env_kwargs["max_controlled_agents"] = 1
-            # Match the eval subprocess: stop-on-goal so the rendered agent
-            # halts when it reaches the goal instead of respawning. Keeps
-            # renders semantically aligned with the eval/human_replay_* metrics.
-            env_kwargs["goal_behavior"] = 2
+            # Inherit goal_behavior from training config (no override) so the
+            # render matches whatever regime the policy actually trained under.
             if "adaptive" in env_name:
                 env_kwargs["human_replay_mode"] = True
 

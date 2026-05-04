@@ -22,6 +22,7 @@ Usage:
                                                     [--coplayer <id>]
                                                     [--k 2] [--scen-len 201]
 """
+
 import argparse
 import math
 import os
@@ -41,16 +42,15 @@ def parse_args():
     p.add_argument("checkpoint", help="path to model_*.pt")
     p.add_argument("--out", default="/tmp/probe_attention.npz")
     p.add_argument("--gpu", default="0")
-    p.add_argument("--coplayer", default="experiments/puffer_drive_ocd1syvg.pt",
-                   help="co-player checkpoint to pair against")
+    p.add_argument(
+        "--coplayer", default="experiments/puffer_drive_ocd1syvg.pt", help="co-player checkpoint to pair against"
+    )
     p.add_argument("--k", type=int, default=2)
     p.add_argument("--scen-len", type=int, default=201)
     p.add_argument("--map-dir", default="resources/drive/binaries/nuplan_201")
     p.add_argument("--num-maps", type=int, default=4999)
-    p.add_argument("--map-rand", action="store_true",
-                   help="enable map_rand_per_scenario (matches training setup)")
-    p.add_argument("--ego-agent", type=int, default=0,
-                   help="which ego agent's attention to record (single int)")
+    p.add_argument("--map-rand", action="store_true", help="enable map_rand_per_scenario (matches training setup)")
+    p.add_argument("--ego-agent", type=int, default=0, help="which ego agent's attention to record (single int)")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
@@ -73,16 +73,25 @@ def build_env(args):
             input_size=128,
             hidden_size=256,
             transformer=dict(
-                input_size=256, hidden_size=256, num_layers=2,
-                num_heads=4, horizon=args.scen_len, dropout=0.0,
+                input_size=256,
+                hidden_size=256,
+                num_layers=2,
+                num_heads=4,
+                horizon=args.scen_len,
+                dropout=0.0,
             ),
             conditioning=dict(
                 type="all",
-                collision_weight_lb=-2, collision_weight_ub=0,
-                offroad_weight_lb=-2, offroad_weight_ub=0,
-                goal_weight_lb=0, goal_weight_ub=1,
-                entropy_weight_lb=0, entropy_weight_ub=0.10,
-                discount_weight_lb=0.8, discount_weight_ub=1,
+                collision_weight_lb=-2,
+                collision_weight_ub=0,
+                offroad_weight_lb=-2,
+                offroad_weight_ub=0,
+                goal_weight_lb=0,
+                goal_weight_ub=1,
+                entropy_weight_lb=0,
+                entropy_weight_ub=0.10,
+                discount_weight_lb=0.8,
+                discount_weight_ub=1,
             ),
         ),
         conditioning=dict(type="none"),
@@ -119,18 +128,26 @@ def main():
     # then load state_dict. The checkpoint is a pure state_dict (saved via
     # save_checkpoint -> uncompiled_policy.state_dict()).
     from pufferlib.ocean import torch as ocean_torch
+
     base = ocean_torch.Drive(driver, input_size=128, hidden_size=256)
     horizon_eff = args.k * args.scen_len  # adaptive case: episode_length
     policy = ocean_torch.Transformer(
-        driver, base,
-        input_size=256, hidden_size=256, num_layers=2,
-        num_heads=4, horizon=horizon_eff, dropout=0.0,
+        driver,
+        base,
+        input_size=256,
+        hidden_size=256,
+        num_layers=2,
+        num_heads=4,
+        horizon=horizon_eff,
+        dropout=0.0,
     ).to(device)
     state_dict = torch.load(args.checkpoint, map_location=device)
     state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     policy.load_state_dict(state_dict)
     policy.eval()
-    print(f"  policy class={type(policy).__name__}  horizon={policy.horizon}  layers={policy.num_layers}  heads={policy.num_heads}")
+    print(
+        f"  policy class={type(policy).__name__}  horizon={policy.horizon}  layers={policy.num_layers}  heads={policy.num_heads}"
+    )
 
     print("[3/4] running probed rollout…")
     obs, _ = env.reset()
@@ -149,6 +166,7 @@ def main():
             ob_t = torch.as_tensor(ego_obs).to(device)
             logits, _ = policy.forward_eval(ob_t, state)
             import pufferlib.pytorch
+
             action, _, _ = pufferlib.pytorch.sample_logits(logits)
             action_np = action.cpu().numpy().reshape(len(driver.ego_ids), -1)
         obs, rewards, dones, truncs, info = env.step(action_np)
@@ -178,9 +196,7 @@ def main():
     for t in range(T):
         for li in range(num_layers):
             rec = state["_attn_weights"][t * num_layers + li]
-            assert rec["layer"] == li, (
-                f"layer ordering mismatch at step {t}: expected {li} got {rec['layer']}"
-            )
+            assert rec["layer"] == li, f"layer ordering mismatch at step {t}: expected {li} got {rec['layer']}"
             # weights: (B, H, 1, horizon). Take ego agent, drop query dim.
             w = rec["weights"][ego, :, 0, :].numpy()  # (H, horizon)
             attn_lhth[li, :, t, :] = w
@@ -189,8 +205,7 @@ def main():
     # rows where no positions are visible (none yet — shouldn't happen since
     # we always write the current slot before attending), sum could be 0.
     row_sums = attn_lhth.sum(axis=-1)  # (L, H, T)
-    print(f"  row_sum stats: min={row_sums.min():.3f} max={row_sums.max():.3f} "
-          f"mean={row_sums.mean():.3f}")
+    print(f"  row_sum stats: min={row_sums.min():.3f} max={row_sums.max():.3f} mean={row_sums.mean():.3f}")
 
     np.savez_compressed(
         args.out,
@@ -209,7 +224,7 @@ def main():
         checkpoint=args.checkpoint,
         coplayer=args.coplayer,
     )
-    print(f"  saved → {args.out}  ({os.path.getsize(args.out)/1e6:.1f} MB)")
+    print(f"  saved → {args.out}  ({os.path.getsize(args.out) / 1e6:.1f} MB)")
 
     # Quick numerical summary: how much attention does s_1 put on s_0 positions?
     if args.k > 1:
@@ -223,8 +238,7 @@ def main():
                 for h in range(num_heads):
                     block = attn_lhth[li, h, q_start:q_end, :past_end]  # (S, past_end)
                     cross = block.sum(axis=-1).mean()  # mean over s_k query steps
-                    print(f"  s_{k_idx} → past   layer={li} head={h}  "
-                          f"mean attention mass on past slots = {cross:.4f}")
+                    print(f"  s_{k_idx} → past   layer={li} head={h}  mean attention mass on past slots = {cross:.4f}")
 
 
 if __name__ == "__main__":

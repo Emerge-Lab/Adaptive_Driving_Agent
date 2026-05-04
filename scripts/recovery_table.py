@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read per-agent success log from each /tmp/recovery_<wid>.json and print
 conditional-success tables. Pure data — no judgment calls in the script."""
+
 import json
 import os
 
@@ -24,7 +25,7 @@ def cond_rate(records, condition_fn, target_fn):
 def fmt(rate, num, den):
     if rate is None:
         return "—"
-    return f"{100*rate:5.1f}% ({num}/{den})"
+    return f"{100 * rate:5.1f}% ({num}/{den})"
 
 
 for wid, label in RUNS:

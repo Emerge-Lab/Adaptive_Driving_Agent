@@ -301,9 +301,7 @@ class Drive(pufferlib.PufferEnv):
         self.ego_is_oracle = bool(ego_is_oracle)
         self.reward_only_last_scenario = bool(reward_only_last_scenario)
         if self.reward_only_last_scenario and not self.adaptive_driving_agent:
-            raise ValueError(
-                "reward_only_last_scenario=True requires adaptive_driving_agent=True (k_scenarios > 1)."
-            )
+            raise ValueError("reward_only_last_scenario=True requires adaptive_driving_agent=True (k_scenarios > 1).")
         if self.ego_is_oracle:
             # Determine the partner's conditioning dim count (== oracle width).
             ct = self.co_player_condition_type
@@ -318,9 +316,7 @@ class Drive(pufferlib.PufferEnv):
                 + (1 if self.co_player_discount_conditioned else 0)
             )
             if self._oracle_dims == 0:
-                raise ValueError(
-                    "ego_is_oracle=True but partner conditioning resolved to 0 dims."
-                )
+                raise ValueError("ego_is_oracle=True but partner conditioning resolved to 0 dims.")
             # Grow obs space so pufferl allocates a buffer wide enough to
             # hold the appended oracle slots (placed AFTER road_obs, at
             # offset = num_obs - oracle_dims). C still writes the smaller
@@ -442,9 +438,7 @@ class Drive(pufferlib.PufferEnv):
         # conditioning to be on).
         if self.ego_is_oracle:
             self._c_obs_dim = self.num_obs - self._oracle_dims
-            self._c_observations = np.zeros(
-                (self.num_agents, self._c_obs_dim), dtype=np.float32
-            )
+            self._c_observations = np.zeros((self.num_agents, self._c_obs_dim), dtype=np.float32)
             self._rebuild_ego_env_indices()
 
         env_ids = []
@@ -453,11 +447,7 @@ class Drive(pufferlib.PufferEnv):
             nxt = self.agent_offsets[i + 1]
             # Oracle: hand C its own private obs slice (smaller, no oracle
             # slots). Otherwise C uses the pufferl-provided buffer directly.
-            obs_slice_for_c = (
-                self._c_observations[cur:nxt]
-                if self.ego_is_oracle
-                else self.observations[cur:nxt]
-            )
+            obs_slice_for_c = self._c_observations[cur:nxt] if self.ego_is_oracle else self.observations[cur:nxt]
             env_id = binding.env_init(
                 obs_slice_for_c,
                 self.actions[cur:nxt],
@@ -741,9 +731,7 @@ class Drive(pufferlib.PufferEnv):
         # whatever was there (zeros from allocation; pufferl filters out
         # non-ego rows downstream anyway).
         if len(self.ego_ids) > 0:
-            self.observations[self.ego_ids, c_dim:] = self._oracle_obs_per_env[
-                self._ego_env_indices
-            ]
+            self.observations[self.ego_ids, c_dim:] = self._oracle_obs_per_env[self._ego_env_indices]
 
     def _current_k_eff(self):
         """Effective k for the ego's K/V cache horizon at the current
@@ -891,10 +879,20 @@ class Drive(pufferlib.PufferEnv):
         Used in two places:
           - The resample boundary (every `resample_frequency` ticks): full
             episode reset, also resets `current_scenario` upstream of here.
-          - The scenario boundary when `map_rand_per_scenario=True`: only
-            the env's physical state changes (new map, new agents, new
-            partner conditioning); the EGO POLICY's K/V cache (in main /
-            pufferl) is NOT touched, so cross-scenario context survives.
+          - The scenario boundary when `map_rand_per_scenario=True`.
+
+        WARNING — `map_rand_per_scenario=True` is broken as an ICL probe.
+        This function unconditionally sets `self.terminals[:] = 1` at the
+        end (see below), which pufferl reads as `done` and uses to wipe
+        the ego K/V cache (and reset `transformer_position` to 0). It
+        also propagates into the training-time `create_episode_mask`
+        (via the rollout terminals buffer), which then blocks scen_1 →
+        scen_0 attention AND truncates GAE advantage propagation across
+        the boundary. So with this flag on, the cache does NOT survive
+        the within-episode boundary in either rollout or training, and
+        cross-scenario credit assignment is impossible. Do not use this
+        flag for ICL experiments without first decoupling the
+        terminals=1 write from the scenario-boundary call site.
         """
         if self._render_keep_client_on_swap:
             binding.vec_donate_client(self.c_envs)
@@ -905,11 +903,7 @@ class Drive(pufferlib.PufferEnv):
         for i in range(self.num_envs):
             cur = self.agent_offsets[i]
             nxt = self.agent_offsets[i + 1]
-            obs_slice_for_c = (
-                self._c_observations[cur:nxt]
-                if self.ego_is_oracle
-                else self.observations[cur:nxt]
-            )
+            obs_slice_for_c = self._c_observations[cur:nxt] if self.ego_is_oracle else self.observations[cur:nxt]
             env_id = binding.env_init(
                 obs_slice_for_c,
                 self.actions[cur:nxt],

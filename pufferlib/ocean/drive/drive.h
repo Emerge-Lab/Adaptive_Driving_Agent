@@ -1890,7 +1890,7 @@ static Client *g_donated_client = NULL;
 void c_donate_client(Drive *env) {
     if (env->client != NULL) {
         g_donated_client = env->client;
-        env->client = NULL;  // c_close now no-ops the client teardown.
+        env->client = NULL; // c_close now no-ops the client teardown.
     }
 }
 

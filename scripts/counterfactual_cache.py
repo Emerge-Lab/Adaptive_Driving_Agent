@@ -18,6 +18,7 @@ Usage:
       --coplayer experiments/puffer_drive_<id>.pt \
       --rollouts 30 [--gpu 7] [--map-rand] [--out /tmp/cf.json]
 """
+
 import argparse
 import json
 import os
@@ -64,18 +65,28 @@ def build_env(args, seed):
         co_player_policy=dict(
             policy_path=args.coplayer,
             architecture="Transformer",
-            input_size=128, hidden_size=256,
+            input_size=128,
+            hidden_size=256,
             transformer=dict(
-                input_size=256, hidden_size=256, num_layers=2,
-                num_heads=4, horizon=args.scen_len, dropout=0.0,
+                input_size=256,
+                hidden_size=256,
+                num_layers=2,
+                num_heads=4,
+                horizon=args.scen_len,
+                dropout=0.0,
             ),
             conditioning=dict(
                 type="all",
-                collision_weight_lb=-2, collision_weight_ub=0,
-                offroad_weight_lb=-2, offroad_weight_ub=0,
-                goal_weight_lb=0, goal_weight_ub=1,
-                entropy_weight_lb=0, entropy_weight_ub=0.10,
-                discount_weight_lb=0.8, discount_weight_ub=1,
+                collision_weight_lb=-2,
+                collision_weight_ub=0,
+                offroad_weight_lb=-2,
+                offroad_weight_ub=0,
+                goal_weight_lb=0,
+                goal_weight_ub=1,
+                entropy_weight_lb=0,
+                entropy_weight_ub=0.10,
+                discount_weight_lb=0.8,
+                discount_weight_ub=1,
             ),
         ),
         conditioning=dict(type="none"),
@@ -92,11 +103,17 @@ def build_env(args, seed):
 
 def load_policy(ckpt, driver, device, k, scen_len):
     from pufferlib.ocean import torch as ocean_torch
+
     base = ocean_torch.Drive(driver, input_size=128, hidden_size=256)
     policy = ocean_torch.Transformer(
-        driver, base,
-        input_size=256, hidden_size=256, num_layers=2,
-        num_heads=4, horizon=k * scen_len, dropout=0.0,
+        driver,
+        base,
+        input_size=256,
+        hidden_size=256,
+        num_layers=2,
+        num_heads=4,
+        horizon=k * scen_len,
+        dropout=0.0,
     ).to(device)
     sd = torch.load(ckpt, map_location=device)
     sd = {k.replace("module.", ""): v for k, v in sd.items()}
@@ -135,7 +152,7 @@ def rollout(env, policy, device, args, condition, base_seed):
         # scenario means the agent reached its goal that scenario.
         rewards_arr = np.asarray(rewards).reshape(-1)
         ego_rewards = rewards_arr[driver.ego_ids]
-        success[scen] |= (ego_rewards > args.goal_reward_threshold)
+        success[scen] |= ego_rewards > args.goal_reward_threshold
     return success
 
 
@@ -160,9 +177,11 @@ def main():
         for cond in ("preserved", "zeroed"):
             succ = rollout(env, policy, device, args, cond, seed)
             results[cond].append(succ)
-            print(f"  rollout {r:3d} cond={cond:9s} "
-                  f"s0_rate={succ[0].mean():.3f} s1_rate={succ[1].mean():.3f} "
-                  f"ada_delta={succ[1].mean() - succ[0].mean():+.3f}")
+            print(
+                f"  rollout {r:3d} cond={cond:9s} "
+                f"s0_rate={succ[0].mean():.3f} s1_rate={succ[1].mean():.3f} "
+                f"ada_delta={succ[1].mean() - succ[0].mean():+.3f}"
+            )
     env.close()
 
     # Aggregate.
@@ -220,6 +239,7 @@ def main():
             print(f"  {cond}:  {p:.4f}  (n_failed_s0={int(f0.sum())})")
         else:
             print(f"  {cond}:  N/A (no failures in s_0)")
+
 
 if __name__ == "__main__":
     main()

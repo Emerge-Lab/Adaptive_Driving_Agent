@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare adaptive eval (cache preserved) vs control eval (cache reset).
 The lift is the actual adaptation signal."""
+
 import json
 import os
 
@@ -29,7 +30,7 @@ def cond_rate(records, cond_fn, target_fn):
 def fmt(rate, num, den):
     if rate is None:
         return "       —"
-    return f"{100*rate:5.1f}% ({num:>4}/{den})"
+    return f"{100 * rate:5.1f}% ({num:>4}/{den})"
 
 
 print("=" * 110)
@@ -70,8 +71,8 @@ for wid, label in RUNS:
             lift = a_r - c_r
             lift_str = f"{lift:+.3f}"
         if first:
-            print(f" {name:<28} {fmt(a_r,a_t,a_d):<22} {fmt(c_r,c_t,c_d):<22} {lift_str:<10}")
+            print(f" {name:<28} {fmt(a_r, a_t, a_d):<22} {fmt(c_r, c_t, c_d):<22} {lift_str:<10}")
             first = False
         else:
-            print(f"{'':<28} {name:<28} {fmt(a_r,a_t,a_d):<22} {fmt(c_r,c_t,c_d):<22} {lift_str:<10}")
+            print(f"{'':<28} {name:<28} {fmt(a_r, a_t, a_d):<22} {fmt(c_r, c_t, c_d):<22} {lift_str:<10}")
     print()

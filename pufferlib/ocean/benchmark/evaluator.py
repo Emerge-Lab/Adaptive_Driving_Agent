@@ -679,18 +679,14 @@ class HumanReplayEvaluator:
         # threshold is conservative: reward_goal default is 1.0 and the only
         # other positive per-step reward is reward_lane_align (0.01-ish), so
         # a single tick can't accumulate to 0.5 from lane reward alone.
-        goal_reward_threshold = float(
-            args.get("eval", {}).get("recovery_goal_reward_threshold", 0.5)
-        )
+        goal_reward_threshold = float(args.get("eval", {}).get("recovery_goal_reward_threshold", 0.5))
         # CONTROL: when env var RECOVERY_CACHE_RESET_PER_SCENARIO=1, reset
         # the policy's K/V cache (= "_fresh_state") at every scenario
         # boundary. This kills any cross-scenario context the Transformer
         # would have used, isolating "is the cache helping?" from "is the
         # per-scenario obs alone enough?". Env var because pufferl's
         # argparser doesn't auto-create new --eval.* flags.
-        cache_reset_per_scenario = os.environ.get(
-            "RECOVERY_CACHE_RESET_PER_SCENARIO", "0"
-        ) == "1"
+        cache_reset_per_scenario = os.environ.get("RECOVERY_CACHE_RESET_PER_SCENARIO", "0") == "1"
         if cache_reset_per_scenario:
             print("[recovery] CONTROL mode: resetting K/V cache at every scenario boundary", flush=True)
         success_arr = np.zeros((num_rollouts, k_scenarios, num_agents), dtype=bool)
@@ -726,8 +722,7 @@ class HumanReplayEvaluator:
                     # reach 0.5 in one tick). We OR across the scenario so the
                     # success flag sticks even if subsequent ticks are 0.
                     rewards_arr = np.asarray(rewards).reshape(-1)
-                    success_arr[rollout_idx, scenario] |= (rewards_arr > goal_reward_threshold)
-
+                    success_arr[rollout_idx, scenario] |= rewards_arr > goal_reward_threshold
 
                     for info_dict in info_list:
                         if not isinstance(info_dict, dict):
