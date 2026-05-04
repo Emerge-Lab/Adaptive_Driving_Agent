@@ -255,11 +255,11 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         else:
             self.input_projection = nn.Identity()
 
-        # NoPE: no positional embedding. Removed because under multi-episode
-        # rollouts (k_scenarios>1 + trial-redesign), training applies PE by
-        # slot-in-segment while rollout applies PE by slot-in-cache (which
-        # resets at episode boundary) — different absolute positions for the
-        # same logical step. Removing PE entirely sidesteps the mismatch.
+        # Learnable positional embeddings. Per-episode reset is applied in
+        # forward() (training) so the PE indexing matches forward_eval's
+        # cache-pos indexing under multi-episode-per-row rollouts.
+        self.positional_embedding = nn.Parameter(torch.zeros(1, horizon, hidden_size))
+        nn.init.normal_(self.positional_embedding, std=0.02)
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -316,6 +316,34 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         mask = self.create_causal_mask(T, device)
         self.register_buffer(buffer_name, mask, persistent=False)
         return mask
+
+    def get_positional_embedding(self, T, device):
+        """Get cached positional embedding for length T."""
+        cache_key = f"_pos_embed_{T}"
+        if not hasattr(self, cache_key) or getattr(self, cache_key).device != device:
+            pos_embed = self.positional_embedding[:, :T].to(device)
+            setattr(self, cache_key, pos_embed)
+        return getattr(self, cache_key)
+
+    @staticmethod
+    def compute_pos_within_episode(terminals):
+        """For terminals (B, T) bool/float, return per-slot position within
+        its episode (resets at slot AFTER each terminal). The convention
+        matches create_episode_mask: the terminal slot itself belongs to
+        the OLD episode, and the new episode starts at slot terminal+1.
+
+        Vectorized: shift terminals right by one (so a terminal at slot s
+        becomes a start-flag at slot s+1), multiply by arange to mark the
+        position of each episode-start, cummax to propagate the last
+        seen start position forward, then subtract from arange.
+        """
+        B, T = terminals.shape
+        device = terminals.device
+        arange_T = torch.arange(T, device=device, dtype=torch.long).unsqueeze(0).expand(B, T)
+        shifted = F.pad(terminals[:, :-1], (1, 0)).long()  # (B, T)
+        starts = arange_T * shifted  # (B, T) — slot index where new episode begins (else 0)
+        ep_start = starts.cummax(dim=1).values  # (B, T) — most recent episode-start at or before t
+        return arange_T - ep_start  # (B, T)
 
     def create_episode_mask(self, terminals, seq_len):
         """Episode mask which ensures that you arent attending over episode boundaries.
@@ -405,8 +433,8 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         device = state["k_cache"][0].device
         dtype = state["k_cache"][0].dtype
 
-        # NoPE: prime cache with zeros (was PE-only under sinusoidal PE).
-        layer_input = torch.zeros(n_idx, T, self.hidden_size, device=device, dtype=dtype)
+        pos_embed = self.get_positional_embedding(T, device).to(dtype)  # (1, T, hidden)
+        layer_input = pos_embed.expand(n_idx, T, self.hidden_size).contiguous()
         causal_mask = self.get_causal_mask(T, device)
 
         with torch.no_grad():
@@ -495,8 +523,11 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
 
         slot_t = (pos % self.horizon).long()  # (1,) long tensor
 
-        # NoPE: x is just the encoded current obs.
-        x = hidden.unsqueeze(1)  # (B, 1, hidden)
+        # PE indexed by slot_t (pos resets to 0 at episode boundary via
+        # pufferl.py's done handling, so PE[slot_t] = PE[pos_within_episode]).
+        pos_embed = self.get_positional_embedding(self.horizon, device)  # (1, horizon, hidden)
+        pos_embed_slot = pos_embed.index_select(1, slot_t).squeeze(1)  # (1, hidden)
+        x = (hidden + pos_embed_slot).unsqueeze(1)  # (B, 1, hidden)
 
         # Build (1, 1, 1, horizon) bool mask: True at slots [0, slot_t].
         slots_arange = self._slot_arange(device)
@@ -585,10 +616,11 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         context[:, write_idx, :] = hidden.unsqueeze(1)
         pos = pos + 1
 
-        # NoPE: no positional embedding added.
+        pos_embed = self.get_positional_embedding(self.horizon, device)
+        context_with_pos = context + pos_embed
         causal_mask = self.get_causal_mask(self.horizon, device)
 
-        output = self.transformer(context, mask=causal_mask, is_causal=True)
+        output = self.transformer(context_with_pos, mask=causal_mask, is_causal=True)
         output = self.output_norm(output)
 
         read_idx = ((pos - 1) % self.horizon).long()
@@ -624,7 +656,23 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             hidden = hidden[:, -T_actual:]
             T = T_actual
 
-        # NoPE: no positional embedding added.
+        # Per-episode-reset PE: under multi-episode rollouts, training must
+        # match rollout's PE indexing. Rollout (forward_eval) resets pos to 0
+        # at every episode boundary via pufferl.py's done handling, so for
+        # the same logical step within an episode, PE[pos_within_episode]
+        # is added. We mirror that here: compute pos_within_episode from
+        # terminals (cumsum-shifted-by-1 / cummax trick) and gather PE
+        # per-slot rather than indexing 0..T-1 across the segment.
+        terminals_for_pe = state.get("terminals")
+        if terminals_for_pe is not None:
+            pos_within_ep = self.compute_pos_within_episode(terminals_for_pe)  # (B, T) long
+            pos_within_ep = pos_within_ep.clamp(max=self.horizon - 1)  # safety: long-episode guard
+            # gather PE per (b, t): pe shape (1, horizon, hidden) → (B, T, hidden)
+            pe_full = self.get_positional_embedding(self.horizon, device)  # (1, horizon, hidden)
+            pe_per_slot = pe_full[0, pos_within_ep]  # (B, T, hidden)
+            hidden = hidden + pe_per_slot.to(hidden.dtype)
+        else:
+            hidden = hidden + self.get_positional_embedding(T, device)
 
         use_episode_mask = "terminals" in state and state["terminals"] is not None
 
