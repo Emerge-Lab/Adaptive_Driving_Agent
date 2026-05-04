@@ -34,6 +34,8 @@ class Drive(pufferlib.PufferEnv):
         reward_lane_align=0.0,  # GIGAFLOW lane alignment reward (0 = disabled)
         reward_vel_align=1.0,  # Velocity alignment coefficient for lane reward
         goal_behavior=0,
+        max_trials_per_episode=2,  # GOAL_TRIAL only
+        per_trial_timeout=None,  # GOAL_TRIAL only; None → C defaults to scenario_length
         goal_target_distance=10.0,
         goal_radius=2.0,
         goal_speed=20.0,
@@ -101,6 +103,8 @@ class Drive(pufferlib.PufferEnv):
         self.goal_radius = goal_radius
         self.goal_speed = goal_speed
         self.goal_behavior = goal_behavior
+        self.max_trials_per_episode = max_trials_per_episode
+        self.per_trial_timeout = per_trial_timeout
         self.goal_target_distance = goal_target_distance
         self.collision_behavior = collision_behavior
         self.offroad_behavior = offroad_behavior
@@ -475,6 +479,10 @@ class Drive(pufferlib.PufferEnv):
                 goal_radius=goal_radius,
                 goal_speed=goal_speed,
                 goal_behavior=self.goal_behavior,
+                max_trials_per_episode=self.max_trials_per_episode,
+                per_trial_timeout=(
+                    int(self.per_trial_timeout) if self.per_trial_timeout is not None else 0
+                ),
                 goal_target_distance=self.goal_target_distance,
                 collision_behavior=self.collision_behavior,
                 offroad_behavior=self.offroad_behavior,
@@ -915,6 +923,10 @@ class Drive(pufferlib.PufferEnv):
                 reward_offroad_collision=self.reward_offroad_collision,
                 goal_radius=self.goal_radius,
                 goal_behavior=self.goal_behavior,
+                max_trials_per_episode=self.max_trials_per_episode,
+                per_trial_timeout=(
+                    int(self.per_trial_timeout) if self.per_trial_timeout is not None else 0
+                ),
                 collision_behavior=self.collision_behavior,
                 offroad_behavior=self.offroad_behavior,
                 reward_goal=self.reward_goal,

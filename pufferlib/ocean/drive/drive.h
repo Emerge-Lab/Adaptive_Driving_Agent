@@ -116,6 +116,7 @@
 #define GOAL_RESPAWN 0
 #define GOAL_GENERATE_NEW 1
 #define GOAL_STOP 2
+#define GOAL_TRIAL 3  // up to max_trials_per_episode trials; ends on goal or per-trial timeout
 
 #define PARTNER_FEATURES 7
 
@@ -243,6 +244,8 @@ struct Entity {
     float goals_reached_this_episode;
     float goals_sampled_this_episode;
     int current_goal_reached;
+    int trial_count;            // GOAL_TRIAL only: trials completed this episode
+    int trial_start_timestep;   // GOAL_TRIAL only: tick when current trial began
     int active_agent;
     float cumulative_displacement;
     int displacement_sample_count;
@@ -333,12 +336,7 @@ struct Drive {
     float *actions;
     float *rewards;
     unsigned char *terminals;
-    // Per-agent flag set in c_step when a trial ends (goal-reach OR
-    // per-trial timeout) under goal_behavior=GOAL_TRIAL. Distinct from
-    // `terminals`, which fires only at the EPISODE boundary (after
-    // max_trials_per_episode trials). Python-owned buffer; C reads the
-    // pointer set in env_init / my_init.
-    unsigned char *trial_ended_this_step;
+    unsigned char *trial_ended_this_step;  // GOAL_TRIAL: per-agent trial-boundary flag
     Log log;
     Log *logs;
     int num_agents;
@@ -387,6 +385,9 @@ struct Drive {
     int *tracks_to_predict_indices;
     int init_mode;
     int control_mode;
+
+    int max_trials_per_episode;  // GOAL_TRIAL: max trials per episode (default 2)
+    int per_trial_timeout;       // GOAL_TRIAL: ticks per trial (default scenario_length)
 
     // Reward conditioning
     bool use_rc;
@@ -736,6 +737,8 @@ void set_start_position(Drive *env) {
         e->stopped = 0;
         e->removed = 0;
         e->respawn_count = 0;
+        e->trial_count = 0;
+        e->trial_start_timestep = 0;
 
         // Dynamics
         e->a_long = 0.0f;
@@ -2523,6 +2526,8 @@ void c_reset(Drive *env) {
         env->entities[agent_idx].current_lane_geometry_idx = -1;
         env->entities[agent_idx].stopped = 0;
         env->entities[agent_idx].removed = 0;
+        env->entities[agent_idx].trial_count = 0;
+        env->entities[agent_idx].trial_start_timestep = env->init_steps;
 
         if (env->goal_behavior == GOAL_GENERATE_NEW) {
             env->entities[agent_idx].goal_position_x = env->entities[agent_idx].init_goal_x;
@@ -2584,7 +2589,8 @@ void c_step(Drive *env) {
         }
     }
 
-    if (env->timestep == env->scenario_length || (!originals_remaining && env->termination_mode == 1)) {
+    if (env->goal_behavior != GOAL_TRIAL &&
+        (env->timestep == env->scenario_length || (!originals_remaining && env->termination_mode == 1))) {
         add_log(env);
         c_reset(env);
         return;
@@ -2768,6 +2774,24 @@ void c_step(Drive *env) {
             if (reached_goal) {
                 env->entities[agent_idx].stopped = 1;
                 env->entities[agent_idx].vx = env->entities[agent_idx].vy = 0.0f;
+            }
+        }
+    } else if (env->goal_behavior == GOAL_TRIAL) {
+        for (int i = 0; i < env->active_agent_count; i++) {
+            int agent_idx = env->active_agent_indices[i];
+            Entity *e = &env->entities[agent_idx];
+            int reached = e->metrics_array[REACHED_GOAL_IDX];
+            int timed_out = (env->timestep - e->trial_start_timestep) >= env->per_trial_timeout;
+            if (!reached && !timed_out) continue;
+
+            if (env->trial_ended_this_step != NULL) env->trial_ended_this_step[i] = 1;
+            e->trial_count++;
+            respawn_agent(env, agent_idx);
+            e->trial_start_timestep = env->timestep;
+
+            if (e->trial_count >= env->max_trials_per_episode) {
+                env->terminals[i] = 1;
+                e->trial_count = 0;
             }
         }
     }

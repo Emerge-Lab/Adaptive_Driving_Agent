@@ -122,6 +122,17 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->reward_vel_align = (float)unpack(kwargs, "reward_vel_align");
     env->scenario_length = conf.scenario_length;
 
+    // GOAL_TRIAL config (only used when goal_behavior == GOAL_TRIAL).
+    env->max_trials_per_episode = 2;
+    env->per_trial_timeout = conf.scenario_length;
+    if (kwargs && PyDict_GetItemString(kwargs, "max_trials_per_episode")) {
+        env->max_trials_per_episode = (int)unpack(kwargs, "max_trials_per_episode");
+    }
+    if (kwargs && PyDict_GetItemString(kwargs, "per_trial_timeout")) {
+        int v = (int)unpack(kwargs, "per_trial_timeout");
+        if (v > 0) env->per_trial_timeout = v;  // 0 means "use default" (scenario_length)
+    }
+
     env->termination_mode = conf.termination_mode;
     env->collision_behavior = conf.collision_behavior;
     env->offroad_behavior = conf.offroad_behavior;
