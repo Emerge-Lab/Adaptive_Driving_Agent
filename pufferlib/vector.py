@@ -1004,6 +1004,10 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
         state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
+        # NoPE migration: drop legacy `positional_embedding` buffer entries
+        # (sinusoidal PE was removed; old partner checkpoints still carry it).
+        state_dict = {k: v for k, v in state_dict.items() if k != "positional_embedding"}
+
         policy.load_state_dict(state_dict, strict=True)
         if external_coplayer:
             # Main owns the co-player on GPU. Don't pin to CPU; don't pass to

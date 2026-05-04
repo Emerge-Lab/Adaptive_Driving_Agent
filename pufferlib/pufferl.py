@@ -2001,9 +2001,11 @@ def load_policy(args, vecenv, env_name=""):
         state_dict = torch.load(path, map_location=device)
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
 
-    # Auto-detect architecture from state_dict keys
+    # Auto-detect architecture from state_dict keys. NoPE migration: legacy
+    # transformer ckpts have `positional_embedding`; new ones don't, so we
+    # also accept any `transformer.layers.*` key as a Transformer marker.
     if state_dict is not None:
-        if "positional_embedding" in state_dict:
+        if "positional_embedding" in state_dict or any(k.startswith("transformer.layers.") for k in state_dict):
             rnn_name = "Transformer"
         elif "lstm.weight_ih_l0" in state_dict:
             rnn_name = "Recurrent"
@@ -2032,6 +2034,8 @@ def load_policy(args, vecenv, env_name=""):
 
     # Load the state dict if we have one
     if state_dict is not None:
+        # NoPE migration: drop legacy positional_embedding key.
+        state_dict = {k: v for k, v in state_dict.items() if k != "positional_embedding"}
         policy.load_state_dict(state_dict)
 
     return policy

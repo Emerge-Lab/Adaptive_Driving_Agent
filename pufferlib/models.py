@@ -255,20 +255,11 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         else:
             self.input_projection = nn.Identity()
 
-        # Sinusoidal positional embedding (Vaswani et al.) — non-trainable.
-        # Switched from learnable PE so the transformer has temporal
-        # structure from initialization rather than having to learn it
-        # from gradients. Slot-tied: PE[i] is added when writing to
-        # cache slot i, identical for both forward (training) and
-        # forward_eval (rollout) paths via get_positional_embedding().
-        pe = torch.zeros(horizon, hidden_size)
-        position = torch.arange(0, horizon, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, hidden_size, 2, dtype=torch.float) * (-math.log(10000.0) / hidden_size))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        # register_buffer keeps it on the module's device but excludes it
-        # from .parameters() (no gradient updates).
-        self.register_buffer("positional_embedding", pe.unsqueeze(0))
+        # NoPE: no positional embedding. Removed because under multi-episode
+        # rollouts (k_scenarios>1 + trial-redesign), training applies PE by
+        # slot-in-segment while rollout applies PE by slot-in-cache (which
+        # resets at episode boundary) — different absolute positions for the
+        # same logical step. Removing PE entirely sidesteps the mismatch.
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -325,14 +316,6 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         mask = self.create_causal_mask(T, device)
         self.register_buffer(buffer_name, mask, persistent=False)
         return mask
-
-    def get_positional_embedding(self, T, device):
-        """Get cached positional embedding for length T"""
-        cache_key = f"_pos_embed_{T}"
-        if not hasattr(self, cache_key) or getattr(self, cache_key).device != device:
-            pos_embed = self.positional_embedding[:, :T].to(device)
-            setattr(self, cache_key, pos_embed)
-        return getattr(self, cache_key)
 
     def create_episode_mask(self, terminals, seq_len):
         """Episode mask which ensures that you arent attending over episode boundaries.
@@ -422,8 +405,8 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         device = state["k_cache"][0].device
         dtype = state["k_cache"][0].dtype
 
-        pos_embed = self.get_positional_embedding(T, device).to(dtype)  # (1, T, hidden)
-        layer_input = pos_embed.expand(n_idx, T, self.hidden_size).contiguous()
+        # NoPE: prime cache with zeros (was PE-only under sinusoidal PE).
+        layer_input = torch.zeros(n_idx, T, self.hidden_size, device=device, dtype=dtype)
         causal_mask = self.get_causal_mask(T, device)
 
         with torch.no_grad():
@@ -512,11 +495,8 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
 
         slot_t = (pos % self.horizon).long()  # (1,) long tensor
 
-        # Add the slot's positional embedding (slot-tied, matching the
-        # legacy rolling-buffer scheme).
-        pos_embed = self.get_positional_embedding(self.horizon, device)  # (1, horizon, hidden)
-        pos_embed_slot = pos_embed.index_select(1, slot_t).squeeze(1)  # (1, hidden)
-        x = (hidden + pos_embed_slot).unsqueeze(1)  # (B, 1, hidden)
+        # NoPE: x is just the encoded current obs.
+        x = hidden.unsqueeze(1)  # (B, 1, hidden)
 
         # Build (1, 1, 1, horizon) bool mask: True at slots [0, slot_t].
         slots_arange = self._slot_arange(device)
@@ -605,12 +585,10 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         context[:, write_idx, :] = hidden.unsqueeze(1)
         pos = pos + 1
 
-        pos_embed = self.get_positional_embedding(self.horizon, device)
-        context_with_pos = context + pos_embed
-
+        # NoPE: no positional embedding added.
         causal_mask = self.get_causal_mask(self.horizon, device)
 
-        output = self.transformer(context_with_pos, mask=causal_mask, is_causal=True)
+        output = self.transformer(context, mask=causal_mask, is_causal=True)
         output = self.output_norm(output)
 
         read_idx = ((pos - 1) % self.horizon).long()
@@ -646,7 +624,7 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             hidden = hidden[:, -T_actual:]
             T = T_actual
 
-        hidden = hidden + self.get_positional_embedding(T, device)
+        # NoPE: no positional embedding added.
 
         use_episode_mask = "terminals" in state and state["terminals"] is not None
 
