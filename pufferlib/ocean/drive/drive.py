@@ -874,25 +874,13 @@ class Drive(pufferlib.PufferEnv):
             shm[:n, :] = self.cached_conditioning_array[:n, :]
 
     def _reinit_envs_with_new_maps(self):
-        """Close + recreate the C envs with FRESHLY sampled map_ids.
+        """Close + recreate C envs with fresh map_ids.
 
-        Used in two places:
-          - The resample boundary (every `resample_frequency` ticks): full
-            episode reset, also resets `current_scenario` upstream of here.
-          - The scenario boundary when `map_rand_per_scenario=True`.
-
-        WARNING — `map_rand_per_scenario=True` is broken as an ICL probe.
-        This function unconditionally sets `self.terminals[:] = 1` at the
-        end (see below), which pufferl reads as `done` and uses to wipe
-        the ego K/V cache (and reset `transformer_position` to 0). It
-        also propagates into the training-time `create_episode_mask`
-        (via the rollout terminals buffer), which then blocks scen_1 →
-        scen_0 attention AND truncates GAE advantage propagation across
-        the boundary. So with this flag on, the cache does NOT survive
-        the within-episode boundary in either rollout or training, and
-        cross-scenario credit assignment is impossible. Do not use this
-        flag for ICL experiments without first decoupling the
-        terminals=1 write from the scenario-boundary call site.
+        Called at episode resample boundary and (when
+        `map_rand_per_scenario=True`) at scenario boundaries. Note: this
+        sets `self.terminals[:] = 1`, which pufferl uses to wipe the ego
+        K/V cache — so `map_rand_per_scenario=True` is currently broken
+        as an ICL probe (cache + GAE both truncate at the boundary).
         """
         if self._render_keep_client_on_swap:
             binding.vec_donate_client(self.c_envs)

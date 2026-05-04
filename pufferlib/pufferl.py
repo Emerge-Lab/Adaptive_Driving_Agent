@@ -144,12 +144,6 @@ class PuffeRL:
 
         segments = batch_size // horizon
         self.segments = segments
-        # Surfaced as an instance attr because the Transformer reset path in
-        # evaluate() (~line 565) references self.horizon when re-allocating
-        # transformer_context buffers. This branch was dead code prior to the
-        # rnn_name plumbing fix; once that fix landed, the missing attr
-        # crashed every Transformer evaluate() call. Tied to the same value
-        # used to size the cache buffers below.
         self.horizon = horizon
         if not self.population_play:
             if total_agents > segments:
@@ -232,12 +226,7 @@ class PuffeRL:
             self.transformer_k_cache = {i * n: None for i in range(num_chunks)}
             self.transformer_v_cache = {i * n: None for i in range(num_chunks)}
 
-        # [VERIFY rnn_name plumbing bug] Diagnostic: print resolved rnn_name and
-        # whether Transformer cache buffers were actually allocated. Under the
-        # bug, train_config never receives rnn_name from args top-level →
-        # config.get('rnn_name') returns None → defaults to "Recurrent" → LSTM
-        # init branch fires, Transformer init branch is skipped, so
-        # transformer_k_cache attribute does NOT exist on self.
+        # Regression detector for the rnn_name plumbing bug — fires once.
         print(
             f"[VERIFY rnn_name] config.get('rnn_name')={config.get('rnn_name')!r}, "
             f"policy_architecture={config.get('policy_architecture')!r}, "
@@ -692,34 +681,22 @@ class PuffeRL:
                     self.transformer_k_cache[transformer_key] = state.get("k_cache")
                     self.transformer_v_cache[transformer_key] = state.get("v_cache")
 
-                    # Reset transformer context on episode boundaries
+                    # Episode-boundary reset. pos is a shared (1,) scalar
+                    # across the chunk; cache rows are per-agent. Filter
+                    # done indices against the cache's batch dim, not the
+                    # pos buffer's (1,) shape.
                     if done_mask.any():
                         done_indices = torch.where(torch.from_numpy(done_mask))[0]
                         if len(done_indices) > 0:
                             batch_start_in_group = env_id.start % batch_size
                             global_indices = batch_start_in_group + done_indices
-                            valid_mask = global_indices < self.transformer_position[transformer_key].shape[0]
+                            kc = self.transformer_k_cache[transformer_key]
+                            vc = self.transformer_v_cache[transformer_key]
+                            cache_batch_dim = kc[0].shape[0] if kc is not None else 0
+                            valid_mask = global_indices < cache_batch_dim
                             valid_indices = global_indices[valid_mask]
                             if len(valid_indices) > 0:
-                                # Reset position to 0 (was -1 in the legacy
-                                # path; -1 worked because (-1)%horizon picks
-                                # the last slot, but it makes the first
-                                # post-reset step write to slot horizon-1
-                                # instead of slot 0 — inconsistent with the
-                                # need_alloc / first-call branch which uses
-                                # 0. With the K/V cache now persisted, this
-                                # inconsistency would leak garbage into the
-                                # last slot. 0 makes post-reset identical
-                                # to first-call.
-                                self.transformer_position[transformer_key][valid_indices] = 0
-                                # Zero K/V cache rows for the agents whose
-                                # episode just ended. The policy must start
-                                # fresh in their next episode — without this,
-                                # past-episode tokens would leak into the new
-                                # episode's attention. Other rows in the
-                                # batch keep their accumulating cache.
-                                kc = self.transformer_k_cache[transformer_key]
-                                vc = self.transformer_v_cache[transformer_key]
+                                self.transformer_position[transformer_key][:] = 0
                                 if kc is not None and vc is not None:
                                     for c in kc:
                                         c[valid_indices] = 0
@@ -1531,18 +1508,10 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         eval=args.get("eval", {}),
         env_config=args.get("env", {}),
         policy_architecture=args.get("policy_architecture", "Recurrent"),
-        # rnn_name lives at args top level (parsed from default.ini's [base]
-        # block by the configparser → top-level argparse dance). Without
-        # this explicit propagation, train_config never sees rnn_name and
-        # every `config.get("rnn_name", "Recurrent")` site in PuffeRL
-        # silently defaults to "Recurrent" — which means the LSTM init/
-        # rollout branches fire even on Transformer runs, the Transformer
-        # K/V cache buffers are never allocated, and forward_eval lazy-
-        # allocates a fresh empty cache every step. ICL impossible.
-        # Fallback to policy_architecture if rnn_name was never passed.
+        # rnn_name lives at args top level — must be explicitly propagated,
+        # else config.get("rnn_name") defaults to "Recurrent" and the
+        # Transformer init/rollout branches in PuffeRL never fire.
         rnn_name=args.get("rnn_name", args.get("policy_architecture", "Recurrent")),
-        # Surface load paths so PuffeRL can resume optimizer/scheduler state
-        # from a sibling trainer_state.pt when --load-model-path is set.
         load_model_path=args.get("load_model_path"),
         load_id=args.get("load_id"),
     )
@@ -1656,13 +1625,8 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         backend = args["eval"].get("backend", "PufferEnv")
         args["vec"] = dict(backend=backend, num_envs=1)
         args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
-        # NOTE: do NOT hardcode episode_length here. Eval inherits
-        # scenario_length from training config (WOMD=91, nuPlan=201).
-        # Hardcoding 91 silently broke per-scenario aggregation for any
-        # scenario_length != 91 run — the env's `tick % scenario_length`
-        # boundary fired at the wrong cadence vs the evaluator's outer
-        # loop, so scenario_X_score / ada_delta_score were emitted ~k
-        # extra times per rollout and overwritten downstream.
+        # episode_length is NOT hardcoded here — inherits scenario_length
+        # from training config (WOMD=91, nuPlan=201).
         # Human replay: only 1 ego is policy-controlled, others follow logged trajectories
         args["env"]["co_player_enabled"] = False
         args["env"]["max_controlled_agents"] = 1

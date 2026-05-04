@@ -76,7 +76,7 @@ source .venv/bin/activate && \
 export CUDA_VISIBLE_DEVICES=$GPU && \
 echo '${LABEL}: k=$K partner=$PARTNER_ID e_ub=$EUB seed=$SEED gpu=$GPU horizon=$HORIZON' && \
 xvfb-run -a puffer train puffer_adaptive_drive \
-  --wandb --wandb-project adaptive_aligned \
+  --wandb --wandb-project hope_it_adapts \
   --tag $TAG \
   --policy-architecture Transformer \
   --rnn-name Transformer \
