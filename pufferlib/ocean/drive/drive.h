@@ -333,6 +333,12 @@ struct Drive {
     float *actions;
     float *rewards;
     unsigned char *terminals;
+    // Per-agent flag set in c_step when a trial ends (goal-reach OR
+    // per-trial timeout) under goal_behavior=GOAL_TRIAL. Distinct from
+    // `terminals`, which fires only at the EPISODE boundary (after
+    // max_trials_per_episode trials). Python-owned buffer; C reads the
+    // pointer set in env_init / my_init.
+    unsigned char *trial_ended_this_step;
     Log log;
     Log *logs;
     int num_agents;
@@ -1955,6 +1961,7 @@ void allocate(Drive *env) {
     env->actions = (float *)calloc(env->active_agent_count * 2, sizeof(float));
     env->rewards = (float *)calloc(env->active_agent_count, sizeof(float));
     env->terminals = (unsigned char *)calloc(env->active_agent_count, sizeof(unsigned char));
+    env->trial_ended_this_step = (unsigned char *)calloc(env->active_agent_count, sizeof(unsigned char));
 }
 
 void free_allocated(Drive *env) {
@@ -1962,6 +1969,7 @@ void free_allocated(Drive *env) {
     free(env->actions);
     free(env->rewards);
     free(env->terminals);
+    free(env->trial_ended_this_step);
 
     // Always free weight arrays
     free(env->collision_weights);
@@ -2560,6 +2568,9 @@ void respawn_agent(Drive *env, int agent_idx) {
 void c_step(Drive *env) {
     memset(env->rewards, 0, env->active_agent_count * sizeof(float));
     memset(env->terminals, 0, env->active_agent_count * sizeof(unsigned char));
+    if (env->trial_ended_this_step != NULL) {
+        memset(env->trial_ended_this_step, 0, env->active_agent_count * sizeof(unsigned char));
+    }
 
     env->timestep++;
 

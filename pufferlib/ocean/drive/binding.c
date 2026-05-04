@@ -65,6 +65,22 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
         return 1;
     }
     env->terminals = PyArray_DATA(terminals);
+
+    // trial_ended_this_step is OPTIONAL — older callers may not pass it.
+    // Defaults to NULL; c_step's memset is guarded.
+    PyObject *trial = PyDict_GetItemString(kwargs, "trial_ended_this_step");
+    if (trial != NULL) {
+        if (!PyObject_TypeCheck(trial, &PyArray_Type)) {
+            PyErr_SetString(PyExc_TypeError, "trial_ended_this_step must be a NumPy array");
+            return 1;
+        }
+        PyArrayObject *trial_arr = (PyArrayObject *)trial;
+        if (!PyArray_ISCONTIGUOUS(trial_arr) || PyArray_NDIM(trial_arr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "trial_ended_this_step must be 1D contiguous");
+            return 1;
+        }
+        env->trial_ended_this_step = PyArray_DATA(trial_arr);
+    }
     return 0;
 }
 
@@ -197,6 +213,23 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->map_name = strdup(map_file);
     env->init_steps = init_steps;
     env->timestep = init_steps;
+
+    // trial_ended_this_step is OPTIONAL. NULL is safe (c_step's memset is guarded).
+    env->trial_ended_this_step = NULL;
+    PyObject *trial = PyDict_GetItemString(kwargs, "trial_ended_this_step");
+    if (trial != NULL) {
+        if (!PyObject_TypeCheck(trial, &PyArray_Type)) {
+            PyErr_SetString(PyExc_TypeError, "trial_ended_this_step must be a NumPy array");
+            return -1;
+        }
+        PyArrayObject *trial_arr = (PyArrayObject *)trial;
+        if (!PyArray_ISCONTIGUOUS(trial_arr) || PyArray_NDIM(trial_arr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "trial_ended_this_step must be 1D contiguous");
+            return -1;
+        }
+        env->trial_ended_this_step = PyArray_DATA(trial_arr);
+    }
+
     init(env);
     return 0;
 }

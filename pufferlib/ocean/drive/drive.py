@@ -421,6 +421,14 @@ class Drive(pufferlib.PufferEnv):
                 self._set_co_player_state()
 
         super().__init__(buf=buf)
+
+        # `trial_ended_this_step`: per-agent flag set by C in c_step under
+        # goal_behavior=GOAL_TRIAL (=3) when a trial ends (goal-reach OR
+        # per-trial timeout). Distinct from `terminals`, which fires only
+        # at the EPISODE boundary (after max_trials_per_episode trials).
+        # Python-owned 1-byte buffer; C reads the pointer set in env_init.
+        self.trial_ended_this_step = np.zeros(self.num_agents, dtype=bool)
+
         if self.population_play:
             self.action_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_ego_agents)
             co_player_atn_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_co_players)
@@ -500,6 +508,7 @@ class Drive(pufferlib.PufferEnv):
                 control_mode=self.control_mode,
                 map_dir=map_dir,
                 render_mode=self._render_mode_int,
+                trial_ended_this_step=self.trial_ended_this_step[cur:nxt],
             )
             env_ids.append(env_id)
 
@@ -943,6 +952,7 @@ class Drive(pufferlib.PufferEnv):
                 control_mode=self.control_mode,
                 map_dir=self.map_dir,
                 render_mode=self._render_mode_int,
+                trial_ended_this_step=self.trial_ended_this_step[cur:nxt],
             )
             env_ids.append(env_id)
         self.c_envs = binding.vectorize(*env_ids)
