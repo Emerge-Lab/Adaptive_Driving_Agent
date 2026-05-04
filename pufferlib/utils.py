@@ -36,6 +36,11 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
         k_scenarios = env_config.get("k_scenarios", 1)
         scenario_length = env_config.get("scenario_length", 91)
         train_horizon = config.get("horizon", scenario_length * k_scenarios)
+        # Inherit goal_behavior + (under GOAL_TRIAL=3) the trial config from
+        # training so the in-training subprocess eval matches what training did.
+        goal_behavior = int(env_config.get("goal_behavior", 0))
+        max_trials_per_episode = int(env_config.get("max_trials_per_episode", 2))
+        per_trial_timeout = env_config.get("per_trial_timeout")
 
         cmd = [
             sys.executable,
@@ -66,11 +71,12 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             str(scenario_length),
             "--train.horizon",
             str(train_horizon),
-            # Match training goal_behavior. The "stop is cleaner" claim was wrong
-            # in practice — sparse reward under gb=2 produces worse drivers; gb=0
-            # respawn captures real efficiency adaptation in scen_1 vs scen_0.
+            # Inherit training's goal_behavior (and trial config under GOAL_TRIAL).
             "--env.goal-behavior",
-            "0",
+            str(goal_behavior),
+            "--env.max-trials-per-episode",
+            str(max_trials_per_episode),
+            *(["--env.per-trial-timeout", str(int(per_trial_timeout))] if per_trial_timeout else []),
             "--env.conditioning.type",
             conditioning_type,
             "--env.conditioning.collision-weight-lb",
