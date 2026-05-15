@@ -411,6 +411,10 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             k_cache=self._make_kv_cache(batch_size, device, dtype),
             v_cache=self._make_kv_cache(batch_size, device, dtype),
             transformer_position=torch.zeros(1, dtype=torch.long, device=device),
+            # B'' garbage_mask: per-agent, per-cache-slot bool. True = the slot
+            # was written while the agent was off-map (removed=1), so it should
+            # be excluded from attention to avoid limbo-token pollution.
+            garbage_mask=torch.zeros(batch_size, self.horizon, dtype=torch.bool, device=device),
         )
 
     def _prime_kv_cache(self, indices, state):
@@ -489,11 +493,17 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             pos = state.get("transformer_position")
             if pos is not None:
                 pos.zero_()
+            gm = state.get("garbage_mask")
+            if gm is not None:
+                gm.zero_()
         else:
             idx = done_indices
             if not torch.is_tensor(idx):
                 idx = torch.as_tensor(idx, device=k_cache[0].device, dtype=torch.long)
             self._prime_kv_cache(idx, state)
+            gm = state.get("garbage_mask")
+            if gm is not None:
+                gm[idx] = False
 
     def forward_eval(self, observations, state):
         if _USE_LEGACY_EVAL:
@@ -534,9 +544,20 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         pos_embed_slot = pos_embed.index_select(1, slot_t).squeeze(1)  # (1, hidden)
         x = (hidden + pos_embed_slot).unsqueeze(1)  # (B, 1, hidden)
 
-        # Build (1, 1, 1, horizon) bool mask: True at slots [0, slot_t].
+        # B'' garbage_mask (per-agent, per-slot bool). Slots that were written
+        # while the agent was off-map (removed=1) are excluded from attention
+        # so the limbo period doesn't pollute the cache. Allocated lazily if
+        # missing or if batch size changed.
+        garbage_mask = state.get("garbage_mask")
+        if garbage_mask is None or garbage_mask.shape != (B, self.horizon):
+            garbage_mask = torch.zeros(B, self.horizon, dtype=torch.bool, device=device)
+
+        # Build per-agent (B, 1, 1, horizon) bool mask: True at slots in
+        # [0, slot_t] AND not garbage. Pre-fix this was (1, 1, 1, horizon)
+        # shared across batch with no garbage exclusion.
         slots_arange = self._slot_arange(device)
-        attn_mask = (slots_arange <= slot_t).view(1, 1, 1, self.horizon)
+        base_mask = (slots_arange <= slot_t).view(1, self.horizon)  # (1, horizon)
+        attn_mask = (base_mask & ~garbage_mask).view(B, 1, 1, self.horizon)
         H = self.num_heads
         D = self.head_dim
 
@@ -592,6 +613,17 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         state["v_cache"] = v_cache
         state["transformer_position"] = pos + 1
         state["hidden"] = hidden_out
+
+        # Mark just-written cache slot as garbage for agents that are off-map
+        # this step. Next step's attention will exclude these slots. `removed`
+        # comes from the env's SHM buffer (drive.py self.removed), routed via
+        # pufferl.py before this forward_eval call.
+        removed = state.get("removed")
+        if removed is not None:
+            r = removed.to(device=device, dtype=torch.bool).view(-1)
+            if r.shape[0] == B:
+                garbage_mask[:, slot_t.squeeze()] = garbage_mask[:, slot_t.squeeze()] | r
+        state["garbage_mask"] = garbage_mask
 
         logits, values = self.policy.decode_actions(hidden_out)
         return logits, values

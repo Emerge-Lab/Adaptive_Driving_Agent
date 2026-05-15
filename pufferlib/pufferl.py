@@ -257,6 +257,12 @@ class PuffeRL:
             # prior to that). None initially → first call allocates.
             self.transformer_k_cache = {i * n: None for i in range(num_chunks)}
             self.transformer_v_cache = {i * n: None for i in range(num_chunks)}
+            # B'' garbage_mask: per-agent per-cache-slot bool. The model marks
+            # current slot True when env.removed[i]=1 (ego off-map). Attention
+            # then excludes those slots. Lazy-allocated by the model on first
+            # forward_eval — None here mirrors the k_cache pattern.
+            self.transformer_garbage_mask = {i * n: None for i in range(num_chunks)}
+            self.horizon = int(getattr(policy, "horizon", config.get("horizon", 0)) or 0)
 
         # Regression detector for the rnn_name plumbing bug — fires once.
         print(
@@ -681,6 +687,16 @@ class PuffeRL:
                     # and the policy attends over the full accumulated past.
                     state["k_cache"] = self.transformer_k_cache[state_key]
                     state["v_cache"] = self.transformer_v_cache[state_key]
+                    state["garbage_mask"] = self.transformer_garbage_mask[state_key]
+                    # B'' off-map flag. The model uses this to (a) mark the
+                    # current cache slot as garbage in garbage_mask, and
+                    # (b) exclude existing garbage slots from this step's
+                    # attention. None or all-False if the env doesn't expose
+                    # `removed` (e.g. non-gb=3 modes).
+                    rem_buf = getattr(self.vecenv.driver_env, "removed", None)
+                    if rem_buf is not None:
+                        rem_np = np.asarray(rem_buf)[env_id]
+                        state["removed"] = torch.as_tensor(rem_np, device=device, dtype=torch.bool)
                     # Note: terminals not needed for eval since we're doing single-step inference
 
                 # print(".", end="", flush=True)  # Prevents multiprocessing deadlock
@@ -716,6 +732,7 @@ class PuffeRL:
                     # these if it took the legacy path.
                     self.transformer_k_cache[transformer_key] = state.get("k_cache")
                     self.transformer_v_cache[transformer_key] = state.get("v_cache")
+                    self.transformer_garbage_mask[transformer_key] = state.get("garbage_mask")
 
                     # Episode-boundary reset. pos is a shared (1,) scalar
                     # across the chunk; cache rows are per-agent. Filter
@@ -738,6 +755,9 @@ class PuffeRL:
                                         c[valid_indices] = 0
                                     for c in vc:
                                         c[valid_indices] = 0
+                                gm = self.transformer_garbage_mask[transformer_key]
+                                if gm is not None:
+                                    gm[valid_indices] = False
                                 if _TRIAL_DEBUG_ENABLED:
                                     # At this point d/t may be torch CUDA tensors
                                     # (converted earlier in this block). Use done_mask
