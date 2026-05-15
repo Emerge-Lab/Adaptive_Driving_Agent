@@ -431,7 +431,8 @@ class Drive(pufferlib.PufferEnv):
         self.trial_ended_this_step = np.zeros(self.num_agents, dtype=bool)
         # B'' off-map flag. C writes 1 when an ego reaches goal mid-trial
         # (entity goes off-map); 0 when env trial-end resets the world.
-        # pufferl uses this to freeze the KV cache during the off-map limbo.
+        # Reserved for a planned KV-cache freeze in pufferl during the
+        # off-map limbo (task #33) — not wired yet.
         self.removed = np.zeros(self.num_agents, dtype=bool)
 
         if self.population_play:
