@@ -203,10 +203,8 @@ struct Log {
     float n_trials_goal_reached;
     float n_trials_timed_out;
     float trial_total_length;     // running sum, divided by n_trials_completed in add_log
-    // Per-trial-index goal-reach counters (8 slots; k_scenarios beyond 8 is
-    // unsupported for this metric). Each slot counts ego-episodes where trial
-    // k succeeded. vec_log divides by n to give the per-trial success rate;
-    // Python computes ada_delta_trial_k_minus_0 from these.
+    // Per-trial-index goal-reach counters. After vec_log normalization, each
+    // slot IS trial_K_score. k_scenarios > 8 isn't supported for this metric.
     float trial_k_goal_reached[8];
 };
 #define N_TRIAL_K_SLOTS 8
@@ -436,16 +434,12 @@ struct Drive {
                               // "render".
 };
 
-// Per-agent variant of add_log used under GOAL_TRIAL: when one agent's
-// episode ends (trial_count >= max_trials_per_episode), aggregate that
-// single agent's per-step metrics from env->logs[i] / co_player_logs[i]
-// into env->log / co_player_log, then reset the per-agent state so the
-// next episode starts clean. add_log itself can't be used because it
-// loops over all active agents and assumes a synchronized scenario end.
+// Per-agent variant of add_log used at GOAL_TRIAL episode end. Can't reuse
+// add_log because it assumes a synchronized scenario boundary; under gb=3
+// each agent's episode ends at its own trial_count == max_trials.
 void add_log_one_agent(Drive *env, int i) {
     Entity *e = &env->entities[env->active_agent_indices[i]];
 
-    // Common (goals counters, same as add_log)
     env->log.goals_reached_this_episode += e->goals_reached_this_episode;
     env->log.goals_sampled_this_episode += e->goals_sampled_this_episode;
 
@@ -464,25 +458,16 @@ void add_log_one_agent(Drive *env, int i) {
         env->log.expert_static_agent_count += env->expert_static_agent_count;
         env->log.static_agent_count += env->static_agent_count;
 
-        // Under GOAL_TRIAL the agent gets `max_trials_per_episode` shots at
-        // the goal in one episode. `goals_reached_this_episode` accumulates
-        // per-trial successes, but `goals_sampled_this_episode` stays at 1
-        // (respawn_agent doesn't generate a new goal). So we use
-        // max_trials_per_episode as the denominator — frac is then the
-        // per-episode trial success rate, and the existing threshold ladder
-        // (0.5 for 2, 0.8 for 3-4, 0.9 for 5+, 0.99 for 1) reads as
-        // "agent must solve ≥ T fraction of trials to score." This matches
-        // the semantics of `score` under non-trial modes (= "agent
-        // completed the task at least to threshold").
+        // Score under gb=3: frac = goals_reached / max_trials, with a
+        // threshold ladder by k (0.5 for k=2, 0.8 for k∈{3,4}, 0.9 for k≥5).
+        // Any collision disqualifies (no collided_before_goal tracking under
+        // trial mode — collisions span trials).
         float denom = (float)env->max_trials_per_episode;
         float frac = (denom > 0.0f) ? e->goals_reached_this_episode / denom : 0.0f;
         float threshold = 0.99f;
         if (env->max_trials_per_episode == 2) threshold = 0.5f;
         else if (env->max_trials_per_episode < 5) threshold = 0.8f;
         else threshold = 0.9f;
-        // GOAL_TRIAL: collided_before_goal not used; treat any collision
-        // across trials as disqualifying. Matches the non-respawn/non-stop
-        // branch of add_log's ternary at the corresponding line.
         if (frac > threshold && !collided) env->log.score += 1.0f;
         if (!offroad && !collided && frac < 1.0f) env->log.dnf_rate += 1.0f;
         env->log.n += 1.0f;
@@ -512,12 +497,9 @@ void add_log_one_agent(Drive *env, int i) {
         env->co_player_log.n += 1.0f;
     }
 
-    // Reset per-agent state so the next trial-mode episode starts fresh.
-    // Mirror EVERYTHING that c_reset resets per-entity (drive.h c_reset block),
-    // since c_reset is NEVER called under GOAL_TRIAL (the timestep early-return
-    // is gated off). Missing any of these fields would leave stale state from
-    // the previous episode (e.g. respawn_timestep -> obs[6] stuck at 1 forever,
-    // current_goal_reached stuck at 1 -> no further goal-reach events, etc.).
+    // Mirror EVERY per-entity field c_reset clears. c_reset is bypassed under
+    // gb=3 (no scenario-length early-return); stale state would carry to the
+    // next episode (e.g. respawn_timestep stuck != -1 hides ego in renders).
     env->logs[i] = (Log){0};
     if (env->population_play && env->co_player_logs != NULL) env->co_player_logs[i] = (Log){0};
     e->goals_reached_this_episode = 0.0f;
@@ -527,11 +509,8 @@ void add_log_one_agent(Drive *env, int i) {
     e->respawn_timestep = -1;
     e->respawn_count = 0;
     e->stopped = 0;
-    // NOTE: we intentionally do NOT reset `removed` here. Under the
-    // idle-after-max_trials trial-mode semantic (Option D), c_step sets
-    // removed=1 AFTER calling add_log_one_agent so the agent stays
-    // inactive until Python's resample_frequency triggers c_reset (which
-    // does reset removed=0). Clearing it here would undo that.
+    // Don't reset `removed`: Option D sets it AFTER this call so the agent
+    // idles until resample_frequency. c_reset is what clears it.
     e->metrics_array[COLLISION_IDX] = 0.0f;
     e->metrics_array[OFFROAD_IDX] = 0.0f;
     e->metrics_array[REACHED_GOAL_IDX] = 0.0f;
@@ -2823,6 +2802,16 @@ void c_step(Drive *env) {
         bool within_distance = distance_to_goal < env->goal_radius;
         bool within_speed = current_speed <= env->goal_speed;
 
+        // Goal-reach block. Invariant: `goals_reached_this_episode` is
+        // incremented at most ONCE per (agent, trial-or-scenario), gated by
+        // `current_goal_reached`. The flag is cleared by:
+        //   - respawn_agent (GOAL_TRIAL mid-episode respawn, GOAL_RESPAWN's
+        //     ghost-respawn)
+        //   - c_reset (GOAL_STOP / scenario boundary)
+        //   - add_log_one_agent (GOAL_TRIAL episode boundary)
+        // GOAL_RESPAWN's ghost-reward path (respawn_timestep != -1) does NOT
+        // increment: that reward fires every step the ghost is in radius, by
+        // design. Only the FIRST goal-reach pre-ghost counts as a "trial succeeded."
         if (within_distance && within_speed && !env->entities[agent_idx].current_goal_reached) {
             if (env->goal_behavior == GOAL_RESPAWN && env->entities[agent_idx].respawn_timestep != -1) {
                 float scaled_post_respawn_reward = env->reward_goal_post_respawn * env->goal_weights[i];
@@ -2931,21 +2920,18 @@ void c_step(Drive *env) {
         for (int i = 0; i < env->active_agent_count; i++) {
             int agent_idx = env->active_agent_indices[i];
             Entity *e = &env->entities[agent_idx];
-            // Option D: skip agents that have already finished their max_trials
-            // episode this Python cycle. They idle until resample_frequency
-            // triggers _reinit_envs_with_new_maps → c_reset → removed=0.
+            // Option D: agents idle off-grid until Python's resample_frequency
+            // reloads the map (c_reset clears removed).
             if (e->removed) continue;
             int reached = e->metrics_array[REACHED_GOAL_IDX];
             int timed_out = (env->timestep - e->trial_start_timestep) >= env->per_trial_timeout;
             if (!reached && !timed_out) continue;
 
+            // Trial boundary: C owns both signals.
             if (env->trial_ended_this_step != NULL) env->trial_ended_this_step[i] = 1;
             if (env->truncations != NULL) env->truncations[i] = 1;
             int trial_len = env->timestep - e->trial_start_timestep;
             e->trial_count++;
-            // Write directly to env->log (vec_log path picks it up). add_log
-            // does not fire under GOAL_TRIAL (scenario_length early-return
-            // is suppressed), so per-agent logs[i] aggregation is bypassed.
             if (e->is_ego) {
                 env->log.n_trials_completed += 1.0f;
                 env->log.trial_total_length += (float)trial_len;
@@ -2953,18 +2939,14 @@ void c_step(Drive *env) {
                     env->log.n_trials_goal_reached += 1.0f;
                 else
                     env->log.n_trials_timed_out += 1.0f;
-                int k = e->trial_count - 1;  // index of the just-completed trial
+                int k = e->trial_count - 1;
                 if (reached && k >= 0 && k < N_TRIAL_K_SLOTS)
                     env->log.trial_k_goal_reached[k] += 1.0f;
             }
 
             if (e->trial_count >= env->max_trials_per_episode) {
-                // Episode end (this agent has done max_trials trials).
-                // Fire terminals + aggregate logs + mark agent idle.
-                // Do NOT respawn — the agent waits off-grid until Python's
-                // resample_frequency hits and reloads the map. This ensures
-                // 1 map = 1 episode (no over-fitting to a small map subset
-                // via short repeated C-side trial loops).
+                // Episode end: fire terminals, flush logs, idle the agent
+                // off-grid until resample_frequency reloads the map (Option D).
                 env->terminals[i] = 1;
                 e->trial_count = 0;
                 add_log_one_agent(env, i);
@@ -2974,14 +2956,10 @@ void c_step(Drive *env) {
                 e->vx = 0.0f;
                 e->vy = 0.0f;
             } else {
-                // More trials to go — respawn for next trial.
                 respawn_agent(env, agent_idx);
-                // Clear post-respawn ghost flag immediately. GOAL_TRIAL is NOT
-                // a ghost-fade mode like GOAL_RESPAWN: leaving respawn_timestep
-                // set hides the agent in the 3D renderer (drive.h ~3482) and
-                // disables collisions / obs slots (drive.h ~1327, 1342, 2409,
-                // 2455). Symptom pre-fix: trial 1 renders correctly, trials
-                // 2..K appear empty until the resample_frequency reset.
+                // Clear ghost flag: gb=3 isn't a ghost-fade mode. Leaving
+                // respawn_timestep != -1 hides ego in renders (drive.h:3482)
+                // and disables collisions / obs slots (1327, 1342, 2409, 2455).
                 e->respawn_timestep = -1;
                 e->trial_start_timestep = env->timestep;
             }

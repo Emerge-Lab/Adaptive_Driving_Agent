@@ -639,13 +639,10 @@ class PuffeRL:
 
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
-            # Cache-reset and PE-reset gate: terminals only. Under
-            # goal_behavior=GOAL_TRIAL (=3), trial boundaries flow into
-            # `t` (truncations) — the agent has physically respawned, but
-            # the adaptive policy must keep its KV cache across the trial
-            # to be able to adapt. Episode boundaries set `d` (terminals)
-            # and the cache is reset for those rows below. GAE picks up
-            # `t` separately below as a bootstrap-stop signal.
+            # KV cache + PE reset gate on `d` (terminals) only. Trial
+            # boundaries (`t`, truncations) keep the cache so the policy
+            # adapts across trials within an episode. See
+            # docs/src/trial_mode.md.
             done_mask = d
             self.global_step += int(mask.sum())
 
@@ -767,12 +764,8 @@ class PuffeRL:
                 self.logprobs[batch_rows, l] = logprob
                 self.rewards[batch_rows, l] = r
                 self.terminals[batch_rows, l] = d.float()
-                # Persist truncations so GAE can use (terminals OR
-                # truncations) as bootstrap-stop. Under GOAL_TRIAL the env
-                # mirrors trial_ended_this_step into truncations; under
-                # other modes `t` is the standard truncation signal. Stays
-                # OUT of state["terminals"] below so attention/PE still
-                # span trial boundaries within an episode.
+                # Persist truncations for GAE bootstrap-stop. Stays out of
+                # state["terminals"] so attention/PE span trial boundaries.
                 t_tensor = torch.as_tensor(t, device=device).float()
                 self.truncations[batch_rows, l] = t_tensor
                 self.values[batch_rows, l] = value.flatten()
@@ -862,12 +855,8 @@ class PuffeRL:
             else:
                 gammas = torch.full((self.segments,), config["gamma"], device=device, dtype=torch.float32)
 
-            # Bootstrap-stop for GAE = terminals OR truncations. Under
-            # goal_behavior=GOAL_TRIAL, truncations are set at each trial
-            # boundary by drive.py.step() (mirroring trial_ended_this_step).
-            # This kills V[t+1] bootstrap across the agent-respawn
-            # discontinuity at trial ends without resetting the KV cache
-            # (cache gates on terminals only, above).
+            # GAE bootstrap-stop = terminals ∨ truncations. Kills V[t+1]
+            # across trial respawn without resetting the KV cache.
             bootstrap_stop = (self.terminals + self.truncations).clamp(max=1.0)
             if _TRIAL_DEBUG_ENABLED:
                 _trial_debug_log(

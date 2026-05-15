@@ -426,11 +426,8 @@ class Drive(pufferlib.PufferEnv):
 
         super().__init__(buf=buf)
 
-        # `trial_ended_this_step`: per-agent flag set by C in c_step under
-        # goal_behavior=GOAL_TRIAL (=3) when a trial ends (goal-reach OR
-        # per-trial timeout). Distinct from `terminals`, which fires only
-        # at the EPISODE boundary (after max_trials_per_episode trials).
-        # Python-owned 1-byte buffer; C reads the pointer set in env_init.
+        # Per-trial-boundary flag. C writes 1 at goal-reach or per-trial
+        # timeout under gb=3; Python reads. See docs/src/trial_mode.md.
         self.trial_ended_this_step = np.zeros(self.num_agents, dtype=bool)
 
         if self.population_play:
@@ -1096,18 +1093,10 @@ class Drive(pufferlib.PufferEnv):
                 info.append(self._pending_k_eff_log)
                 self._pending_k_eff_log = None
 
-        # Per-scenario block: under non-trial modes, every `scenario_length`
-        # ticks is a scenario boundary — aggregate metrics, advance the
-        # scenario index, possibly resample partner / rotate maps. Under
-        # GOAL_TRIAL trial boundaries are variable-length (driven by C's
-        # `trial_ended_this_step`) so fixed-time scenario boundary logic
-        # would land mid-trial. We skip the whole block — partner/map
-        # resampling now happen only at the resample_frequency boundary
-        # below (which corresponds to the worst-case episode budget,
-        # k_scenarios * scenario_length). Standard episode metrics still
-        # emit via add_log_one_agent in C; trial-specific metrics
-        # (n_trials_completed, trial_mean_length, trial_goal_reach_rate)
-        # are populated globally per-episode.
+        # Per-scenario block (gb != 3 only): every scenario_length ticks,
+        # aggregate per-scenario metrics, rotate partner / maps. Under gb=3
+        # trial boundaries are variable-length so this fixed-time block would
+        # land mid-trial; metrics flow through add_log_one_agent instead.
         run_per_scenario_block = self.tick % self.scenario_length == 0 and self.goal_behavior != 3
         if run_per_scenario_block:
             if self.adaptive_driving_agent and self.current_scenario_infos:
@@ -1186,25 +1175,13 @@ class Drive(pufferlib.PufferEnv):
                 self.truncations[self.ego_ids] = 1
                 self.terminals[self.ego_ids] = 1
 
-        # KNOWN ISSUE under goal_behavior=3 (GOAL_TRIAL): when trials end
-        # fast (e.g. ~12 ticks because the recorded path leaves the agent
-        # near its goal), the C-side terminals fires many times per
-        # resample_frequency window — the agent sees the SAME map for
-        # ~30 short C-episodes per Python rotation, which over-fits scores
-        # to that small map subset. Calling _reinit_envs_with_new_maps()
-        # on every terminals.any() fixes the map diversity but costs
-        # ~250ms per call (full vec_init reload); at ~10 calls/sec that's
-        # unusable for training. The right fix is either a per-sub-env
-        # reset binding or in-memory map caching, both of which are
-        # bigger changes than a Python edit. Documented for follow-up.
+        # Map-rotation boundary. Option D's idle-after-max_trials prevents the
+        # 1-map-many-short-episodes pathology that motivated rotating on every
+        # terminals.any() (250ms/call × ~10 calls/sec was infeasible).
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
-            # Under goal_behavior=3 (Option D): flush whatever per-agent
-            # episode metrics have accumulated in env->log this cycle BEFORE
-            # _reinit_envs_with_new_maps zeros them via env_init. Slow agents
-            # that never finished max_trials don't contribute to log.n, so
-            # the standard vec_log gate (total_n >= num_agents) often
-            # wouldn't fire within a single Python cycle. Calling vec_log
-            # with num_agents=1 forces an emission if ANY data is present.
+            # Force-flush env->log under gb=3 before reinit zeros it. Slow
+            # agents that didn't finish max_trials this cycle don't bump
+            # log.n, so the standard vec_log gate may not fire on its own.
             if self.goal_behavior == 3:
                 log = binding.vec_log(self.c_envs, 1)
                 if log and log.get("n", 0) > 0:
@@ -1212,7 +1189,6 @@ class Drive(pufferlib.PufferEnv):
             self.tick = 0
             will_resample = 1
             if will_resample:
-                # Log deltas before resampling if we're at the end of a cycle
                 if self.adaptive_driving_agent and self.scenario_metrics:
                     delta_metrics = self._compute_delta_metrics()
                     if delta_metrics:
