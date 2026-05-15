@@ -1151,7 +1151,10 @@ void move_expert(Drive *env, float *actions, int agent_idx) {
     // that's the data, not a bug. We don't care about what humans do during
     // a trial, only about ego-side strict trial-equivalence.
     if (env->goal_behavior == GOAL_TRIAL && agent->array_size > 0) {
-        t = env->timestep - env->env_trial_start_timestep;
+        // Recording frame = init_steps + ticks-since-trial-start. Matches what
+        // set_start_position uses at c_reset (init_steps) and advances from
+        // there. Every trial begins at the same recording frame as trial 1.
+        t = env->init_steps + (env->timestep - env->env_trial_start_timestep);
         t = t % agent->array_size;
         if (t < 0) t += agent->array_size;
     }
@@ -2661,13 +2664,20 @@ void c_reset(Drive *env) {
 }
 
 void respawn_agent(Drive *env, int agent_idx) {
-    env->entities[agent_idx].x = env->entities[agent_idx].traj_x[0];
-    env->entities[agent_idx].y = env->entities[agent_idx].traj_y[0];
-    env->entities[agent_idx].heading = env->entities[agent_idx].traj_heading[0];
+    // Use the same starting frame as c_reset's set_start_position (init_steps).
+    // Pre-fix this used traj[0], which broke trial-mode strict equivalence:
+    // trial 1 starts at traj[init_steps] (via set_start_position), trial 2..K
+    // would start at traj[0] via respawn_agent. Now both use init_steps.
+    int step = env->init_steps;
+    if (step >= env->entities[agent_idx].array_size) step = env->entities[agent_idx].array_size - 1;
+    if (step < 0) step = 0;
+    env->entities[agent_idx].x = env->entities[agent_idx].traj_x[step];
+    env->entities[agent_idx].y = env->entities[agent_idx].traj_y[step];
+    env->entities[agent_idx].heading = env->entities[agent_idx].traj_heading[step];
     env->entities[agent_idx].heading_x = cosf(env->entities[agent_idx].heading);
     env->entities[agent_idx].heading_y = sinf(env->entities[agent_idx].heading);
-    env->entities[agent_idx].vx = env->entities[agent_idx].traj_vx[0];
-    env->entities[agent_idx].vy = env->entities[agent_idx].traj_vy[0];
+    env->entities[agent_idx].vx = env->entities[agent_idx].traj_vx[step];
+    env->entities[agent_idx].vy = env->entities[agent_idx].traj_vy[step];
     env->entities[agent_idx].metrics_array[COLLISION_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[OFFROAD_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 0.0f;
@@ -2980,9 +2990,9 @@ void c_step(Drive *env) {
                     e->vx = 0.0f;
                     e->vy = 0.0f;
                 } else {
-                    // Trial-end (not episode): reset entity for next trial.
-                    respawn_agent(env, agent_idx);
-                    e->respawn_timestep = -1;
+                    // Trial-end (not episode): per-entity trial-mode flags.
+                    // Full position / velocity / metric reset happens via
+                    // set_start_position below.
                     e->current_goal_reached = 0;
                     e->removed = 0;
                     if (env->removed != NULL) env->removed[i] = 0;
@@ -2991,6 +3001,11 @@ void c_step(Drive *env) {
             if (is_episode_end) {
                 env->env_trial_count = 0;
                 env->env_episode_ended = 1;
+            } else {
+                // Reset ALL entities (active + static) to the same initial
+                // state as c_reset's set_start_position so the next trial
+                // is bit-for-bit identical to trial 1.
+                set_start_position(env);
             }
             env->env_trial_start_timestep = env->timestep;
         }
