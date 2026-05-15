@@ -895,9 +895,16 @@ class PuffeRL:
             else:
                 gammas = torch.full((self.segments,), config["gamma"], device=device, dtype=torch.float32)
 
-            # GAE bootstrap-stop = terminals ∨ truncations. Kills V[t+1]
-            # across trial respawn without resetting the KV cache.
-            bootstrap_stop = (self.terminals + self.truncations).clamp(max=1.0)
+            # GAE bootstrap-stop = terminals ∨ truncations ∨ removed.
+            # - terminals: episode boundary (full reset)
+            # - truncations: trial boundary under gb=3 (world resets, KV cache persists)
+            # - removed: ego is off-map (limbo). V at limbo is computed from
+            #   garbage (INVALID_POSITION) obs; bootstrapping from it would
+            #   poison the prior step's advantage. Treat each limbo slot as
+            #   a value-chain cut.
+            bootstrap_stop = (
+                self.terminals + self.truncations + self.removed_history.float()
+            ).clamp(max=1.0)
             if _TRIAL_DEBUG_ENABLED:
                 _trial_debug_log(
                     "gae_outer_pre",
@@ -1013,7 +1020,13 @@ class PuffeRL:
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
             logratio = newlogprob - mb_logprobs
             ratio = logratio.exp()
-            self.ratio[idx] = ratio.detach()
+            # Limbo importance ratios are computed from garbage obs / actions
+            # and would poison the outer GAE's v-trace coefficients on the
+            # next minibatch. Preserve the existing ratio at limbo positions.
+            ratio_to_store = ratio.detach()
+            if mb_removed is not None:
+                ratio_to_store = torch.where(mb_removed, self.ratio[idx], ratio_to_store)
+            self.ratio[idx] = ratio_to_store
 
             with torch.no_grad():
                 # Mask limbo steps from diagnostics too so values aren't
@@ -1032,8 +1045,10 @@ class PuffeRL:
                 mb_gammas = torch.full((len(idx),), config["gamma"], device=device, dtype=torch.float32)
 
             # Recompute advantages with new ratios — bootstrap-stop is
-            # terminals OR truncations (see outer GAE call comment).
-            mb_bootstrap_stop = (mb_terminals + mb_truncations).clamp(max=1.0)
+            # terminals OR truncations OR removed (see outer GAE call comment).
+            mb_bootstrap_stop = (
+                mb_terminals + mb_truncations + mb_removed.float()
+            ).clamp(max=1.0)
             if _TRIAL_DEBUG_ENABLED:
                 _trial_debug_log(
                     "gae_inner",
@@ -1108,8 +1123,18 @@ class PuffeRL:
                 loss = pg_loss + config["vf_coef"] * v_loss - config["ent_coef"] * entropy_loss
             self.amp_context.__enter__()  # TODO: AMP needs some debugging
 
-            # This breaks vloss clipping?
-            self.values[idx] = newvalue.detach().float()
+            # Write back the new value-head output for the next outer GAE.
+            # CRITICAL: preserve limbo positions — at those slots `newvalue`
+            # was computed from garbage obs (INVALID_POSITION) and writing
+            # it back would poison subsequent GAE calls. The old `mb_values`
+            # at limbo positions is also garbage (also computed from limbo
+            # obs at rollout time), so neither choice is "right" — but
+            # keeping the prior value at limbo positions prevents
+            # mb-by-mb drift across PPO epochs.
+            new_v = newvalue.detach().float()
+            if mb_removed is not None:
+                new_v = torch.where(mb_removed, mb_values.float(), new_v)
+            self.values[idx] = new_v
 
             # Logging
             profile("train_misc", epoch)
