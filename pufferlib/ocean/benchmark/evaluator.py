@@ -655,21 +655,13 @@ class HumanReplayEvaluator:
         # (variable-length, ends on goal-reach OR per-trial timeout).
         is_trial_mode = goal_behavior == 3
         if is_trial_mode:
-            # Mirror adaptive.py's auto-link: under gb=3, if max_trials wasn't
-            # explicitly set (still the INI default of 2) or matches k_scenarios,
-            # use k_scenarios as the trial count. Prefer the env's actual value
-            # if available — adaptive.py already applied the auto-link there.
-            env_max_trials = getattr(getattr(puffer_env, "driver_env", None), "max_trials_per_episode", None)
-            if env_max_trials is not None and int(env_max_trials) > 0:
-                max_trials = int(env_max_trials)
-            else:
-                cfg_max_trials = int(args["env"].get("max_trials_per_episode", 2))
-                max_trials = k_scenarios if cfg_max_trials == 2 else cfg_max_trials
-            env_per_trial = getattr(getattr(puffer_env, "driver_env", None), "per_trial_timeout", None)
-            if env_per_trial is not None and int(env_per_trial) > 0:
-                per_trial_timeout = int(env_per_trial)
-            else:
-                per_trial_timeout = int(args["env"].get("per_trial_timeout") or 0) or self.sim_steps
+            # Under gb=3 the env's max_trials/per_trial_timeout are always
+            # k_scenarios / scenario_length (AdaptiveDrivingAgent enforces).
+            # Read from driver_env when available, else fall back to the
+            # adaptive-link formula directly.
+            driver = getattr(puffer_env, "driver_env", None)
+            max_trials = int(getattr(driver, "max_trials_per_episode", k_scenarios) or k_scenarios)
+            per_trial_timeout = int(getattr(driver, "per_trial_timeout", self.sim_steps) or self.sim_steps)
 
         is_transformer = hasattr(policy, "horizon") and hasattr(policy, "transformer")
         is_recurrent = hasattr(policy, "lstm")

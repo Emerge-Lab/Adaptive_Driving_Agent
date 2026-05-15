@@ -119,10 +119,9 @@ def build_config(args):
     config["env"]["scenario_length"] = args.scenario_length
     if args.goal_behavior is not None:
         config["env"]["goal_behavior"] = int(args.goal_behavior)
-    if args.max_trials_per_episode is not None:
-        config["env"]["max_trials_per_episode"] = int(args.max_trials_per_episode)
-    if args.per_trial_timeout is not None:
-        config["env"]["per_trial_timeout"] = int(args.per_trial_timeout)
+    # Under gb=3: max_trials_per_episode and per_trial_timeout are derived
+    # from k_scenarios + scenario_length in AdaptiveDrivingAgent.__init__.
+    # No separate CLI knobs.
 
     if args.human_replay:
         if env_name == "puffer_adaptive_drive":
@@ -196,23 +195,13 @@ def render_one(env_name, base_config, view_modes, render_idx, seed, args):
             mode = mode_tag(args)
         coplayer_part = ""
 
-        # Default max_steps:
-        #  - non-trial: k_scenarios * scenario_length (worst-case episode in adaptive mode).
-        #  - GOAL_TRIAL: max_trials_per_episode * per_trial_timeout. With the
-        #    adaptive auto-link these are equal, but if a user runs trial
-        #    mode with non-default knobs, the trial-budget is the right max.
+        # Default max_steps = full episode budget = k_scenarios * scenario_length
+        # under both trial and non-trial modes. Under gb=3 the auto-link makes
+        # max_trials * per_trial_timeout identical.
         if args.max_steps is not None:
             max_steps = args.max_steps
         else:
-            goal_behavior = getattr(vecenv.driver_env, "goal_behavior", 0)
-            if int(goal_behavior) == 3:
-                max_trials = int(getattr(vecenv.driver_env, "max_trials_per_episode", 2))
-                per_trial = int(getattr(vecenv.driver_env, "per_trial_timeout", 0) or 0)
-                if per_trial <= 0:
-                    per_trial = args.scenario_length
-                max_steps = max_trials * per_trial
-            else:
-                max_steps = args.k_scenarios * args.scenario_length
+            max_steps = args.k_scenarios * args.scenario_length
         os.makedirs(args.output_dir, exist_ok=True)
         saved = []
 
@@ -292,11 +281,10 @@ def main():
         "--goal-behavior",
         type=int,
         default=None,
-        help="Goal behavior: 0=RESPAWN, 1=GENERATE_NEW, 2=STOP, 3=TRIAL (variable-length trials). "
+        help="Goal behavior: 0=RESPAWN, 1=GENERATE_NEW, 2=STOP, 3=TRIAL "
+        "(under TRIAL: k_scenarios = #trials, scenario_length = per-trial timeout). "
         "Defaults to whatever the checkpoint was trained with (ini default 0).",
     )
-    p.add_argument("--max-trials-per-episode", type=int, default=None, help="GOAL_TRIAL: trials per episode")
-    p.add_argument("--per-trial-timeout", type=int, default=None, help="GOAL_TRIAL: max ticks per trial")
     p.add_argument(
         "--max-steps", type=int, default=None, help="Steps per render (default: k_scenarios * scenario_length)"
     )

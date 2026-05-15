@@ -182,26 +182,27 @@ boundary — that's when the env loads a fresh map and `c_reset` resets
 **Net effect**: 1 episode per resample window, exactly one fresh map per
 episode. Map diversity restored.
 
-## Auto-link of trial parameters
+## Trial parameter naming
 
-The user's mental model under `goal_behavior=3` is: "I'm running $k$
-trials, each of length $L$." In `pufferlib/ocean/drive/adaptive.py`:
+Under `goal_behavior=3`:
 
-| Parameter | Auto-linked to | Override behavior |
-|---|---|---|
-| `max_trials_per_episode` | `k_scenarios` | Pass any value $\neq 2$ (the INI default) to disable the link |
-| `per_trial_timeout` | `scenario_length` | Pass any value $> 0$ to override |
-| `resample_frequency` | $k \times L$ | Pass any value $> 0$ to override |
+* `k_scenarios` IS the number of trials per episode.
+* `scenario_length` IS the per-trial timeout.
+
+These are the canonical names — the only two knobs you set. The C side
+exposes internal fields named `max_trials_per_episode` and
+`per_trial_timeout` (legacy: shared with non-trial code paths), and
+`AdaptiveDrivingAgent.__init__` unconditionally sets them from
+`k_scenarios` / `scenario_length` under gb=3. **There is no override.**
+If you want a different trial count, change `k_scenarios`.
+
+`resample_frequency` is also derived: $k \times L$, the worst-case
+episode budget.
 
 So `--env.k-scenarios 4 --env.goal-behavior 3 --env.scenario-length 201`
-gives 4 trials of 201 ticks each, episode budget = 804 ticks,
-resample at tick 804.
-
-**Gotcha.** The auto-link runs inside `AdaptiveDrivingAgent.__init__`. It
-mutates `kwargs` and the resulting env attributes, **not the outer `args`
-dict** that downstream code (evaluator, render) might read directly. Read
-auto-linked values from `puffer_env.driver_env.<attr>`, not from
-`args["env"]`. See the M7-fix evaluator commit.
+gives 4 trials of 201 ticks each, episode budget = 804 ticks, resample
+at tick 804. (Pre-Option-A there were two more CLI flags
+`--env.max-trials-per-episode` and `--env.per-trial-timeout`; both gone.)
 
 ## End-to-end signal flow
 
@@ -347,7 +348,5 @@ scenario_length = 201                        # nuplan trajectories are 201 ticks
 | Knob | Type | Default | Notes |
 |---|---|---|---|
 | `--env.goal-behavior` | int | 0 | 3 = trial mode |
-| `--env.max-trials-per-episode` | int | 2 (INI) | Auto-linked to `k_scenarios` if left at default |
-| `--env.per-trial-timeout` | int | 0 (= `scenario_length`) | Auto-linked to `scenario_length` if 0 |
-| `--env.k-scenarios` | int | 1 | Driver of auto-link |
-| `--env.scenario-length` | int | 91 | Driver of auto-link |
+| `--env.k-scenarios` | int | 1 | Under gb=3: number of trials per episode |
+| `--env.scenario-length` | int | 91 | Under gb=3: per-trial timeout (ticks) |

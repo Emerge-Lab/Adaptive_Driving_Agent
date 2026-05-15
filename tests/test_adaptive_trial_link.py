@@ -64,18 +64,23 @@ def test_no_link_when_goal_behavior_not_3():
     env.close()
 
 
-def test_explicit_user_override_wins():
-    """If a user explicitly passes max_trials_per_episode != k_scenarios and
-    != INI default, respect it (e.g. 'extra retries' setup)."""
+def test_user_override_ignored_under_gb3():
+    """Option A invariant: under gb=3, max_trials_per_episode is ALWAYS
+    k_scenarios. Any explicit override is silently replaced. To get a
+    different trial count, change k_scenarios."""
     env = _make_adaptive(k=3, max_trials_per_episode=5)
-    assert env.max_trials_per_episode == 5, f"explicit override: expected 5, got {env.max_trials_per_episode}"
+    assert env.max_trials_per_episode == 3, (
+        f"under gb=3, max_trials_per_episode must equal k_scenarios (=3); got {env.max_trials_per_episode}"
+    )
     env.close()
 
 
-def test_explicit_per_trial_timeout_wins():
-    """If user passes a non-zero per_trial_timeout, respect it."""
+def test_per_trial_timeout_override_ignored_under_gb3():
+    """Same invariant for per_trial_timeout — always scenario_length under gb=3."""
     env = _make_adaptive(k=2, per_trial_timeout=50)
-    assert env.per_trial_timeout == 50, f"explicit timeout: expected 50, got {env.per_trial_timeout}"
+    assert env.per_trial_timeout == env.scenario_length, (
+        f"under gb=3, per_trial_timeout must equal scenario_length; got {env.per_trial_timeout}"
+    )
     env.close()
 
 
@@ -84,6 +89,6 @@ if __name__ == "__main__":
     test_auto_link_k3()
     test_auto_link_k4()
     test_no_link_when_goal_behavior_not_3()
-    test_explicit_user_override_wins()
-    test_explicit_per_trial_timeout_wins()
+    test_user_override_ignored_under_gb3()
+    test_per_trial_timeout_override_ignored_under_gb3()
     print("All adaptive trial-link tests passed.")

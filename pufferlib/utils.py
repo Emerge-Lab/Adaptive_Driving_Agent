@@ -36,11 +36,10 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
         k_scenarios = env_config.get("k_scenarios", 1)
         scenario_length = env_config.get("scenario_length", 91)
         train_horizon = config.get("horizon", scenario_length * k_scenarios)
-        # Inherit goal_behavior + (under GOAL_TRIAL=3) the trial config from
-        # training so the in-training subprocess eval matches what training did.
+        # Inherit goal_behavior from training. Under gb=3 the eval subprocess
+        # re-derives max_trials_per_episode and per_trial_timeout from
+        # k_scenarios + scenario_length, so we don't pass them.
         goal_behavior = int(env_config.get("goal_behavior", 0))
-        max_trials_per_episode = int(env_config.get("max_trials_per_episode", 2))
-        per_trial_timeout = env_config.get("per_trial_timeout")
 
         cmd = [
             sys.executable,
@@ -71,12 +70,10 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             str(scenario_length),
             "--train.horizon",
             str(train_horizon),
-            # Inherit training's goal_behavior (and trial config under GOAL_TRIAL).
+            # Inherit training's goal_behavior. Under gb=3 the env will
+            # re-derive trial config from k_scenarios + scenario_length.
             "--env.goal-behavior",
             str(goal_behavior),
-            "--env.max-trials-per-episode",
-            str(max_trials_per_episode),
-            *(["--env.per-trial-timeout", str(int(per_trial_timeout))] if per_trial_timeout else []),
             "--env.conditioning.type",
             conditioning_type,
             "--env.conditioning.collision-weight-lb",
@@ -289,14 +286,10 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         scenario_length = env_kwargs.get("scenario_length", 91)
         k_scenarios = env_kwargs.get("k_scenarios", 1)
         goal_behavior = int(env_kwargs.get("goal_behavior", 0))
-        if goal_behavior == 3:
-            max_trials = int(env_kwargs.get("max_trials_per_episode", 2))
-            per_trial_timeout = int(env_kwargs.get("per_trial_timeout") or 0) or scenario_length
-            episode_length = max_trials * per_trial_timeout
-            episode_label = f"trials{max_trials}"
-        else:
-            episode_length = scenario_length * k_scenarios if k_scenarios > 1 else scenario_length
-            episode_label = f"k{k_scenarios}"
+        # episode_length = k_scenarios * scenario_length under all goal_behaviors.
+        # Under gb=3 the auto-link makes this equal to max_trials * per_trial_timeout.
+        episode_length = scenario_length * k_scenarios if k_scenarios > 1 else scenario_length
+        episode_label = f"trials{k_scenarios}" if goal_behavior == 3 else f"k{k_scenarios}"
 
         mode = "human_replay" if human_replay else ("coplayer" if env_kwargs.get("co_player_enabled") else "baseline")
         videos_to_log_world = []
