@@ -1144,13 +1144,15 @@ void set_means(Drive *env) {
 void move_expert(Drive *env, float *actions, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
     int t = env->timestep;
-    // GOAL_TRIAL B'': replay experts on the env's trial clock so they reset to
-    // frame 0 at every env trial-end (alongside ego + co-player resets).
-    // Without this, experts drift through the episode while ego/co-players
-    // restart, corrupting the trial-is-trial-is-trial invariant.
+    // GOAL_TRIAL: loop the recorded trajectory so static experts don't vanish
+    // past array_size. Note: this means humans drift across trials (different
+    // frame each trial) — accepts a slight "trial 2 != trial 1" violation for
+    // humans in exchange for keeping late-valid agents visible in short
+    // trials. For eval purposes (human_replay, 1 ego/env) where strict
+    // trial-equivalence matters, the human_replay path should override this
+    // (TODO: gate on a config flag).
     if (env->goal_behavior == GOAL_TRIAL && agent->array_size > 0) {
-        t = env->timestep - env->env_trial_start_timestep;
-        t = t % agent->array_size;
+        t = env->timestep % agent->array_size;
         if (t < 0) t += agent->array_size;
     }
     if (t < 0 || t >= agent->array_size) {
@@ -3847,28 +3849,17 @@ void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_
             EndMode3D();
         }
 
-        // Draw scenario/trial counter overlay (2D text on top of 3D scene).
-        // Under GOAL_TRIAL we show "Trial X / K" using the first ego agent's
-        // C-side trial_count (current_scenario is frozen at 0 in trial mode —
-        // see drive.py per-scenario gate). Both ego_count == 0 and other
-        // degenerate setups fall back to the prior "Scenario X / k" overlay.
+        // Draw scenario/trial counter overlay. Under gb=3 B'' we read the
+        // env-level trial counter (per-entity trial_count is no longer
+        // updated). Clamp to max so the last-tick "just incremented" value
+        // doesn't show as K+1.
         if (env->goal_behavior == GOAL_TRIAL && env->max_trials_per_episode > 1) {
-            int ego_trial = 0;
-            int found_ego = 0;
-            for (int i = 0; i < env->active_agent_count; i++) {
-                int agent_idx = env->active_agent_indices[i];
-                if (env->entities[agent_idx].is_ego) {
-                    ego_trial = env->entities[agent_idx].trial_count;
-                    found_ego = 1;
-                    break;
-                }
-            }
-            if (found_ego) {
-                char trial_text[64];
-                snprintf(trial_text, sizeof(trial_text), "Trial %d / %d",
-                         ego_trial + 1, env->max_trials_per_episode);
-                DrawText(trial_text, 40, 40, 120, WHITE);
-            }
+            int trial_n = env->env_trial_count + 1;
+            if (trial_n > env->max_trials_per_episode) trial_n = env->max_trials_per_episode;
+            char trial_text[64];
+            snprintf(trial_text, sizeof(trial_text), "Trial %d / %d",
+                     trial_n, env->max_trials_per_episode);
+            DrawText(trial_text, 40, 40, 120, WHITE);
         } else if (k_scenarios > 1) {
             char scenario_text[64];
             snprintf(scenario_text, sizeof(scenario_text), "Scenario %d / %d", current_scenario + 1, k_scenarios);
