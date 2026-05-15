@@ -1099,7 +1099,12 @@ class PuffeRL:
             v_loss_clipped = (v_clipped - mb_returns) ** 2
             v_loss = 0.5 * (torch.max(v_loss_unclipped, v_loss_clipped) * valid_mask).sum() / n_valid
 
-            # Entropy-weighted loss if entropy conditioning is enabled
+            # Entropy-weighted loss if entropy conditioning is enabled.
+            # NOTE: entropy comes back from sample_logits FLAT — shape (B*T,)
+            # — while valid_mask is (B, T). Flatten valid_mask once for these
+            # mults so we don't crash on broadcast.
+            valid_mask_flat = valid_mask.reshape(-1)
+            n_valid_flat = valid_mask_flat.sum().clamp(min=1.0)
             if hasattr(self.vecenv.driver_env, "entropy_conditioned") and self.vecenv.driver_env.entropy_conditioned:
                 mb_obs_flat = mb_obs.reshape(-1, mb_obs.shape[-1])
 
@@ -1116,10 +1121,10 @@ class PuffeRL:
 
                 ent_weights = mb_obs_flat[:, ent_idx]  # after ego(7/10) + RC(3)
                 ent_weights = ent_weights.reshape(entropy.shape)
-                entropy_loss = -((entropy * ent_weights) * valid_mask).sum() / n_valid
+                entropy_loss = -((entropy * ent_weights) * valid_mask_flat).sum() / n_valid_flat
                 loss = pg_loss + config["vf_coef"] * v_loss + entropy_loss
             else:
-                entropy_loss = (entropy * valid_mask).sum() / n_valid
+                entropy_loss = (entropy * valid_mask_flat).sum() / n_valid_flat
                 loss = pg_loss + config["vf_coef"] * v_loss - config["ent_coef"] * entropy_loss
             self.amp_context.__enter__()  # TODO: AMP needs some debugging
 
