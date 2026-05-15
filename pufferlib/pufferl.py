@@ -202,6 +202,11 @@ class PuffeRL:
         self.rewards = torch.zeros(segments, horizon, device=device)
         self.terminals = torch.zeros(segments, horizon, device=device)
         self.truncations = torch.zeros(segments, horizon, device=device)
+        # Per-step per-agent off-map flag (gb=3 B''). Same shape as terminals.
+        # Used in training to (a) add a garbage-attention mask matching the
+        # eval-time `garbage_mask`, and (b) gate PPO loss/entropy/value-loss
+        # so limbo tuples don't contribute gradient.
+        self.removed_history = torch.zeros(segments, horizon, device=device, dtype=torch.bool)
         self.ratio = torch.ones(segments, horizon, device=device)
         self.importance = torch.ones(segments, horizon, device=device)
         self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
@@ -794,8 +799,18 @@ class PuffeRL:
                 t_tensor = torch.as_tensor(t, device=device).float()
                 self.truncations[batch_rows, l] = t_tensor
                 self.values[batch_rows, l] = value.flatten()
-
-                # Note: We are not yet handling masks in this version
+                # Persist per-step `removed` flag for train/eval mask parity.
+                # During training we (a) add a garbage-attention mask matching
+                # eval's `garbage_mask`, and (b) gate PPO losses so limbo
+                # tuples don't contribute gradient.
+                rem_buf = getattr(self.vecenv, "removed", None)
+                if rem_buf is None:
+                    rem_buf = getattr(self.vecenv.driver_env, "removed", None)
+                if rem_buf is not None:
+                    rem_step = torch.as_tensor(
+                        np.asarray(rem_buf)[env_id], device=device, dtype=torch.bool
+                    )
+                    self.removed_history[batch_rows, l] = rem_step
                 self.ep_lengths[env_id] += 1
                 # Use appropriate horizon based on model type
                 horizon = (
@@ -946,6 +961,7 @@ class PuffeRL:
             mb_rewards = self.rewards[idx]
             mb_terminals = self.terminals[idx]
             mb_truncations = self.truncations[idx]
+            mb_removed = self.removed_history[idx]  # (B, T) bool — 1 = limbo step
             mb_ratio = self.ratio[idx]
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
@@ -973,6 +989,7 @@ class PuffeRL:
                 state["transformer_context"] = None
                 state["transformer_position"] = None
                 state["terminals"] = mb_terminals  # For episode boundary masking
+                state["removed"] = mb_removed      # Train/eval mask parity (gb=3)
 
             logits, newvalue = self.policy(mb_obs, state)
 
@@ -999,9 +1016,14 @@ class PuffeRL:
             self.ratio[idx] = ratio.detach()
 
             with torch.no_grad():
-                old_approx_kl = (-logratio).mean()
-                approx_kl = ((ratio - 1) - logratio).mean()
-                clipfrac = ((ratio - 1.0).abs() > config["clip_coef"]).float().mean()
+                # Mask limbo steps from diagnostics too so values aren't
+                # inflated by garbage tuples (mb_removed will be available
+                # in scope by the time these are reported; safe to reference).
+                _diag_mask = (~mb_removed).to(logratio.dtype)
+                _diag_n = _diag_mask.sum().clamp(min=1.0)
+                old_approx_kl = ((-logratio) * _diag_mask).sum() / _diag_n
+                approx_kl = (((ratio - 1) - logratio) * _diag_mask).sum() / _diag_n
+                clipfrac = (((ratio - 1.0).abs() > config["clip_coef"]).float() * _diag_mask).sum() / _diag_n
 
             adv = advantages[idx]
             if hasattr(self.vecenv.driver_env, "discount_conditioned") and self.vecenv.driver_env.discount_conditioned:
@@ -1044,15 +1066,23 @@ class PuffeRL:
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
 
             # Losses
+            # Per-step validity mask: 1 where the agent was ACTIVE (not limbo),
+            # 0 where removed=1 (off-map). All per-sample losses are weighted
+            # by this and normalized by the count of valid samples, so limbo
+            # tuples contribute zero gradient. mb_removed has shape (B, T)
+            # matching the per-step losses below.
+            valid_mask = (~mb_removed).to(adv.dtype)            # (B, T)
+            n_valid = valid_mask.sum().clamp(min=1.0)
+
             pg_loss1 = -adv * ratio
             pg_loss2 = -adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
-            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+            pg_loss = (torch.max(pg_loss1, pg_loss2) * valid_mask).sum() / n_valid
 
             newvalue = newvalue.view(mb_returns.shape)
             v_clipped = mb_values + torch.clamp(newvalue - mb_values, -vf_clip, vf_clip)
             v_loss_unclipped = (newvalue - mb_returns) ** 2
             v_loss_clipped = (v_clipped - mb_returns) ** 2
-            v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+            v_loss = 0.5 * (torch.max(v_loss_unclipped, v_loss_clipped) * valid_mask).sum() / n_valid
 
             # Entropy-weighted loss if entropy conditioning is enabled
             if hasattr(self.vecenv.driver_env, "entropy_conditioned") and self.vecenv.driver_env.entropy_conditioned:
@@ -1071,10 +1101,10 @@ class PuffeRL:
 
                 ent_weights = mb_obs_flat[:, ent_idx]  # after ego(7/10) + RC(3)
                 ent_weights = ent_weights.reshape(entropy.shape)
-                entropy_loss = -(entropy * ent_weights).mean()
+                entropy_loss = -((entropy * ent_weights) * valid_mask).sum() / n_valid
                 loss = pg_loss + config["vf_coef"] * v_loss + entropy_loss
             else:
-                entropy_loss = entropy.mean()
+                entropy_loss = (entropy * valid_mask).sum() / n_valid
                 loss = pg_loss + config["vf_coef"] * v_loss - config["ent_coef"] * entropy_loss
             self.amp_context.__enter__()  # TODO: AMP needs some debugging
 

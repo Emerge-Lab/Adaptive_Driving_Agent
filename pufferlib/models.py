@@ -728,6 +728,19 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             causal_mask = self.get_causal_mask(T, device)
             episode_mask = self.create_episode_mask(terminals, T)
             attn_mask = causal_mask.unsqueeze(0) + episode_mask
+            # Train/eval parity: under gb=3, mask attention to limbo (off-map)
+            # SOURCE slots. Mirror the eval-time `garbage_mask` behavior so
+            # the training forward never attends to garbage slots.
+            # attn_mask[b, t, s] += -inf if removed[b, s] = 1
+            removed = state.get("removed")
+            if removed is not None:
+                if removed.shape[1] > T:
+                    removed = removed[:, -T:]
+                # (B, 1, T) bias on source axis; broadcasts over query t.
+                neg_inf = torch.tensor(float("-inf"), device=device, dtype=attn_mask.dtype)
+                zero = torch.tensor(0.0, device=device, dtype=attn_mask.dtype)
+                limbo_bias = torch.where(removed.unsqueeze(1), neg_inf, zero)
+                attn_mask = attn_mask + limbo_bias
             attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
             if self.training and self.use_checkpointing:
                 hidden = checkpoint(
