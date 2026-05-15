@@ -65,6 +65,8 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
         return 1;
     }
     env->terminals = PyArray_DATA(terminals);
+    // env->truncations is wired from positional args by env_binding.h's
+    // env_init handler (zero-copy view of the PufferLib SHM buffer).
 
     // trial_ended_this_step is OPTIONAL — older callers may not pass it.
     // Defaults to NULL; c_step's memset is guarded.

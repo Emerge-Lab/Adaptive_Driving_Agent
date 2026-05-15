@@ -348,6 +348,7 @@ struct Drive {
     float *rewards;
     unsigned char *terminals;
     unsigned char *trial_ended_this_step;  // GOAL_TRIAL: per-agent trial-boundary flag
+    unsigned char *truncations;            // GOAL_TRIAL: trial-end bootstrap-stop signal
     Log log;
     Log *logs;
     int num_agents;
@@ -2710,6 +2711,13 @@ void c_step(Drive *env) {
     if (env->trial_ended_this_step != NULL) {
         memset(env->trial_ended_this_step, 0, env->active_agent_count * sizeof(unsigned char));
     }
+    // C owns truncations under GOAL_TRIAL. Zero at top of step; write 1 at
+    // each trial boundary inside the GOAL_TRIAL branch. Under non-trial
+    // modes Python may still write truncations directly (e.g. k_eff
+    // curriculum), so leave the buffer alone there.
+    if (env->goal_behavior == GOAL_TRIAL && env->truncations != NULL) {
+        memset(env->truncations, 0, env->active_agent_count * sizeof(unsigned char));
+    }
 
     env->timestep++;
 
@@ -2932,6 +2940,7 @@ void c_step(Drive *env) {
             if (!reached && !timed_out) continue;
 
             if (env->trial_ended_this_step != NULL) env->trial_ended_this_step[i] = 1;
+            if (env->truncations != NULL) env->truncations[i] = 1;
             int trial_len = env->timestep - e->trial_start_timestep;
             e->trial_count++;
             // Write directly to env->log (vec_log path picks it up). add_log

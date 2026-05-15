@@ -1045,36 +1045,20 @@ class Drive(pufferlib.PufferEnv):
 
     def step(self, actions):
         self.terminals[:] = 0
-        # Reset truncations each step so the trial-boundary flag set below
-        # under GOAL_TRIAL is per-step rather than sticky. Under non-trial
-        # modes the only writer is the k_eff curriculum at scenario
-        # boundaries (drive.py:1150), which set both terminals + truncations
-        # on the same step — that semantic is preserved by the reset.
-        self.truncations[:] = 0
+        # Under gb=3, C owns both `truncations` and `trial_ended_this_step`:
+        # zeroes them at top of c_step and writes 1 at each trial boundary.
+        # Under non-trial modes, Python still owns `truncations` (k_eff
+        # curriculum below writes it directly), so zero here only if non-3.
+        if self.goal_behavior != 3:
+            self.truncations[:] = 0
 
         self.actions[self.ego_ids] = actions
 
         if self.population_play and not self.external_co_player_actions:
             co_player_actions = self.get_co_player_actions()
             self.actions[self.co_player_ids] = co_player_actions
-        # When external_co_player_actions=True, the main process has already
-        # written co-player actions into self.actions[co_player_ids] via the
-        # shared-memory action buffer; nothing to do here.
 
         binding.vec_step(self.c_envs)
-        # GOAL_TRIAL plumbing: every trial boundary (goal-reach OR per-trial
-        # timeout) sets `trial_ended_this_step[i]=1` in C. Mirror that flag onto
-        # `truncations` so it propagates through pufferlib's shared-memory
-        # buffer to the main process. pufferl uses it for GAE bootstrap-stop
-        # (so V[t+1] post-respawn is not pulled into the value target for the
-        # last step of the old trial) WITHOUT triggering KV-cache reset (cache
-        # gates on `terminals` only after this change). True episode
-        # boundaries (trial_count == max_trials_per_episode) set both
-        # terminals and trial_ended_this_step in C, so both signals fire there.
-        if self.goal_behavior == 3:
-            te = np.asarray(self.trial_ended_this_step, dtype=bool)
-            if te.any():
-                self.truncations[te] = 1
         if self.reward_only_last_scenario and self.current_scenario != self.k_scenarios - 1:
             self.rewards[:] = 0
         # Oracle: copy C obs into pufferl buffer + write oracle slots.
