@@ -18,6 +18,12 @@ CLOSE = 4
 MAIN = 5
 INFO = 6
 
+# Module-level cache for co-player state_dicts. Render epochs call
+# pufferlib.vector.make repeatedly, and reloading the (~50MB) frozen
+# co-player checkpoint each time was a major source of memory pressure
+# and disk I/O. Keyed by (path, mtime) so a replaced file invalidates.
+_CO_PLAYER_STATE_DICT_CACHE = {}
+
 
 def recv_precheck(vecenv):
     if vecenv.flag != RECV:
@@ -1021,7 +1027,20 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        # Cache the loaded state_dict at module level so render epochs
+        # don't reload the (~50MB) checkpoint from disk every time
+        # vector.make is called. The co-player checkpoint is FROZEN
+        # throughout a run, so re-reading is pure I/O waste. Keyed by
+        # full path + mtime to invalidate if the file is replaced.
+        try:
+            _ckpt_mtime = os.path.getmtime(checkpoint_path)
+        except OSError:
+            _ckpt_mtime = 0
+        _cache_key = (checkpoint_path, _ckpt_mtime)
+        state_dict = _CO_PLAYER_STATE_DICT_CACHE.get(_cache_key)
+        if state_dict is None:
+            state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            _CO_PLAYER_STATE_DICT_CACHE[_cache_key] = state_dict
 
         policy.load_state_dict(state_dict, strict=True)
         if external_coplayer:

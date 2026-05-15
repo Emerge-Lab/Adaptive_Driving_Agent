@@ -253,6 +253,7 @@ struct Entity {
     float goals_reached_this_episode;
     float goals_sampled_this_episode;
     int current_goal_reached;
+    int collided_this_trial;    // GOAL_TRIAL only: 1 if any collision/offroad this trial
     int trial_count;            // GOAL_TRIAL only: trials completed this episode
     int trial_start_timestep;   // GOAL_TRIAL only: tick when current trial began
     int active_agent;
@@ -446,10 +447,13 @@ struct Drive {
 void add_log_one_agent(Drive *env, int i) {
     Entity *e = &env->entities[env->active_agent_indices[i]];
 
-    env->log.goals_reached_this_episode += e->goals_reached_this_episode;
-    env->log.goals_sampled_this_episode += e->goals_sampled_this_episode;
-
     if (e->is_ego) {
+        // BUG-FIX: these increments were OUTSIDE this guard before, so
+        // co-player goal counts contaminated the ego aggregate. Now gated
+        // on is_ego so env->log.goals_* reflect ego progress only.
+        env->log.goals_reached_this_episode += e->goals_reached_this_episode;
+        env->log.goals_sampled_this_episode += e->goals_sampled_this_episode;
+
         int offroad = env->logs[i].offroad_rate;
         int collided = env->logs[i].collision_rate;
         env->log.offroad_rate += offroad;
@@ -464,17 +468,12 @@ void add_log_one_agent(Drive *env, int i) {
         env->log.expert_static_agent_count += env->expert_static_agent_count;
         env->log.static_agent_count += env->static_agent_count;
 
-        // Score under gb=3: frac = goals_reached / max_trials, with a
-        // threshold ladder by k (0.5 for k=2, 0.8 for k∈{3,4}, 0.9 for k≥5).
-        // Any collision disqualifies (no collided_before_goal tracking under
-        // trial mode — collisions span trials).
+        // Score is accumulated per-trial in c_step's trial-end loop:
+        // each clean trial (goal reached + no collision/offroad this trial)
+        // contributes 1/max_trials_per_episode. So score ∈ [0, 1] per ego.
+        // dnf_rate keeps episode-level "did not finish all trials cleanly".
         float denom = (float)env->max_trials_per_episode;
         float frac = (denom > 0.0f) ? e->goals_reached_this_episode / denom : 0.0f;
-        float threshold = 0.99f;
-        if (env->max_trials_per_episode == 2) threshold = 0.5f;
-        else if (env->max_trials_per_episode < 5) threshold = 0.8f;
-        else threshold = 0.9f;
-        if (frac > threshold && !collided) env->log.score += 1.0f;
         if (!offroad && !collided && frac < 1.0f) env->log.dnf_rate += 1.0f;
         env->log.n += 1.0f;
     }
@@ -842,6 +841,7 @@ void set_start_position(Drive *env) {
         e->respawn_count = 0;
         e->trial_count = 0;
         e->trial_start_timestep = 0;
+        e->collided_this_trial = 0;
 
         // Dynamics
         e->a_long = 0.0f;
@@ -1688,6 +1688,10 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
         collided = VEHICLE_COLLISION;
 
     agent->collision_state = collided;
+    if (collided != 0) {
+        // GOAL_TRIAL per-trial clean-success tracker. Cleared at trial-end.
+        agent->collided_this_trial = 1;
+    }
 
     if (collided == VEHICLE_COLLISION) {
         if (env->collision_behavior == STOP_AGENT && !agent->stopped) {
@@ -2972,11 +2976,17 @@ void c_step(Drive *env) {
                     env->log.trial_total_length += (float)trial_len;
                     if (e->current_goal_reached) {
                         env->log.n_trials_goal_reached += 1.0f;
-                        if (k >= 0 && k < N_TRIAL_K_SLOTS)
-                            env->log.trial_k_goal_reached[k] += 1.0f;
+                        if (!e->collided_this_trial) {
+                            // Clean trial success: per-trial score = 1.
+                            // Contributes 1/max_trials_per_episode to episode score.
+                            env->log.score += 1.0f / (float)env->max_trials_per_episode;
+                            if (k >= 0 && k < N_TRIAL_K_SLOTS)
+                                env->log.trial_k_goal_reached[k] += 1.0f;
+                        }
                     } else {
                         env->log.n_trials_timed_out += 1.0f;
                     }
+                    e->collided_this_trial = 0;  // reset for the next trial
                 }
 
                 if (is_episode_end) {
@@ -3090,7 +3100,7 @@ static void start_video_recorder(Client *client, const char *basename) {
         for (int fd = 3; fd < 256; fd++) {
             close(fd);
         }
-        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", size_str, "-r", "15", "-i", "-",
+        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", size_str, "-r", "30", "-i", "-",
                "-c:v", "libx264", "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-crf", "23",
                "-loglevel", "error", filename, NULL);
         fprintf(stderr, "Failed to exec ffmpeg\n");
