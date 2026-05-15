@@ -273,5 +273,15 @@ static int my_log(PyObject *dict, Log *log) {
         assign_to_dict(dict, "trial_mean_length", 0.0f);
         assign_to_dict(dict, "trial_goal_reach_rate", 0.0f);
     }
+    // Per-trial-index success rate (GOAL_TRIAL only). n_trials_completed is
+    // the gate: it's only non-zero under GOAL_TRIAL, so gb=0/1/2 won't leak
+    // these keys into wandb / eval output.
+    if (log->n_trials_completed > 0.0f) {
+        char key[32];
+        for (int k = 0; k < N_TRIAL_K_SLOTS; k++) {
+            snprintf(key, sizeof(key), "trial_%d_score", k);
+            assign_to_dict(dict, key, log->trial_k_goal_reached[k]);
+        }
+    }
     return 0;
 }

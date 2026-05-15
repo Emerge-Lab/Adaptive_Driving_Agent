@@ -203,7 +203,13 @@ struct Log {
     float n_trials_goal_reached;
     float n_trials_timed_out;
     float trial_total_length;     // running sum, divided by n_trials_completed in add_log
+    // Per-trial-index goal-reach counters (8 slots; k_scenarios beyond 8 is
+    // unsupported for this metric). Each slot counts ego-episodes where trial
+    // k succeeded. vec_log divides by n to give the per-trial success rate;
+    // Python computes ada_delta_trial_k_minus_0 from these.
+    float trial_k_goal_reached[8];
 };
+#define N_TRIAL_K_SLOTS 8
 
 typedef struct Entity Entity;
 struct Entity {
@@ -2938,6 +2944,9 @@ void c_step(Drive *env) {
                     env->log.n_trials_goal_reached += 1.0f;
                 else
                     env->log.n_trials_timed_out += 1.0f;
+                int k = e->trial_count - 1;  // index of the just-completed trial
+                if (reached && k >= 0 && k < N_TRIAL_K_SLOTS)
+                    env->log.trial_k_goal_reached[k] += 1.0f;
             }
 
             if (e->trial_count >= env->max_trials_per_episode) {

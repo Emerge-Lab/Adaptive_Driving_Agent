@@ -998,6 +998,20 @@ class Drive(pufferlib.PufferEnv):
 
         return aggregated
 
+    def _inject_trial_deltas(self, log):
+        """Under goal_behavior=3, fill in ada_delta_trial_K_minus_0 keys from
+        the per-trial-index trial_K_score values the C side just emitted.
+        Mutates `log` in place. Stops at the first slot whose score == 0 AND
+        whose k > 0 (likely an unused slot for current max_trials).
+        """
+        k_max = self.max_trials_per_episode
+        trial_0 = log.get("trial_0_score", 0.0)
+        for k in range(1, k_max):
+            key = f"trial_{k}_score"
+            if key not in log:
+                break
+            log[f"ada_delta_trial_{k}_minus_0"] = log[key] - trial_0
+
     def _compute_delta_metrics(self):
         """Compute delta metrics between first and last scenario."""
         if len(self.scenario_metrics) < 2:
@@ -1072,6 +1086,12 @@ class Drive(pufferlib.PufferEnv):
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
+                # Under GOAL_TRIAL: derive ada_delta_trial_K_minus_0 from the
+                # per-trial-index success rates the C side now emits as
+                # trial_K_score. Surfaces in wandb every report_interval; no
+                # need to wait for eval-time HumanReplayEvaluator.
+                if self.goal_behavior == 3:
+                    self._inject_trial_deltas(log)
                 if self.adaptive_driving_agent:
                     self.current_scenario_infos.append(log)
                     # For training: only report 0-shot (scenario 0) metrics
