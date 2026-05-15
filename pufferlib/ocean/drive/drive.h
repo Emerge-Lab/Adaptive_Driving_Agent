@@ -1144,15 +1144,15 @@ void set_means(Drive *env) {
 void move_expert(Drive *env, float *actions, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
     int t = env->timestep;
-    // GOAL_TRIAL: loop the recorded trajectory so static experts don't vanish
-    // past array_size. Note: this means humans drift across trials (different
-    // frame each trial) — accepts a slight "trial 2 != trial 1" violation for
-    // humans in exchange for keeping late-valid agents visible in short
-    // trials. For eval purposes (human_replay, 1 ego/env) where strict
-    // trial-equivalence matters, the human_replay path should override this
-    // (TODO: gate on a config flag).
+    // GOAL_TRIAL B'': humans replay on the env's trial clock so they reset to
+    // frame 0 at every env trial-end. Visual consequence: if humans have
+    // late-valid windows (enter scene at frame 30+) and trials are short
+    // (ego reaches goal fast), humans may not appear in those trials —
+    // that's the data, not a bug. We don't care about what humans do during
+    // a trial, only about ego-side strict trial-equivalence.
     if (env->goal_behavior == GOAL_TRIAL && agent->array_size > 0) {
-        t = env->timestep % agent->array_size;
+        t = env->timestep - env->env_trial_start_timestep;
+        t = t % agent->array_size;
         if (t < 0) t += agent->array_size;
     }
     if (t < 0 || t >= agent->array_size) {
