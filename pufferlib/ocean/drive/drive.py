@@ -1031,6 +1031,12 @@ class Drive(pufferlib.PufferEnv):
 
     def step(self, actions):
         self.terminals[:] = 0
+        # Reset truncations each step so the trial-boundary flag set below
+        # under GOAL_TRIAL is per-step rather than sticky. Under non-trial
+        # modes the only writer is the k_eff curriculum at scenario
+        # boundaries (drive.py:1150), which set both terminals + truncations
+        # on the same step — that semantic is preserved by the reset.
+        self.truncations[:] = 0
 
         self.actions[self.ego_ids] = actions
 
@@ -1042,6 +1048,19 @@ class Drive(pufferlib.PufferEnv):
         # shared-memory action buffer; nothing to do here.
 
         binding.vec_step(self.c_envs)
+        # GOAL_TRIAL plumbing: every trial boundary (goal-reach OR per-trial
+        # timeout) sets `trial_ended_this_step[i]=1` in C. Mirror that flag onto
+        # `truncations` so it propagates through pufferlib's shared-memory
+        # buffer to the main process. pufferl uses it for GAE bootstrap-stop
+        # (so V[t+1] post-respawn is not pulled into the value target for the
+        # last step of the old trial) WITHOUT triggering KV-cache reset (cache
+        # gates on `terminals` only after this change). True episode
+        # boundaries (trial_count == max_trials_per_episode) set both
+        # terminals and trial_ended_this_step in C, so both signals fire there.
+        if self.goal_behavior == 3:
+            te = np.asarray(self.trial_ended_this_step, dtype=bool)
+            if te.any():
+                self.truncations[te] = 1
         if self.reward_only_last_scenario and self.current_scenario != self.k_scenarios - 1:
             self.rewards[:] = 0
         # Oracle: copy C obs into pufferl buffer + write oracle slots.
@@ -1073,7 +1092,20 @@ class Drive(pufferlib.PufferEnv):
                 info.append(self._pending_k_eff_log)
                 self._pending_k_eff_log = None
 
-        if self.tick % self.scenario_length == 0:
+        # Per-scenario block: under non-trial modes, every `scenario_length`
+        # ticks is a scenario boundary — aggregate metrics, advance the
+        # scenario index, possibly resample partner / rotate maps. Under
+        # GOAL_TRIAL trial boundaries are variable-length (driven by C's
+        # `trial_ended_this_step`) so fixed-time scenario boundary logic
+        # would land mid-trial. We skip the whole block — partner/map
+        # resampling now happen only at the resample_frequency boundary
+        # below (which corresponds to the worst-case episode budget,
+        # k_scenarios * scenario_length). Standard episode metrics still
+        # emit via add_log_one_agent in C; trial-specific metrics
+        # (n_trials_completed, trial_mean_length, trial_goal_reach_rate)
+        # are populated globally per-episode.
+        run_per_scenario_block = self.tick % self.scenario_length == 0 and self.goal_behavior != 3
+        if run_per_scenario_block:
             if self.adaptive_driving_agent and self.current_scenario_infos:
                 scenario_log = self._aggregate_scenario_metrics(self.current_scenario_infos)
                 scenario_log["scenario_id"] = self.current_scenario
@@ -1150,7 +1182,29 @@ class Drive(pufferlib.PufferEnv):
                 self.truncations[self.ego_ids] = 1
                 self.terminals[self.ego_ids] = 1
 
+        # KNOWN ISSUE under goal_behavior=3 (GOAL_TRIAL): when trials end
+        # fast (e.g. ~12 ticks because the recorded path leaves the agent
+        # near its goal), the C-side terminals fires many times per
+        # resample_frequency window — the agent sees the SAME map for
+        # ~30 short C-episodes per Python rotation, which over-fits scores
+        # to that small map subset. Calling _reinit_envs_with_new_maps()
+        # on every terminals.any() fixes the map diversity but costs
+        # ~250ms per call (full vec_init reload); at ~10 calls/sec that's
+        # unusable for training. The right fix is either a per-sub-env
+        # reset binding or in-memory map caching, both of which are
+        # bigger changes than a Python edit. Documented for follow-up.
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
+            # Under goal_behavior=3 (Option D): flush whatever per-agent
+            # episode metrics have accumulated in env->log this cycle BEFORE
+            # _reinit_envs_with_new_maps zeros them via env_init. Slow agents
+            # that never finished max_trials don't contribute to log.n, so
+            # the standard vec_log gate (total_n >= num_agents) often
+            # wouldn't fire within a single Python cycle. Calling vec_log
+            # with num_agents=1 forces an emission if ANY data is present.
+            if self.goal_behavior == 3:
+                log = binding.vec_log(self.c_envs, 1)
+                if log and log.get("n", 0) > 0:
+                    info.append(log)
             self.tick = 0
             will_resample = 1
             if will_resample:

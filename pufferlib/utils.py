@@ -286,10 +286,17 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         }
 
         use_rnn = config.get("use_rnn", False)
-        episode_length = env_kwargs.get("scenario_length", 91)
+        scenario_length = env_kwargs.get("scenario_length", 91)
         k_scenarios = env_kwargs.get("k_scenarios", 1)
-        if k_scenarios > 1:
-            episode_length = k_scenarios * episode_length
+        goal_behavior = int(env_kwargs.get("goal_behavior", 0))
+        if goal_behavior == 3:
+            max_trials = int(env_kwargs.get("max_trials_per_episode", 2))
+            per_trial_timeout = int(env_kwargs.get("per_trial_timeout") or 0) or scenario_length
+            episode_length = max_trials * per_trial_timeout
+            episode_label = f"trials{max_trials}"
+        else:
+            episode_length = scenario_length * k_scenarios if k_scenarios > 1 else scenario_length
+            episode_label = f"k{k_scenarios}"
 
         mode = "human_replay" if human_replay else ("coplayer" if env_kwargs.get("co_player_enabled") else "baseline")
         videos_to_log_world = []
@@ -302,7 +309,7 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
                 map_ids = getattr(driver, "map_ids", None)
                 map_id = int(map_ids[0]) if map_ids is not None and len(map_ids) > 0 else 0
                 view = _VIEW_NAMES.get(int(view_mode), "view")
-                basename = f"epoch_{epoch:06d}_{mode}_k{k_scenarios}_map{map_id:03d}_{view}"
+                basename = f"epoch_{epoch:06d}_{mode}_{episode_label}_map{map_id:03d}_{view}"
 
                 # Tell the env to keep raylib + ffmpeg alive across map swaps so
                 # the in-step _reinit_envs_with_new_maps() at scenario boundaries

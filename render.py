@@ -117,6 +117,12 @@ def build_config(args):
     config["env"]["num_ego_agents"] = args.num_ego_agents
     config["env"]["k_scenarios"] = args.k_scenarios
     config["env"]["scenario_length"] = args.scenario_length
+    if args.goal_behavior is not None:
+        config["env"]["goal_behavior"] = int(args.goal_behavior)
+    if args.max_trials_per_episode is not None:
+        config["env"]["max_trials_per_episode"] = int(args.max_trials_per_episode)
+    if args.per_trial_timeout is not None:
+        config["env"]["per_trial_timeout"] = int(args.per_trial_timeout)
 
     if args.human_replay:
         if env_name == "puffer_adaptive_drive":
@@ -190,7 +196,23 @@ def render_one(env_name, base_config, view_modes, render_idx, seed, args):
             mode = mode_tag(args)
         coplayer_part = ""
 
-        max_steps = args.max_steps if args.max_steps is not None else (args.k_scenarios * args.scenario_length)
+        # Default max_steps:
+        #  - non-trial: k_scenarios * scenario_length (worst-case episode in adaptive mode).
+        #  - GOAL_TRIAL: max_trials_per_episode * per_trial_timeout. With the
+        #    adaptive auto-link these are equal, but if a user runs trial
+        #    mode with non-default knobs, the trial-budget is the right max.
+        if args.max_steps is not None:
+            max_steps = args.max_steps
+        else:
+            goal_behavior = getattr(vecenv.driver_env, "goal_behavior", 0)
+            if int(goal_behavior) == 3:
+                max_trials = int(getattr(vecenv.driver_env, "max_trials_per_episode", 2))
+                per_trial = int(getattr(vecenv.driver_env, "per_trial_timeout", 0) or 0)
+                if per_trial <= 0:
+                    per_trial = args.scenario_length
+                max_steps = max_trials * per_trial
+            else:
+                max_steps = args.k_scenarios * args.scenario_length
         os.makedirs(args.output_dir, exist_ok=True)
         saved = []
 
@@ -266,6 +288,15 @@ def main():
 
     p.add_argument("--k-scenarios", type=int, default=2, help="Number of scenarios per episode (adaptive)")
     p.add_argument("--scenario-length", type=int, default=91)
+    p.add_argument(
+        "--goal-behavior",
+        type=int,
+        default=None,
+        help="Goal behavior: 0=RESPAWN, 1=GENERATE_NEW, 2=STOP, 3=TRIAL (variable-length trials). "
+        "Defaults to whatever the checkpoint was trained with (ini default 0).",
+    )
+    p.add_argument("--max-trials-per-episode", type=int, default=None, help="GOAL_TRIAL: trials per episode")
+    p.add_argument("--per-trial-timeout", type=int, default=None, help="GOAL_TRIAL: max ticks per trial")
     p.add_argument(
         "--max-steps", type=int, default=None, help="Steps per render (default: k_scenarios * scenario_length)"
     )

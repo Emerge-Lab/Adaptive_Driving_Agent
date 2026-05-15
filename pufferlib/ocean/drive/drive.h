@@ -429,6 +429,112 @@ struct Drive {
                               // "render".
 };
 
+// Per-agent variant of add_log used under GOAL_TRIAL: when one agent's
+// episode ends (trial_count >= max_trials_per_episode), aggregate that
+// single agent's per-step metrics from env->logs[i] / co_player_logs[i]
+// into env->log / co_player_log, then reset the per-agent state so the
+// next episode starts clean. add_log itself can't be used because it
+// loops over all active agents and assumes a synchronized scenario end.
+void add_log_one_agent(Drive *env, int i) {
+    Entity *e = &env->entities[env->active_agent_indices[i]];
+
+    // Common (goals counters, same as add_log)
+    env->log.goals_reached_this_episode += e->goals_reached_this_episode;
+    env->log.goals_sampled_this_episode += e->goals_sampled_this_episode;
+
+    if (e->is_ego) {
+        int offroad = env->logs[i].offroad_rate;
+        int collided = env->logs[i].collision_rate;
+        env->log.offroad_rate += offroad;
+        env->log.collision_rate += collided;
+        env->log.offroad_per_agent += env->logs[i].offroad_per_agent;
+        env->log.collisions_per_agent += env->logs[i].collisions_per_agent;
+        env->log.lane_alignment_rate += env->logs[i].lane_alignment_rate;
+        env->log.speed_at_goal += env->logs[i].speed_at_goal;
+        env->log.episode_length += env->logs[i].episode_length;
+        env->log.episode_return += env->logs[i].episode_return;
+        env->log.active_agent_count += env->active_agent_count;
+        env->log.expert_static_agent_count += env->expert_static_agent_count;
+        env->log.static_agent_count += env->static_agent_count;
+
+        // Under GOAL_TRIAL the agent gets `max_trials_per_episode` shots at
+        // the goal in one episode. `goals_reached_this_episode` accumulates
+        // per-trial successes, but `goals_sampled_this_episode` stays at 1
+        // (respawn_agent doesn't generate a new goal). So we use
+        // max_trials_per_episode as the denominator — frac is then the
+        // per-episode trial success rate, and the existing threshold ladder
+        // (0.5 for 2, 0.8 for 3-4, 0.9 for 5+, 0.99 for 1) reads as
+        // "agent must solve ≥ T fraction of trials to score." This matches
+        // the semantics of `score` under non-trial modes (= "agent
+        // completed the task at least to threshold").
+        float denom = (float)env->max_trials_per_episode;
+        float frac = (denom > 0.0f) ? e->goals_reached_this_episode / denom : 0.0f;
+        float threshold = 0.99f;
+        if (env->max_trials_per_episode == 2) threshold = 0.5f;
+        else if (env->max_trials_per_episode < 5) threshold = 0.8f;
+        else threshold = 0.9f;
+        // GOAL_TRIAL: collided_before_goal not used; treat any collision
+        // across trials as disqualifying. Matches the non-respawn/non-stop
+        // branch of add_log's ternary at the corresponding line.
+        if (frac > threshold && !collided) env->log.score += 1.0f;
+        if (!offroad && !collided && frac < 1.0f) env->log.dnf_rate += 1.0f;
+        env->log.n += 1.0f;
+    }
+
+    if (e->is_co_player && env->co_player_logs != NULL) {
+        int co_offroad = env->co_player_logs[i].offroad_rate;
+        int co_collided = env->co_player_logs[i].collision_rate;
+        env->co_player_log.offroad_rate += co_offroad;
+        env->co_player_log.collision_rate += co_collided;
+        env->co_player_log.offroad_per_agent += env->co_player_logs[i].offroad_per_agent;
+        env->co_player_log.collisions_per_agent += env->co_player_logs[i].collisions_per_agent;
+        env->co_player_log.lane_alignment_rate += env->co_player_logs[i].lane_alignment_rate;
+        env->co_player_log.speed_at_goal += env->co_player_logs[i].speed_at_goal;
+        env->co_player_log.episode_length += env->co_player_logs[i].episode_length;
+        env->co_player_log.episode_return += env->co_player_logs[i].episode_return;
+
+        // Same per-trial denominator fix as the ego branch above.
+        float co_denom = (float)env->max_trials_per_episode;
+        float co_frac = (co_denom > 0.0f) ? e->goals_reached_this_episode / co_denom : 0.0f;
+        float co_threshold = 0.99f;
+        if (env->max_trials_per_episode == 2) co_threshold = 0.5f;
+        else if (env->max_trials_per_episode < 5) co_threshold = 0.8f;
+        else co_threshold = 0.9f;
+        if (co_frac > co_threshold && !co_collided) env->co_player_log.score += 1.0f;
+        if (!co_offroad && !co_collided && co_frac < 1.0f) env->co_player_log.dnf_rate += 1.0f;
+        env->co_player_log.n += 1.0f;
+    }
+
+    // Reset per-agent state so the next trial-mode episode starts fresh.
+    // Mirror EVERYTHING that c_reset resets per-entity (drive.h c_reset block),
+    // since c_reset is NEVER called under GOAL_TRIAL (the timestep early-return
+    // is gated off). Missing any of these fields would leave stale state from
+    // the previous episode (e.g. respawn_timestep -> obs[6] stuck at 1 forever,
+    // current_goal_reached stuck at 1 -> no further goal-reach events, etc.).
+    env->logs[i] = (Log){0};
+    if (env->population_play && env->co_player_logs != NULL) env->co_player_logs[i] = (Log){0};
+    e->goals_reached_this_episode = 0.0f;
+    e->goals_sampled_this_episode = 1.0f;
+    e->collided_before_goal = 0;
+    e->current_goal_reached = 0;
+    e->respawn_timestep = -1;
+    e->respawn_count = 0;
+    e->stopped = 0;
+    // NOTE: we intentionally do NOT reset `removed` here. Under the
+    // idle-after-max_trials trial-mode semantic (Option D), c_step sets
+    // removed=1 AFTER calling add_log_one_agent so the agent stays
+    // inactive until Python's resample_frequency triggers c_reset (which
+    // does reset removed=0). Clearing it here would undo that.
+    e->metrics_array[COLLISION_IDX] = 0.0f;
+    e->metrics_array[OFFROAD_IDX] = 0.0f;
+    e->metrics_array[REACHED_GOAL_IDX] = 0.0f;
+    e->metrics_array[LANE_ALIGNED_IDX] = 0.0f;
+    e->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;
+    e->metrics_array[LANE_ANGLE_IDX] = 0.0f;
+    e->current_lane_idx = -1;
+    e->current_lane_geometry_idx = -1;
+}
+
 void add_log(Drive *env) {
     for (int i = 0; i < env->active_agent_count; i++) {
         Entity *e = &env->entities[env->active_agent_indices[i]];
@@ -1046,6 +1152,18 @@ void set_means(Drive *env) {
 void move_expert(Drive *env, float *actions, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
     int t = env->timestep;
+    // GOAL_TRIAL: an episode budget can span multiple `scenario_length`-tick
+    // expert trajectories (e.g. max_trials=2 * per_trial_timeout=201 = 402
+    // ticks on a 201-tick nuplan scene). Pre-fix, experts vanished
+    // (INVALID_POSITION) for the entire second half of every episode,
+    // gutting the background-traffic signal the adaptive ego is supposed
+    // to learn from. Loop the trajectory instead — experts replay their
+    // recorded path each per_trial_timeout window, matching the per-trial
+    // respawn the controlled agents do.
+    if (env->goal_behavior == GOAL_TRIAL && agent->array_size > 0) {
+        t = t % agent->array_size;
+        if (t < 0) t += agent->array_size;
+    }
     if (t < 0 || t >= agent->array_size) {
         agent->x = INVALID_POSITION;
         agent->y = INVALID_POSITION;
@@ -2573,6 +2691,11 @@ void respawn_agent(Drive *env, int agent_idx) {
     env->entities[agent_idx].jerk_long = 0.0f;
     env->entities[agent_idx].jerk_lat = 0.0f;
     env->entities[agent_idx].steering_angle = 0.0f;
+    // Allow the next trial (GOAL_TRIAL) to register a fresh goal-reach event.
+    // Without this, the trial-end gate at the start of c_step's goal-reach
+    // block (`!current_goal_reached`) stays false forever after the first
+    // success, suppressing all subsequent trial-end goal_weight rewards.
+    env->entities[agent_idx].current_goal_reached = 0;
 }
 
 void c_step(Drive *env) {
@@ -2721,6 +2844,15 @@ void c_step(Drive *env) {
                 env->entities[agent_idx].stopped = 1;
                 env->entities[agent_idx].vx = env->entities[agent_idx].vy = 0.0f;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
+                // Gate further re-firing of this branch within the same
+                // trial (GOAL_TRIAL) or scenario (GOAL_STOP). Pre-fix, this
+                // branch never set current_goal_reached, so every tick the
+                // agent sat in goal radius re-incremented
+                // goals_reached_this_episode and re-set stopped=1, vx=vy=0.
+                // The flag is reset to 0 by respawn_agent (for GOAL_TRIAL)
+                // and by c_reset (for GOAL_STOP/scenario boundary), so the
+                // next trial / next scenario can register a fresh goal-reach.
+                env->entities[agent_idx].current_goal_reached = 1;
             }
 
             env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 1.0f;
@@ -2785,6 +2917,10 @@ void c_step(Drive *env) {
         for (int i = 0; i < env->active_agent_count; i++) {
             int agent_idx = env->active_agent_indices[i];
             Entity *e = &env->entities[agent_idx];
+            // Option D: skip agents that have already finished their max_trials
+            // episode this Python cycle. They idle until resample_frequency
+            // triggers _reinit_envs_with_new_maps → c_reset → removed=0.
+            if (e->removed) continue;
             int reached = e->metrics_array[REACHED_GOAL_IDX];
             int timed_out = (env->timestep - e->trial_start_timestep) >= env->per_trial_timeout;
             if (!reached && !timed_out) continue;
@@ -2803,13 +2939,26 @@ void c_step(Drive *env) {
                 else
                     env->log.n_trials_timed_out += 1.0f;
             }
-            respawn_agent(env, agent_idx);
-            e->trial_start_timestep = env->timestep;
 
             if (e->trial_count >= env->max_trials_per_episode) {
+                // Episode end (this agent has done max_trials trials).
+                // Fire terminals + aggregate logs + mark agent idle.
+                // Do NOT respawn — the agent waits off-grid until Python's
+                // resample_frequency hits and reloads the map. This ensures
+                // 1 map = 1 episode (no over-fitting to a small map subset
+                // via short repeated C-side trial loops).
                 env->terminals[i] = 1;
                 e->trial_count = 0;
-                if (e->is_ego) env->log.n += 1.0f;  // vec_log denominator: episodes ended
+                add_log_one_agent(env, i);
+                e->removed = 1;
+                e->x = INVALID_POSITION;
+                e->y = INVALID_POSITION;
+                e->vx = 0.0f;
+                e->vy = 0.0f;
+            } else {
+                // More trials to go — respawn for next trial.
+                respawn_agent(env, agent_idx);
+                e->trial_start_timestep = env->timestep;
             }
         }
     }
@@ -3667,8 +3816,29 @@ void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_
             EndMode3D();
         }
 
-        // Draw scenario counter overlay (2D text on top of 3D scene)
-        if (k_scenarios > 1) {
+        // Draw scenario/trial counter overlay (2D text on top of 3D scene).
+        // Under GOAL_TRIAL we show "Trial X / K" using the first ego agent's
+        // C-side trial_count (current_scenario is frozen at 0 in trial mode —
+        // see drive.py per-scenario gate). Both ego_count == 0 and other
+        // degenerate setups fall back to the prior "Scenario X / k" overlay.
+        if (env->goal_behavior == GOAL_TRIAL && env->max_trials_per_episode > 1) {
+            int ego_trial = 0;
+            int found_ego = 0;
+            for (int i = 0; i < env->active_agent_count; i++) {
+                int agent_idx = env->active_agent_indices[i];
+                if (env->entities[agent_idx].is_ego) {
+                    ego_trial = env->entities[agent_idx].trial_count;
+                    found_ego = 1;
+                    break;
+                }
+            }
+            if (found_ego) {
+                char trial_text[64];
+                snprintf(trial_text, sizeof(trial_text), "Trial %d / %d",
+                         ego_trial + 1, env->max_trials_per_episode);
+                DrawText(trial_text, 40, 40, 120, WHITE);
+            }
+        } else if (k_scenarios > 1) {
             char scenario_text[64];
             snprintf(scenario_text, sizeof(scenario_text), "Scenario %d / %d", current_scenario + 1, k_scenarios);
             DrawText(scenario_text, 40, 40, 120, WHITE);

@@ -56,6 +56,38 @@ import signal  # Aggressively exit on ctrl+c
 
 signal.signal(signal.SIGINT, lambda sig, frame: os._exit(0))
 
+# ----------------------------------------------------------------------------
+# Trial-mode debug logger. Set PUFFER_TRIAL_DEBUG_FILE=/path/to/log.jsonl to
+# capture per-epoch GAE/cache/trial diagnostics as a stream of JSON records.
+# No-op otherwise. Schema:
+#   {"event": "...", "epoch": int, "step": int, ...event-specific fields}
+# Events:
+#   "rollout_end_of_epoch": rollout buffer summary at end of each eval phase
+#   "gae_outer": pre-GAE stats + post-GAE advantage stats per training update
+#   "gae_inner": per-minibatch stats inside the PPO update loop
+#   "cache_reset": each cache-reset event during rollout (under episode-end)
+# ----------------------------------------------------------------------------
+import json as _json
+
+_TRIAL_DEBUG_PATH = os.environ.get("PUFFER_TRIAL_DEBUG_FILE", "")
+_TRIAL_DEBUG_ENABLED = bool(_TRIAL_DEBUG_PATH)
+_TRIAL_DEBUG_FH = None
+
+
+def _trial_debug_log(event, **data):
+    """Append a JSON line to the trial-debug file. Cheap when disabled."""
+    if not _TRIAL_DEBUG_ENABLED:
+        return
+    global _TRIAL_DEBUG_FH
+    try:
+        if _TRIAL_DEBUG_FH is None:
+            _TRIAL_DEBUG_FH = open(_TRIAL_DEBUG_PATH, "a", buffering=1)
+        rec = {"event": event, "ts": time.time(), **data}
+        _TRIAL_DEBUG_FH.write(_json.dumps(rec, default=str) + "\n")
+    except Exception:
+        pass
+
+
 # Assume advantage kernel has been built if CUDA compiler is available
 ADVANTAGE_CUDA = shutil.which("nvcc") is not None
 
@@ -607,7 +639,14 @@ class PuffeRL:
 
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
-            done_mask = d + t  # TODO: Handle truncations separately
+            # Cache-reset and PE-reset gate: terminals only. Under
+            # goal_behavior=GOAL_TRIAL (=3), trial boundaries flow into
+            # `t` (truncations) — the agent has physically respawned, but
+            # the adaptive policy must keep its KV cache across the trial
+            # to be able to adapt. Episode boundaries set `d` (terminals)
+            # and the cache is reset for those rows below. GAE picks up
+            # `t` separately below as a bootstrap-stop signal.
+            done_mask = d
             self.global_step += int(mask.sum())
 
             profile("eval_copy", epoch)
@@ -702,6 +741,19 @@ class PuffeRL:
                                         c[valid_indices] = 0
                                     for c in vc:
                                         c[valid_indices] = 0
+                                if _TRIAL_DEBUG_ENABLED:
+                                    # At this point d/t may be torch CUDA tensors
+                                    # (converted earlier in this block). Use done_mask
+                                    # (still numpy) for the boundary count.
+                                    _trial_debug_log(
+                                        "cache_reset",
+                                        epoch=int(self.epoch),
+                                        step=int(self.global_step),
+                                        env_id_start=int(env_id.start),
+                                        env_id_stop=int(env_id.stop),
+                                        n_done=int(len(valid_indices)),
+                                        done_mask_sum=int(np.asarray(done_mask).sum()),
+                                    )
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
                 batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
@@ -715,6 +767,14 @@ class PuffeRL:
                 self.logprobs[batch_rows, l] = logprob
                 self.rewards[batch_rows, l] = r
                 self.terminals[batch_rows, l] = d.float()
+                # Persist truncations so GAE can use (terminals OR
+                # truncations) as bootstrap-stop. Under GOAL_TRIAL the env
+                # mirrors trial_ended_this_step into truncations; under
+                # other modes `t` is the standard truncation signal. Stays
+                # OUT of state["terminals"] below so attention/PE still
+                # span trial boundaries within an episode.
+                t_tensor = torch.as_tensor(t, device=device).float()
+                self.truncations[batch_rows, l] = t_tensor
                 self.values[batch_rows, l] = value.flatten()
 
                 # Note: We are not yet handling masks in this version
@@ -802,10 +862,34 @@ class PuffeRL:
             else:
                 gammas = torch.full((self.segments,), config["gamma"], device=device, dtype=torch.float32)
 
+            # Bootstrap-stop for GAE = terminals OR truncations. Under
+            # goal_behavior=GOAL_TRIAL, truncations are set at each trial
+            # boundary by drive.py.step() (mirroring trial_ended_this_step).
+            # This kills V[t+1] bootstrap across the agent-respawn
+            # discontinuity at trial ends without resetting the KV cache
+            # (cache gates on terminals only, above).
+            bootstrap_stop = (self.terminals + self.truncations).clamp(max=1.0)
+            if _TRIAL_DEBUG_ENABLED:
+                _trial_debug_log(
+                    "gae_outer_pre",
+                    epoch=int(self.epoch),
+                    minibatch=int(mb),
+                    step=int(self.global_step),
+                    terminals_sum=float(self.terminals.sum().item()),
+                    truncations_sum=float(self.truncations.sum().item()),
+                    bootstrap_stop_sum=float(bootstrap_stop.sum().item()),
+                    bootstrap_overlap=float(
+                        torch.minimum(self.terminals, self.truncations).sum().item()
+                    ),
+                    values_mean=float(self.values.mean().item()),
+                    values_std=float(self.values.std().item()),
+                    rewards_mean=float(self.rewards.mean().item()),
+                    rewards_sum=float(self.rewards.sum().item()),
+                )
             advantages = compute_puff_advantage(
                 self.values,
                 self.rewards,
-                self.terminals,
+                bootstrap_stop,
                 self.ratio,
                 advantages,
                 gammas,
@@ -813,6 +897,20 @@ class PuffeRL:
                 config["vtrace_rho_clip"],
                 config["vtrace_c_clip"],
             )
+            if _TRIAL_DEBUG_ENABLED:
+                adv_flat = advantages.flatten()
+                _trial_debug_log(
+                    "gae_outer_post",
+                    epoch=int(self.epoch),
+                    minibatch=int(mb),
+                    step=int(self.global_step),
+                    adv_mean=float(adv_flat.mean().item()),
+                    adv_std=float(adv_flat.std().item()),
+                    adv_min=float(adv_flat.min().item()),
+                    adv_max=float(adv_flat.max().item()),
+                    adv_nan_count=int(torch.isnan(adv_flat).sum().item()),
+                    adv_inf_count=int(torch.isinf(adv_flat).sum().item()),
+                )
 
             profile("train_copy", epoch)
             adv = advantages.abs().sum(axis=1)
@@ -897,11 +995,30 @@ class PuffeRL:
             else:
                 mb_gammas = torch.full((len(idx),), config["gamma"], device=device, dtype=torch.float32)
 
-            # Recompute advantages with new ratios
+            # Recompute advantages with new ratios — bootstrap-stop is
+            # terminals OR truncations (see outer GAE call comment).
+            mb_bootstrap_stop = (mb_terminals + mb_truncations).clamp(max=1.0)
+            if _TRIAL_DEBUG_ENABLED:
+                _trial_debug_log(
+                    "gae_inner",
+                    epoch=int(self.epoch),
+                    minibatch=int(mb),
+                    step=int(self.global_step),
+                    mb_terminals_sum=float(mb_terminals.sum().item()),
+                    mb_truncations_sum=float(mb_truncations.sum().item()),
+                    mb_bootstrap_sum=float(mb_bootstrap_stop.sum().item()),
+                    ratio_mean=float(ratio.mean().item()),
+                    ratio_min=float(ratio.min().item()),
+                    ratio_max=float(ratio.max().item()),
+                    approx_kl=float(approx_kl.item()),
+                    clipfrac=float(clipfrac.item()),
+                    adv_mean_pre=float(adv.mean().item()),
+                    adv_std_pre=float(adv.std().item()),
+                )
             adv = compute_puff_advantage(
                 mb_values,
                 mb_rewards,
-                mb_terminals,
+                mb_bootstrap_stop,
                 ratio,
                 adv,
                 mb_gammas,
@@ -981,6 +1098,44 @@ class PuffeRL:
 
         profile.end()
         logs = None
+        if _TRIAL_DEBUG_ENABLED:
+            # Per-epoch summary: cache health, transformer position, loss snapshot.
+            k_cache = getattr(self, "transformer_k_cache", None)
+            v_cache = getattr(self, "transformer_v_cache", None)
+            pos_buf = getattr(self, "transformer_position", None)
+            cache_stats = {}
+            if k_cache is not None and isinstance(k_cache, dict) and len(k_cache) > 0:
+                # k_cache is dict keyed by transformer_key; each value is a list of layer K tensors
+                some_key = next(iter(k_cache.keys()))
+                cache_list = k_cache[some_key]
+                if cache_list is not None and len(cache_list) > 0:
+                    sample = cache_list[0]
+                    cache_stats = dict(
+                        shape=list(sample.shape),
+                        dtype=str(sample.dtype),
+                        norm_mean=float(sample.norm(dim=-1).mean().item()),
+                        nan_count=int(torch.isnan(sample).sum().item()),
+                        inf_count=int(torch.isinf(sample).sum().item()),
+                    )
+            pos_stats = {}
+            if pos_buf is not None and isinstance(pos_buf, dict) and len(pos_buf) > 0:
+                some_key = next(iter(pos_buf.keys()))
+                p = pos_buf[some_key]
+                if p is not None:
+                    pos_stats = dict(min=int(p.min().item()), max=int(p.max().item()))
+            _trial_debug_log(
+                "epoch_end",
+                epoch=int(self.epoch),
+                step=int(self.global_step),
+                policy_loss=float(losses.get("policy_loss", 0)),
+                value_loss=float(losses.get("value_loss", 0)),
+                entropy=float(losses.get("entropy", 0)),
+                approx_kl=float(losses.get("approx_kl", 0)),
+                clipfrac=float(losses.get("clipfrac", 0)),
+                explained_var=float(explained_var.item() if not torch.isnan(torch.tensor(float(explained_var))) else 0.0),
+                cache=cache_stats,
+                position=pos_stats,
+            )
         self.epoch += 1
         done_training = self.global_step >= config["total_timesteps"]
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
