@@ -691,9 +691,14 @@ class PuffeRL:
                     # B'' off-map flag. The model uses this to (a) mark the
                     # current cache slot as garbage in garbage_mask, and
                     # (b) exclude existing garbage slots from this step's
-                    # attention. None or all-False if the env doesn't expose
-                    # `removed` (e.g. non-gb=3 modes).
-                    rem_buf = getattr(self.vecenv.driver_env, "removed", None)
+                    # attention. Unified flat (num_agents,) view exposed by
+                    # the vec backend: Multiprocessing returns a SHM view
+                    # so worker writes are visible; Serial/native return
+                    # the in-process numpy array. None or all-False if the
+                    # env doesn't expose `removed` (e.g. non-gb=3 modes).
+                    rem_buf = getattr(self.vecenv, "removed", None)
+                    if rem_buf is None:
+                        rem_buf = getattr(self.vecenv.driver_env, "removed", None)
                     if rem_buf is not None:
                         rem_np = np.asarray(rem_buf)[env_id]
                         state["removed"] = torch.as_tensor(rem_np, device=device, dtype=torch.bool)

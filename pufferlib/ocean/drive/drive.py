@@ -424,16 +424,26 @@ class Drive(pufferlib.PufferEnv):
                 self.co_player_device = torch.device("cpu")
                 self._set_co_player_state()
 
+        # B'' off-map flag. C writes 1 when an ego reaches goal mid-trial
+        # (entity goes off-map); 0 when env trial-end resets the world.
+        # pufferl reads this via vecenv.removed to mask off-map slots in
+        # the KV cache attention. Sourced from buf["removed"] when the vec
+        # backend (Multiprocessing or Serial) allocates SHM for it; falls
+        # back to a private numpy array for standalone use.
+        _removed_external = buf["removed"] if (buf is not None and "removed" in buf) else None
+
         super().__init__(buf=buf)
 
         # Per-trial-boundary flag. C writes 1 at env trial-end under gb=3;
         # Python reads. See docs/src/trial_mode.md.
         self.trial_ended_this_step = np.zeros(self.num_agents, dtype=bool)
-        # B'' off-map flag. C writes 1 when an ego reaches goal mid-trial
-        # (entity goes off-map); 0 when env trial-end resets the world.
-        # Reserved for a planned KV-cache freeze in pufferl during the
-        # off-map limbo (task #33) — not wired yet.
-        self.removed = np.zeros(self.num_agents, dtype=bool)
+        if _removed_external is not None:
+            assert _removed_external.shape == (self.num_agents,), (
+                f"buf['removed'] shape {_removed_external.shape} != ({self.num_agents},)"
+            )
+            self.removed = _removed_external
+        else:
+            self.removed = np.zeros(self.num_agents, dtype=bool)
 
         if self.population_play:
             self.action_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_ego_agents)
