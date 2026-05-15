@@ -731,15 +731,23 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
             # Train/eval parity: under gb=3, mask attention to limbo (off-map)
             # SOURCE slots. Mirror the eval-time `garbage_mask` behavior so
             # the training forward never attends to garbage slots.
-            # attn_mask[b, t, s] += -inf if removed[b, s] = 1
+            # attn_mask[b, t, s] += -inf if removed[b, s] = 1, EXCEPT we
+            # always leave the diagonal (t == s) open so a limbo query
+            # has at least one valid source (itself) and the row never
+            # softmaxes to NaN. This matches the eval path, where
+            # garbage_mask[a, slot_t] is set AFTER the forward at step t,
+            # so the current slot is unmasked during its own attention.
             removed = state.get("removed")
             if removed is not None:
                 if removed.shape[1] > T:
                     removed = removed[:, -T:]
-                # (B, 1, T) bias on source axis; broadcasts over query t.
                 neg_inf = torch.tensor(float("-inf"), device=device, dtype=attn_mask.dtype)
                 zero = torch.tensor(0.0, device=device, dtype=attn_mask.dtype)
-                limbo_bias = torch.where(removed.unsqueeze(1), neg_inf, zero)
+                limbo_bias = torch.where(removed.unsqueeze(1), neg_inf, zero)  # (B, 1, T)
+                # Materialize over the query axis so we can unmask the diagonal.
+                limbo_bias = limbo_bias.expand(-1, T, -1).contiguous()  # (B, T, T)
+                diag_t = torch.arange(T, device=device)
+                limbo_bias[:, diag_t, diag_t] = 0  # leave self-attention open
                 attn_mask = attn_mask + limbo_bias
             attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
             if self.training and self.use_checkpointing:
