@@ -2958,6 +2958,13 @@ void c_step(Drive *env) {
             } else {
                 // More trials to go — respawn for next trial.
                 respawn_agent(env, agent_idx);
+                // Clear post-respawn ghost flag immediately. GOAL_TRIAL is NOT
+                // a ghost-fade mode like GOAL_RESPAWN: leaving respawn_timestep
+                // set hides the agent in the 3D renderer (drive.h ~3482) and
+                // disables collisions / obs slots (drive.h ~1327, 1342, 2409,
+                // 2455). Symptom pre-fix: trial 1 renders correctly, trials
+                // 2..K appear empty until the resample_frequency reset.
+                e->respawn_timestep = -1;
                 e->trial_start_timestep = env->timestep;
             }
         }
