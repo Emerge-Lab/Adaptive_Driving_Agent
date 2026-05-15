@@ -83,6 +83,21 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
         }
         env->trial_ended_this_step = PyArray_DATA(trial_arr);
     }
+    // removed (per-agent off-map flag, B''). Same pattern as
+    // trial_ended_this_step: C is the only writer; Python reads.
+    PyObject *removed_obj = PyDict_GetItemString(kwargs, "removed");
+    if (removed_obj != NULL) {
+        if (!PyObject_TypeCheck(removed_obj, &PyArray_Type)) {
+            PyErr_SetString(PyExc_TypeError, "removed must be a NumPy array");
+            return 1;
+        }
+        PyArrayObject *removed_arr = (PyArrayObject *)removed_obj;
+        if (!PyArray_ISCONTIGUOUS(removed_arr) || PyArray_NDIM(removed_arr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "removed must be 1D contiguous");
+            return 1;
+        }
+        env->removed = PyArray_DATA(removed_arr);
+    }
     return 0;
 }
 
@@ -241,6 +256,20 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
             return -1;
         }
         env->trial_ended_this_step = PyArray_DATA(trial_arr);
+    }
+    env->removed = NULL;
+    PyObject *removed_obj = PyDict_GetItemString(kwargs, "removed");
+    if (removed_obj != NULL) {
+        if (!PyObject_TypeCheck(removed_obj, &PyArray_Type)) {
+            PyErr_SetString(PyExc_TypeError, "removed must be a NumPy array");
+            return -1;
+        }
+        PyArrayObject *removed_arr = (PyArrayObject *)removed_obj;
+        if (!PyArray_ISCONTIGUOUS(removed_arr) || PyArray_NDIM(removed_arr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "removed must be 1D contiguous");
+            return -1;
+        }
+        env->removed = PyArray_DATA(removed_arr);
     }
 
     init(env);

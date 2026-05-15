@@ -347,6 +347,12 @@ struct Drive {
     unsigned char *terminals;
     unsigned char *trial_ended_this_step;  // GOAL_TRIAL: per-agent trial-boundary flag
     unsigned char *truncations;            // GOAL_TRIAL: trial-end bootstrap-stop signal
+    unsigned char *removed;                // GOAL_TRIAL B'': per-agent off-map flag
+    // Env-level trial state (GOAL_TRIAL B''). All egos in this env share one
+    // trial clock; trial-end fires when all egos have removed=1 or timeout.
+    int env_trial_count;
+    int env_trial_start_timestep;
+    int env_episode_ended;  // 1 after episode end (Option D); cleared by c_reset
     Log log;
     Log *logs;
     int num_agents;
@@ -1138,15 +1144,12 @@ void set_means(Drive *env) {
 void move_expert(Drive *env, float *actions, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
     int t = env->timestep;
-    // GOAL_TRIAL: an episode budget can span multiple `scenario_length`-tick
-    // expert trajectories (e.g. max_trials=2 * per_trial_timeout=201 = 402
-    // ticks on a 201-tick nuplan scene). Pre-fix, experts vanished
-    // (INVALID_POSITION) for the entire second half of every episode,
-    // gutting the background-traffic signal the adaptive ego is supposed
-    // to learn from. Loop the trajectory instead — experts replay their
-    // recorded path each per_trial_timeout window, matching the per-trial
-    // respawn the controlled agents do.
+    // GOAL_TRIAL B'': replay experts on the env's trial clock so they reset to
+    // frame 0 at every env trial-end (alongside ego + co-player resets).
+    // Without this, experts drift through the episode while ego/co-players
+    // restart, corrupting the trial-is-trial-is-trial invariant.
     if (env->goal_behavior == GOAL_TRIAL && agent->array_size > 0) {
+        t = env->timestep - env->env_trial_start_timestep;
         t = t % agent->array_size;
         if (t < 0) t += agent->array_size;
     }
@@ -2600,6 +2603,9 @@ void sample_new_goal(Drive *env, int agent_idx) {
 
 void c_reset(Drive *env) {
     env->timestep = env->init_steps;
+    env->env_trial_count = 0;
+    env->env_trial_start_timestep = env->timestep;
+    env->env_episode_ended = 0;
     set_start_position(env);
 
     for (int i = 0; i < env->active_agent_count; i++) {
@@ -2635,6 +2641,7 @@ void c_reset(Drive *env) {
         env->entities[agent_idx].current_lane_geometry_idx = -1;
         env->entities[agent_idx].stopped = 0;
         env->entities[agent_idx].removed = 0;
+        if (env->removed != NULL) env->removed[x] = 0;
         env->entities[agent_idx].trial_count = 0;
         env->entities[agent_idx].trial_start_timestep = env->init_steps;
 
@@ -2835,7 +2842,7 @@ void c_step(Drive *env) {
                 sample_new_goal(env, agent_idx);
                 env->entities[agent_idx].current_goal_reached = 0;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
-            } else { // Zero out the velocity so that the agent stops at the goal
+            } else { // GOAL_STOP or GOAL_TRIAL
                 env->rewards[i] = env->goal_weights[i];
 
                 if (is_ego) {
@@ -2844,18 +2851,23 @@ void c_step(Drive *env) {
                     env->co_player_logs[i].episode_return = env->goal_weights[i];
                 }
 
-                env->entities[agent_idx].stopped = 1;
-                env->entities[agent_idx].vx = env->entities[agent_idx].vy = 0.0f;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
-                // Gate further re-firing of this branch within the same
-                // trial (GOAL_TRIAL) or scenario (GOAL_STOP). Pre-fix, this
-                // branch never set current_goal_reached, so every tick the
-                // agent sat in goal radius re-incremented
-                // goals_reached_this_episode and re-set stopped=1, vx=vy=0.
-                // The flag is reset to 0 by respawn_agent (for GOAL_TRIAL)
-                // and by c_reset (for GOAL_STOP/scenario boundary), so the
-                // next trial / next scenario can register a fresh goal-reach.
                 env->entities[agent_idx].current_goal_reached = 1;
+
+                if (env->goal_behavior == GOAL_TRIAL) {
+                    // B'': go off-map, wait for env trial-end (sync reset).
+                    env->entities[agent_idx].removed = 1;
+                    if (env->removed != NULL) env->removed[i] = 1;
+                    env->entities[agent_idx].x = INVALID_POSITION;
+                    env->entities[agent_idx].y = INVALID_POSITION;
+                    env->entities[agent_idx].vx = 0.0f;
+                    env->entities[agent_idx].vy = 0.0f;
+                } else {
+                    // GOAL_STOP: freeze in place, collidable.
+                    env->entities[agent_idx].stopped = 1;
+                    env->entities[agent_idx].vx = 0.0f;
+                    env->entities[agent_idx].vy = 0.0f;
+                }
             }
 
             env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 1.0f;
@@ -2916,53 +2928,69 @@ void c_step(Drive *env) {
                 env->entities[agent_idx].vx = env->entities[agent_idx].vy = 0.0f;
             }
         }
-    } else if (env->goal_behavior == GOAL_TRIAL) {
+    } else if (env->goal_behavior == GOAL_TRIAL && !env->env_episode_ended) {
+        // B'': env-level trial. All egos share one clock. Trial-end fires when
+        // ALL active egos are off-map (removed=1, set by goal-reach branch) OR
+        // env's per_trial_timeout has elapsed.
+        int total_egos = 0;
+        int reached_egos = 0;
         for (int i = 0; i < env->active_agent_count; i++) {
-            int agent_idx = env->active_agent_indices[i];
-            Entity *e = &env->entities[agent_idx];
-            // Option D: agents idle off-grid until Python's resample_frequency
-            // reloads the map (c_reset clears removed).
-            if (e->removed) continue;
-            int reached = e->metrics_array[REACHED_GOAL_IDX];
-            int timed_out = (env->timestep - e->trial_start_timestep) >= env->per_trial_timeout;
-            if (!reached && !timed_out) continue;
+            Entity *e = &env->entities[env->active_agent_indices[i]];
+            if (!e->is_ego) continue;
+            total_egos++;
+            if (e->removed) reached_egos++;
+        }
+        bool all_egos_done = (total_egos > 0) && (reached_egos == total_egos);
+        bool env_timeout = (env->timestep - env->env_trial_start_timestep) >= env->per_trial_timeout;
+        if (all_egos_done || env_timeout) {
+            int k = env->env_trial_count;  // index of the trial that just ended
+            int trial_len = env->timestep - env->env_trial_start_timestep;
+            env->env_trial_count++;
+            bool is_episode_end = (env->env_trial_count >= env->max_trials_per_episode);
 
-            // Trial boundary: C owns both signals.
-            if (env->trial_ended_this_step != NULL) env->trial_ended_this_step[i] = 1;
-            if (env->truncations != NULL) env->truncations[i] = 1;
-            int trial_len = env->timestep - e->trial_start_timestep;
-            e->trial_count++;
-            if (e->is_ego) {
-                env->log.n_trials_completed += 1.0f;
-                env->log.trial_total_length += (float)trial_len;
-                if (reached)
-                    env->log.n_trials_goal_reached += 1.0f;
-                else
-                    env->log.n_trials_timed_out += 1.0f;
-                int k = e->trial_count - 1;
-                if (reached && k >= 0 && k < N_TRIAL_K_SLOTS)
-                    env->log.trial_k_goal_reached[k] += 1.0f;
-            }
+            for (int i = 0; i < env->active_agent_count; i++) {
+                int agent_idx = env->active_agent_indices[i];
+                Entity *e = &env->entities[agent_idx];
 
-            if (e->trial_count >= env->max_trials_per_episode) {
-                // Episode end: fire terminals, flush logs, idle the agent
-                // off-grid until resample_frequency reloads the map (Option D).
-                env->terminals[i] = 1;
-                e->trial_count = 0;
-                add_log_one_agent(env, i);
-                e->removed = 1;
-                e->x = INVALID_POSITION;
-                e->y = INVALID_POSITION;
-                e->vx = 0.0f;
-                e->vy = 0.0f;
-            } else {
-                respawn_agent(env, agent_idx);
-                // Clear ghost flag: gb=3 isn't a ghost-fade mode. Leaving
-                // respawn_timestep != -1 hides ego in renders (drive.h:3482)
-                // and disables collisions / obs slots (1327, 1342, 2409, 2455).
-                e->respawn_timestep = -1;
-                e->trial_start_timestep = env->timestep;
+                if (env->trial_ended_this_step != NULL) env->trial_ended_this_step[i] = 1;
+                if (env->truncations != NULL) env->truncations[i] = 1;
+
+                if (e->is_ego) {
+                    env->log.n_trials_completed += 1.0f;
+                    env->log.trial_total_length += (float)trial_len;
+                    if (e->current_goal_reached) {
+                        env->log.n_trials_goal_reached += 1.0f;
+                        if (k >= 0 && k < N_TRIAL_K_SLOTS)
+                            env->log.trial_k_goal_reached[k] += 1.0f;
+                    } else {
+                        env->log.n_trials_timed_out += 1.0f;
+                    }
+                }
+
+                if (is_episode_end) {
+                    // Option D: idle off-grid until c_reset.
+                    env->terminals[i] = 1;
+                    add_log_one_agent(env, i);
+                    e->removed = 1;
+                    if (env->removed != NULL) env->removed[i] = 1;
+                    e->x = INVALID_POSITION;
+                    e->y = INVALID_POSITION;
+                    e->vx = 0.0f;
+                    e->vy = 0.0f;
+                } else {
+                    // Trial-end (not episode): reset entity for next trial.
+                    respawn_agent(env, agent_idx);
+                    e->respawn_timestep = -1;
+                    e->current_goal_reached = 0;
+                    e->removed = 0;
+                    if (env->removed != NULL) env->removed[i] = 0;
+                }
             }
+            if (is_episode_end) {
+                env->env_trial_count = 0;
+                env->env_episode_ended = 1;
+            }
+            env->env_trial_start_timestep = env->timestep;
         }
     }
 

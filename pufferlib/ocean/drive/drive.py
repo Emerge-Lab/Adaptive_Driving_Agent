@@ -426,9 +426,13 @@ class Drive(pufferlib.PufferEnv):
 
         super().__init__(buf=buf)
 
-        # Per-trial-boundary flag. C writes 1 at goal-reach or per-trial
-        # timeout under gb=3; Python reads. See docs/src/trial_mode.md.
+        # Per-trial-boundary flag. C writes 1 at env trial-end under gb=3;
+        # Python reads. See docs/src/trial_mode.md.
         self.trial_ended_this_step = np.zeros(self.num_agents, dtype=bool)
+        # B'' off-map flag. C writes 1 when an ego reaches goal mid-trial
+        # (entity goes off-map); 0 when env trial-end resets the world.
+        # pufferl uses this to freeze the KV cache during the off-map limbo.
+        self.removed = np.zeros(self.num_agents, dtype=bool)
 
         if self.population_play:
             self.action_space = pufferlib.spaces.joint_space(self.single_action_space, self.num_ego_agents)
@@ -514,6 +518,7 @@ class Drive(pufferlib.PufferEnv):
                 map_dir=map_dir,
                 render_mode=self._render_mode_int,
                 trial_ended_this_step=self.trial_ended_this_step[cur:nxt],
+                removed=self.removed[cur:nxt],
             )
             env_ids.append(env_id)
 
@@ -962,6 +967,7 @@ class Drive(pufferlib.PufferEnv):
                 map_dir=self.map_dir,
                 render_mode=self._render_mode_int,
                 trial_ended_this_step=self.trial_ended_this_step[cur:nxt],
+                removed=self.removed[cur:nxt],
             )
             env_ids.append(env_id)
         self.c_envs = binding.vectorize(*env_ids)
