@@ -102,6 +102,54 @@ def test_trial_mode_emits_trial_keys():
     env.close()
 
 
+def test_trial_mode_auto_link_k4():
+    """Regression: when AdaptiveDrivingAgent auto-links max_trials_per_episode
+    from k_scenarios=4 under gb=3, the evaluator must detect the actual env
+    value (4) rather than blindly reading the INI default (2) from args. If
+    it falls back to 2, trial_2_score / trial_3_score / ada_delta_trial_3_minus_0
+    are missing and the user only sees trial1 vs trial0."""
+    from pufferlib.ocean.benchmark.evaluator import HumanReplayEvaluator
+
+    # Build a stub env that mimics the auto-link result: driver_env exposes
+    # max_trials_per_episode=4 even though the args dict still says 2.
+    env = _make_drive_env(goal_behavior=3, max_trials=4, per_trial_timeout=5)
+    env.reset(seed=42)
+    # args says max_trials=2 (the INI default) + k_scenarios=4. The auto-link
+    # in AdaptiveDrivingAgent would have set the env's actual max_trials to 4;
+    # the evaluator must arrive at the same conclusion from args (k_scenarios)
+    # since `driver_env` only exists on vec-env wrappers, not raw Drive.
+    args = _make_args(goal_behavior=3, max_trials=2, per_trial_timeout=5, num_rollouts=2)
+    args["env"]["k_scenarios"] = 4  # this is what would have driven the auto-link
+
+    evaluator = HumanReplayEvaluator(args)
+    policy = _StubPolicy(num_actions=env.action_space.shape[0] if hasattr(env.action_space, "shape") else env.action_space.n)
+
+    out = evaluator.rollout(args, env, policy)
+
+    # All 4 trial scores must appear (not just 0 and 1)
+    for k in range(4):
+        assert f"trial_{k}_score" in out, (
+            f"missing trial_{k}_score with auto-linked max_trials=4. "
+            f"keys present: {sorted(k for k in out.keys() if k.startswith('trial_'))[:10]}"
+        )
+    # ada_delta_trial_{1..3}_minus_0 must all appear
+    for k in range(1, 4):
+        assert f"ada_delta_trial_{k}_minus_0" in out, f"missing ada_delta_trial_{k}_minus_0"
+    # per_agent records should have t0..t3
+    if out["per_agent_success_log"]:
+        keys = set(out["per_agent_success_log"][0].keys())
+        for k in range(4):
+            assert f"t{k}" in keys, f"trial-mode records should have t{k}; got {keys}"
+    print(
+        f"  ok: gb=3 auto-link → trial_0..3 scores all logged; "
+        f"deltas: "
+        f"d1={out['ada_delta_trial_1_minus_0']:.3f} "
+        f"d2={out['ada_delta_trial_2_minus_0']:.3f} "
+        f"d3={out['ada_delta_trial_3_minus_0']:.3f}"
+    )
+    env.close()
+
+
 def test_scenario_mode_preserved():
     """gb=0: scenario-mode unchanged. per_agent_success_log uses 's' prefix."""
     from pufferlib.ocean.benchmark.evaluator import HumanReplayEvaluator
