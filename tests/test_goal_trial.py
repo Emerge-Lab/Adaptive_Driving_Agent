@@ -107,13 +107,10 @@ def test_trial_timeout_fires():
 
 
 def test_trial_episode_resets():
-    """goal_behavior=3 + Option D: after max_trials trials, each agent's
-    terminals fires once and the agent goes idle (removed=1) until Python's
-    resample_frequency triggers c_reset. We verify:
-      - At least one terminals event fires near step MAX_TRIALS * TIMEOUT
-        (= 10 here), proving the C-side episode boundary works.
-      - Within the same Python cycle, agents idle (no repeated terminals
-        spam from looped trials).
+    """goal_behavior=3: after max_trials, each agent's terminals fires once
+    and the agent goes idle (removed=1) until resample_frequency triggers
+    c_reset. Verifies a single terminals event near MAX_TRIALS * TIMEOUT
+    and no repeat terminals from looped trials within the same Python cycle.
     """
     TIMEOUT = 5
     MAX_TRIALS = 2
@@ -126,9 +123,9 @@ def test_trial_episode_resets():
         if env.terminals.any():
             terminal_steps.append(t)
 
-    # Each "episode" = MAX_TRIALS * TIMEOUT = 10 steps. Under Option D the
-    # agent then idles until resample_frequency (default 91 for base Drive),
-    # so in 50 ticks we expect EXACTLY ONE terminals event around step 10.
+    # Each episode = MAX_TRIALS * TIMEOUT = 10 steps. The agent then idles
+    # until resample_frequency (default 91), so in 50 ticks we expect ONE
+    # terminals event around step 10.
     assert len(terminal_steps) >= 1, f"Expected ≥1 episode boundary, got {len(terminal_steps)}"
     assert terminal_steps[0] <= MAX_TRIALS * TIMEOUT + 2, (
         f"First terminals should fire near step {MAX_TRIALS * TIMEOUT}, got {terminal_steps[0]}"

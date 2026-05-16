@@ -1,4 +1,4 @@
-"""Contract tests for B'' env-level trial semantic.
+"""Contract tests for the env-level GOAL_TRIAL semantic.
 
 Design (see docs/src/trial_mode.md, "Env-level trials"):
   - Each env has ONE trial clock (env->trial_count, env->trial_start_timestep),
@@ -13,7 +13,7 @@ Design (see docs/src/trial_mode.md, "Env-level trials"):
       * env->trial_count++, env->trial_start_timestep = env->timestep
   - At env episode-end (env->trial_count == max_trials):
       * terminals[i] = 1 for every active ego in env
-      * Option D: all egos removed=1 + off-map until c_reset
+      * All egos removed=1 + off-map until c_reset
 
 These tests run on a tiny env (per_trial_timeout=5, k=2) for determinism.
 """
@@ -127,7 +127,7 @@ def test_env_trial_end_resets_all_entities_to_init():
 
 def test_episode_end_fires_after_max_trials():
     """After max_trials env trial-ends, terminals must fire for all egos.
-    Option D semantic: removed=1 stays until c_reset."""
+    removed=1 stays set until c_reset."""
     env = _make_env(k=2, scenario_length=3, num_agents=4, goal_radius=2.0)
     env.reset(seed=42)
     actions = _zero_actions(env)
@@ -142,7 +142,7 @@ def test_episode_end_fires_after_max_trials():
             break
     assert trial_ends >= 1, f"expected ≥1 trial-end before episode end, got {trial_ends}"
     assert term_at is not None, "terminals never fired within 20 steps"
-    # At terminals, all egos should be removed (Option D)
+    # At terminals, all egos should be removed.
     assert np.asarray(env.removed, dtype=bool).all(), (
         f"after episode-end terminals, all egos should be removed: {env.removed}"
     )
