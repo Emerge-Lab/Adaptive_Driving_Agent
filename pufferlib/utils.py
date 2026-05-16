@@ -250,6 +250,11 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
 
         env_kwargs = copy.deepcopy(config.get("env_config", {}))
         env_kwargs["render_mode"] = 1  # RENDER_HEADLESS
+        # Route renders to eval.map_dir if set, so test-set videos match
+        # the eval map distribution (e.g. nuplan_hard) rather than train.
+        eval_map_dir = config.get("eval", {}).get("map_dir")
+        if eval_map_dir:
+            env_kwargs["map_dir"] = eval_map_dir
         # Render env runs alongside training and has to fit in the same VRAM /
         # RAM budget — override the training num_agents (often 1024+) down to a
         # render-sized footprint so we don't OOM on first render call.

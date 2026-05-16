@@ -3100,7 +3100,7 @@ static void start_video_recorder(Client *client, const char *basename) {
         for (int fd = 3; fd < 256; fd++) {
             close(fd);
         }
-        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", size_str, "-r", "30", "-i", "-",
+        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", size_str, "-r", "10", "-i", "-",
                "-c:v", "libx264", "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-crf", "23",
                "-loglevel", "error", filename, NULL);
         fprintf(stderr, "Failed to exec ffmpeg\n");
