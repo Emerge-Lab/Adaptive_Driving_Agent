@@ -615,6 +615,10 @@ class PuffeRL:
                 self.transformer_v_cache[k] = None
 
         self.full_rows = 0
+        # Hold autocast active across the whole rollout so torch.compile
+        # doesn't see autocast GLOBAL_STATE flip between forward_eval calls
+        # (would recompile every step under reduce-overhead).
+        self.amp_context.__enter__()
         while self.full_rows < self.segments:
             profile("env", epoch)
             # print(".", end="", flush=True)  # Workaround: visible I/O prevents multiprocessing deadlock
@@ -670,7 +674,7 @@ class PuffeRL:
             d = torch.as_tensor(d, device=device)
 
             profile("eval_forward", epoch)
-            with torch.no_grad(), self.amp_context:
+            with torch.no_grad():
                 state = dict(
                     reward=r,
                     done=d,
@@ -847,6 +851,9 @@ class PuffeRL:
 
             profile("env", epoch)
             self.vecenv.send(action)
+
+        # Exit the autocast context that wraps the rollout loop.
+        self.amp_context.__exit__(None, None, None)
 
         profile("eval_misc", epoch)
         self.free_idx = self.total_agents

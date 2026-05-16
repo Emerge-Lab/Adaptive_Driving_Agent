@@ -622,7 +622,11 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         if removed is not None:
             r = removed.to(device=device, dtype=torch.bool).view(-1)
             if r.shape[0] == B:
-                garbage_mask[:, slot_t.squeeze()] = garbage_mask[:, slot_t.squeeze()] | r
+                # Functional update (no scalar index) so torch.compile traces
+                # this without a data-dependent graph break.
+                slots = torch.arange(self.horizon, device=device)
+                position_mask = slot_t.view(-1, 1) == slots.view(1, -1)  # (1, horizon)
+                garbage_mask = garbage_mask | (r.unsqueeze(1) & position_mask)
         state["garbage_mask"] = garbage_mask
 
         logits, values = self.policy.decode_actions(hidden_out)
