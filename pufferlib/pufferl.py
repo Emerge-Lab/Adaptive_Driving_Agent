@@ -491,68 +491,48 @@ class PuffeRL:
 
         device = self.config["device"]
         agents_per_worker = self.vecenv.agents_per_worker
-        # batch_size > 1 packs multiple workers into one recv; we handle the
-        # batch_size=1 case (the production setup) here. Generalizing to
-        # batch_size>1 is straightforward (loop over workers in the batch).
-        batch_size = self.vecenv.batch_size
-        if batch_size != 1:
-            raise NotImplementedError(
-                f"external_co_player_actions currently only supports batch_size=1; got batch_size={batch_size}."
-            )
-
-        # Map env_id back to a worker index so we know which co_player_state
-        # to use and which row of vecenv.actions to write to.
-        # For population_play, recv() returns ego-only agent ids
-        # (vecenv.ego_agent_ids), so divide by the per-worker ego count, not
-        # the full agent count.
         ego_agents_per_worker = getattr(self.vecenv, "ego_agents_per_worker", agents_per_worker)
-        worker_id = int(env_id[0]) // ego_agents_per_worker
 
-        # Pull the actual co_player_ids from info (the env knows them).
-        # Also check for the scenario-boundary cache reset signal.
-        co_ids = None
-        reset_cache = False
+        # Parse per-worker co_ids + reset flags from info (preserves order).
+        # When vec.batch_size > 1, recv() returns N workers' obs+info stacked,
+        # so info contains N dicts each with their own _external_co_player_ids.
+        co_ids_per_worker = []
+        reset_flags = []
         for item in info:
-            if isinstance(item, dict):
-                if "_external_co_player_ids" in item:
-                    co_ids = list(item["_external_co_player_ids"])
-                if item.get("_external_reset_co_cache"):
-                    reset_cache = True
-        if co_ids is None:
-            raise RuntimeError(
-                "external_co_player_actions=True but the env did not "
-                "publish '_external_co_player_ids' in info. Is drive.py up to date?"
-            )
-        if not co_ids:
-            return  # no co-players in this env this step
+            if isinstance(item, dict) and "_external_co_player_ids" in item:
+                co_ids_per_worker.append(list(item["_external_co_player_ids"]))
+                reset_flags.append(bool(item.get("_external_reset_co_cache", False)))
+        n_in_batch = len(co_ids_per_worker)
+        if n_in_batch == 0:
+            return
 
-        # Drop the cache at scenario boundaries — mirrors the per-worker
-        # OFF path's _reset_co_player_state() which fully reinits state.
-        # Replacing the dict makes forward_eval lazy-allocate fresh K/V on
-        # the next call, matching legacy behavior bit-for-bit at scenario
-        # boundaries.
-        if reset_cache:
-            self.co_player_state[worker_id] = {}
+        base_worker_id = int(env_id[0]) // ego_agents_per_worker
+        worker_ids = [base_worker_id + i for i in range(n_in_batch)]
 
-        # Slice the co-player observations. When the ego is in oracle mode
-        # (drive.py `ego_is_oracle=True`) the env's obs is wider than the
-        # partner policy expects — partner conditioning is appended to ego
-        # rows only. Strip trailing oracle dims by slicing columns to the
-        # env's `_c_obs_dim` (the C-side obs width). Defaults to None when
-        # oracle is off → take the full width as before.
+        for i, w_id in enumerate(worker_ids):
+            if reset_flags[i]:
+                self.co_player_state[w_id] = {}
+
+        # Build batched co_obs across workers. cum[] holds per-worker slice
+        # offsets in the batched tensor for distributing actions afterwards.
         co_obs_width = getattr(self.vecenv.driver_env, "_c_obs_dim", None)
-        if co_obs_width is None:
-            co_obs_np = full_obs[co_ids]
-        else:
-            co_obs_np = full_obs[co_ids, :co_obs_width]
+        parts = []
+        cum = [0]
+        for i in range(n_in_batch):
+            co_ids = co_ids_per_worker[i]
+            worker_obs = full_obs[i * agents_per_worker : (i + 1) * agents_per_worker]
+            wco = worker_obs[co_ids] if co_obs_width is None else worker_obs[co_ids, :co_obs_width]
+            parts.append(wco)
+            cum.append(cum[-1] + len(co_ids))
+        if cum[-1] == 0:
+            return
+
+        co_obs_np = np.concatenate(parts, axis=0)
         co_obs = torch.as_tensor(co_obs_np, device=device)
         if self.co_player_conditioning_dims > 0:
-            # Pull this worker's conditioning slice from the SHM buffer the
-            # env wrote at scenario boundaries (or at env init). Insert right
-            # after the base ego_features — matches drive.py's
-            # `_add_co_player_conditioning` exactly.
-            cond_shm = self.vecenv.co_player_conditioning  # (num_workers, max_co, cdim)
-            cond_np = cond_shm[worker_id, : len(co_ids), :]  # only the rows we'll use
+            cond_shm = self.vecenv.co_player_conditioning
+            cond_parts = [cond_shm[worker_ids[i], : len(co_ids_per_worker[i]), :] for i in range(n_in_batch)]
+            cond_np = np.concatenate(cond_parts, axis=0)
             cond = torch.as_tensor(cond_np, device=device, dtype=co_obs.dtype)
             from pufferlib.ocean.drive import binding as _b
 
@@ -561,25 +541,51 @@ class PuffeRL:
             )
             co_obs = torch.cat([co_obs[:, :base_ego_dim], cond, co_obs[:, base_ego_dim:]], dim=1)
 
-        # NOTE: the OFF (per-worker) path only resets cache at scenario
-        # boundary or reset(), never for individual done agents. So we
-        # don't reset per-done here either — it would diverge from OFF.
+        # Merge per-worker KV caches into one batched cache so the policy
+        # runs a single forward over all workers' co-players. Caches stay
+        # per-worker in storage — they're only briefly stacked for the call.
+        states = [self.co_player_state[w_id] for w_id in worker_ids]
+        batched_state = {}
+        if all("k_cache" in s and s["k_cache"] is not None for s in states):
+            n_layers = len(states[0]["k_cache"])
+            batched_state["k_cache"] = [
+                torch.cat([s["k_cache"][li] for s in states], dim=0) for li in range(n_layers)
+            ]
+            batched_state["v_cache"] = [
+                torch.cat([s["v_cache"][li] for s in states], dim=0) for li in range(n_layers)
+            ]
+        if all("garbage_mask" in s and s["garbage_mask"] is not None for s in states):
+            batched_state["garbage_mask"] = torch.cat([s["garbage_mask"] for s in states], dim=0)
+        if "transformer_position" in states[0]:
+            batched_state["transformer_position"] = states[0]["transformer_position"]
 
         with torch.no_grad():
-            logits, _ = self.co_player_policy.forward_eval(co_obs, self.co_player_state[worker_id])
+            logits, _ = self.co_player_policy.forward_eval(co_obs, batched_state)
 
-        # Match the per-worker code path: argmax for discrete actions.
+        # Split updated state back to per-worker stores along the batch dim.
+        for i, w_id in enumerate(worker_ids):
+            start, end = cum[i], cum[i + 1]
+            ns = {}
+            if "k_cache" in batched_state:
+                ns["k_cache"] = [k[start:end] for k in batched_state["k_cache"]]
+                ns["v_cache"] = [v[start:end] for v in batched_state["v_cache"]]
+            if "garbage_mask" in batched_state:
+                ns["garbage_mask"] = batched_state["garbage_mask"][start:end]
+            if "transformer_position" in batched_state:
+                ns["transformer_position"] = batched_state["transformer_position"]
+            self.co_player_state[w_id] = ns
+
         if isinstance(logits, tuple):
             co_action = torch.cat([l.argmax(dim=-1, keepdim=True) for l in logits], dim=-1)
         else:
             co_action = logits.argmax(dim=-1)
-        co_action_np = co_action.cpu().numpy().reshape(len(co_ids), -1)
+        co_action_np = co_action.cpu().numpy().reshape(cum[-1], -1)
 
-        # Write directly to the worker's slot in the shared-memory action
-        # buffer. The worker's env.step() will call vec_step using these
-        # actions because it has external_co_player_actions=True.
-        co_action_view = self.vecenv.actions[worker_id]  # shape (agents_per_worker, *atn_shape)
-        co_action_view[co_ids] = co_action_np.reshape((len(co_ids),) + co_action_view.shape[1:])
+        for i, w_id in enumerate(worker_ids):
+            co_ids = co_ids_per_worker[i]
+            start, end = cum[i], cum[i + 1]
+            co_action_view = self.vecenv.actions[w_id]
+            co_action_view[co_ids] = co_action_np[start:end].reshape((len(co_ids),) + co_action_view.shape[1:])
 
     def evaluate(self):
         profile = self.profile
