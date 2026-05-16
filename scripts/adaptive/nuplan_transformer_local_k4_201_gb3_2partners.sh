@@ -33,7 +33,7 @@ K_SCENARIOS=4                          # was 2
 SCENARIO_LENGTH=201
 HORIZON=$((K_SCENARIOS * SCENARIO_LENGTH))   # 804
 
-NUM_WORKERS=8; NUM_ENVS=8              # was 16; k=4 doubles pinned RAM so 2 runs at nw=16 OOM
+NUM_WORKERS=10; NUM_ENVS=10            # container memory.max=154GiB; 2*(10*5.66+10)=133GiB → 20GiB headroom for eval spike
 MINIBATCH_MULTIPLIER=25; MAX_MINIBATCH_SIZE=20100   # keep minibatch_size = mb_mult*horizon = 20100
 
 GPUS=${GPUS:-"0 1"}
