@@ -13,7 +13,7 @@ import csv, os, sys, json, argparse, shutil
 from pathlib import Path
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--scores", default="/tmp/nuplan_201_hardness_scores.csv")
+ap.add_argument("--scores", default="scripts/nuplan_201_hardness_scores.csv")
 ap.add_argument("--source-dir", default="/workspace/ADA/resources/drive/binaries/nuplan_201")
 ap.add_argument("--out-dir", default="/workspace/ADA/resources/drive/binaries/nuplan_hard")
 ap.add_argument("--metric", default="sdc_interaction_steps", choices=["sdc_interaction_steps", "interaction_events"])
