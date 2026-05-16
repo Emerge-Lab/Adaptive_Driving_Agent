@@ -2,8 +2,8 @@
 #SBATCH --job-name=ada_k4_smoke
 #SBATCH --output=/scratch/mmk9418/logs/smoke_%j.out
 #SBATCH --error=/scratch/mmk9418/logs/smoke_%j.err
-#SBATCH --mem=48GB
-#SBATCH --time=00:30:00
+#SBATCH --mem=64GB
+#SBATCH --time=00:20:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --account=torch_pr_355_tandon_advanced
@@ -35,13 +35,13 @@ singularity exec --nv --overlay "$OVERLAY_FILE:ro" "$SINGULARITY_IMAGE" bash -c 
     --tag smoke_k4_gb3_\$(date +%s) \
     --policy-architecture Transformer --rnn-name Transformer \
     --train.horizon 804 \
-    --train.minibatch-multiplier 25 \
-    --train.max-minibatch-size 20100 \
+    --train.minibatch-multiplier 4 \
+    --train.max-minibatch-size 3216 \
     --train.cpu-offload True \
     --train.checkpoint-interval 100 \
     --train.render-interval 100 \
     --train.seed 42 \
-    --train.total-timesteps 5000000 \
+    --train.total-timesteps 2000000 \
     --vec.num-workers 4 --vec.num-envs 4 \
     --env.map-dir resources/drive/binaries/nuplan_201 \
     --env.num-maps 4999 \
