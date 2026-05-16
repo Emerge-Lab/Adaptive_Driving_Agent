@@ -36,9 +36,8 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
         k_scenarios = env_config.get("k_scenarios", 1)
         scenario_length = env_config.get("scenario_length", 91)
         train_horizon = config.get("horizon", scenario_length * k_scenarios)
-        # Inherit goal_behavior from training. Under gb=3 the eval subprocess
-        # re-derives max_trials_per_episode and per_trial_timeout from
-        # k_scenarios + scenario_length, so we don't pass them.
+        # GOAL_TRIAL re-derives max_trials + per_trial_timeout from
+        # k_scenarios + scenario_length, so we don't pass them through.
         goal_behavior = int(env_config.get("goal_behavior", 0))
 
         cmd = [
@@ -70,8 +69,6 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             str(scenario_length),
             "--train.horizon",
             str(train_horizon),
-            # Inherit training's goal_behavior. Under gb=3 the env will
-            # re-derive trial config from k_scenarios + scenario_length.
             "--env.goal-behavior",
             str(goal_behavior),
             "--env.conditioning.type",
@@ -291,8 +288,6 @@ def render_videos(config, policy, logger, epoch, global_step, device="cuda", hum
         scenario_length = env_kwargs.get("scenario_length", 91)
         k_scenarios = env_kwargs.get("k_scenarios", 1)
         goal_behavior = int(env_kwargs.get("goal_behavior", 0))
-        # episode_length = k_scenarios * scenario_length under all goal_behaviors.
-        # Under gb=3 the auto-link makes this equal to max_trials * per_trial_timeout.
         episode_length = scenario_length * k_scenarios if k_scenarios > 1 else scenario_length
         episode_label = f"trials{k_scenarios}" if goal_behavior == 3 else f"k{k_scenarios}"
 

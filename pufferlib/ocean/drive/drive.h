@@ -116,7 +116,7 @@
 #define GOAL_RESPAWN 0
 #define GOAL_GENERATE_NEW 1
 #define GOAL_STOP 2
-#define GOAL_TRIAL 3  // up to max_trials_per_episode trials; ends on goal or per-trial timeout
+#define GOAL_TRIAL 3
 
 #define PARTNER_FEATURES 7
 
@@ -198,13 +198,13 @@ struct Log {
     float avg_goal_weight;
     float avg_entropy_weight;
     float avg_discount_weight;
-    // Per-trial metrics (GOAL_TRIAL only). All zero under other goal_behavior.
+    // Per-trial metrics — zero under non-GOAL_TRIAL behaviors.
     float n_trials_completed;
     float n_trials_goal_reached;
     float n_trials_timed_out;
-    float trial_total_length;     // running sum, divided by n_trials_completed in add_log
-    // Per-trial-index goal-reach counters. After vec_log normalization, each
-    // slot IS trial_K_score. k_scenarios > 8 isn't supported for this metric.
+    float trial_total_length;
+    // Per-trial-index goal-reach. After vec_log normalization each slot is
+    // trial_K_score. Hard cap: k_scenarios ≤ 8.
     float trial_k_goal_reached[8];
 };
 #define N_TRIAL_K_SLOTS 8
@@ -253,9 +253,9 @@ struct Entity {
     float goals_reached_this_episode;
     float goals_sampled_this_episode;
     int current_goal_reached;
-    int collided_this_trial;    // GOAL_TRIAL only: 1 if any collision/offroad this trial
-    int trial_count;            // GOAL_TRIAL only: trials completed this episode
-    int trial_start_timestep;   // GOAL_TRIAL only: tick when current trial began
+    int collided_this_trial;
+    int trial_count;
+    int trial_start_timestep;
     int active_agent;
     float cumulative_displacement;
     int displacement_sample_count;
@@ -346,14 +346,14 @@ struct Drive {
     float *actions;
     float *rewards;
     unsigned char *terminals;
-    unsigned char *trial_ended_this_step;  // GOAL_TRIAL: per-agent trial-boundary flag
-    unsigned char *truncations;            // GOAL_TRIAL: trial-end bootstrap-stop signal
-    unsigned char *removed;                // GOAL_TRIAL B'': per-agent off-map flag
-    // Env-level trial state (GOAL_TRIAL B''). All egos in this env share one
-    // trial clock; trial-end fires when all egos have removed=1 or timeout.
+    unsigned char *trial_ended_this_step;
+    unsigned char *truncations;
+    unsigned char *removed;
+    // All egos in this env share one trial clock; trial-end fires when every
+    // ego has removed=1 or per_trial_timeout elapses.
     int env_trial_count;
     int env_trial_start_timestep;
-    int env_episode_ended;  // 1 after episode end (Option D); cleared by c_reset
+    int env_episode_ended;
     Log log;
     Log *logs;
     int num_agents;
@@ -403,8 +403,8 @@ struct Drive {
     int init_mode;
     int control_mode;
 
-    int max_trials_per_episode;  // GOAL_TRIAL: max trials per episode (default 2)
-    int per_trial_timeout;       // GOAL_TRIAL: ticks per trial (default scenario_length)
+    int max_trials_per_episode;
+    int per_trial_timeout;
 
     // Reward conditioning
     bool use_rc;
@@ -441,16 +441,13 @@ struct Drive {
                               // "render".
 };
 
-// Per-agent variant of add_log used at GOAL_TRIAL episode end. Can't reuse
-// add_log because it assumes a synchronized scenario boundary; under gb=3
-// each agent's episode ends at its own trial_count == max_trials.
+// Per-agent variant of add_log for GOAL_TRIAL episode end. Each ego's episode
+// ends at its own trial_count == max_trials, so we can't reuse the
+// scenario-synchronized add_log.
 void add_log_one_agent(Drive *env, int i) {
     Entity *e = &env->entities[env->active_agent_indices[i]];
 
     if (e->is_ego) {
-        // BUG-FIX: these increments were OUTSIDE this guard before, so
-        // co-player goal counts contaminated the ego aggregate. Now gated
-        // on is_ego so env->log.goals_* reflect ego progress only.
         env->log.goals_reached_this_episode += e->goals_reached_this_episode;
         env->log.goals_sampled_this_episode += e->goals_sampled_this_episode;
 
@@ -468,10 +465,8 @@ void add_log_one_agent(Drive *env, int i) {
         env->log.expert_static_agent_count += env->expert_static_agent_count;
         env->log.static_agent_count += env->static_agent_count;
 
-        // Score is accumulated per-trial in c_step's trial-end loop:
-        // each clean trial (goal reached + no collision/offroad this trial)
-        // contributes 1/max_trials_per_episode. So score ∈ [0, 1] per ego.
-        // dnf_rate keeps episode-level "did not finish all trials cleanly".
+        // Score is accrued per-trial in c_step (1/max_trials per clean trial);
+        // dnf_rate tracks episodes that didn't complete all trials cleanly.
         float denom = (float)env->max_trials_per_episode;
         float frac = (denom > 0.0f) ? e->goals_reached_this_episode / denom : 0.0f;
         if (!offroad && !collided && frac < 1.0f) env->log.dnf_rate += 1.0f;
@@ -490,7 +485,6 @@ void add_log_one_agent(Drive *env, int i) {
         env->co_player_log.episode_length += env->co_player_logs[i].episode_length;
         env->co_player_log.episode_return += env->co_player_logs[i].episode_return;
 
-        // Same per-trial denominator fix as the ego branch above.
         float co_denom = (float)env->max_trials_per_episode;
         float co_frac = (co_denom > 0.0f) ? e->goals_reached_this_episode / co_denom : 0.0f;
         float co_threshold = 0.99f;
@@ -502,9 +496,8 @@ void add_log_one_agent(Drive *env, int i) {
         env->co_player_log.n += 1.0f;
     }
 
-    // Mirror EVERY per-entity field c_reset clears. c_reset is bypassed under
-    // gb=3 (no scenario-length early-return); stale state would carry to the
-    // next episode (e.g. respawn_timestep stuck != -1 hides ego in renders).
+    // Mirror c_reset's per-entity clears — c_reset is bypassed in GOAL_TRIAL,
+    // so any field it normally zeros must be zeroed here.
     env->logs[i] = (Log){0};
     if (env->population_play && env->co_player_logs != NULL) env->co_player_logs[i] = (Log){0};
     e->goals_reached_this_episode = 0.0f;
@@ -514,8 +507,8 @@ void add_log_one_agent(Drive *env, int i) {
     e->respawn_timestep = -1;
     e->respawn_count = 0;
     e->stopped = 0;
-    // Don't reset `removed`: Option D sets it AFTER this call so the agent
-    // idles until resample_frequency. c_reset is what clears it.
+    // Don't reset `removed` here — the trial-end path sets it AFTER this
+    // call so the agent idles off-map until c_reset clears it.
     e->metrics_array[COLLISION_IDX] = 0.0f;
     e->metrics_array[OFFROAD_IDX] = 0.0f;
     e->metrics_array[REACHED_GOAL_IDX] = 0.0f;
@@ -1144,16 +1137,9 @@ void set_means(Drive *env) {
 void move_expert(Drive *env, float *actions, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
     int t = env->timestep;
-    // GOAL_TRIAL B'': humans replay on the env's trial clock so they reset to
-    // frame 0 at every env trial-end. Visual consequence: if humans have
-    // late-valid windows (enter scene at frame 30+) and trials are short
-    // (ego reaches goal fast), humans may not appear in those trials —
-    // that's the data, not a bug. We don't care about what humans do during
-    // a trial, only about ego-side strict trial-equivalence.
+    // GOAL_TRIAL: humans share the env's trial clock and replay from
+    // init_steps each trial — same recording frame as trial 1.
     if (env->goal_behavior == GOAL_TRIAL && agent->array_size > 0) {
-        // Recording frame = init_steps + ticks-since-trial-start. Matches what
-        // set_start_position uses at c_reset (init_steps) and advances from
-        // there. Every trial begins at the same recording frame as trial 1.
         t = env->init_steps + (env->timestep - env->env_trial_start_timestep);
         t = t % agent->array_size;
         if (t < 0) t += agent->array_size;
@@ -1689,7 +1675,6 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
 
     agent->collision_state = collided;
     if (collided != 0) {
-        // GOAL_TRIAL per-trial clean-success tracker. Cleared at trial-end.
         agent->collided_this_trial = 1;
     }
 
@@ -2871,7 +2856,7 @@ void c_step(Drive *env) {
                 env->entities[agent_idx].current_goal_reached = 1;
 
                 if (env->goal_behavior == GOAL_TRIAL) {
-                    // B'': go off-map, wait for env trial-end (sync reset).
+                    // Go off-map; wait for env trial-end to trigger sync reset.
                     env->entities[agent_idx].removed = 1;
                     if (env->removed != NULL) env->removed[i] = 1;
                     env->entities[agent_idx].x = INVALID_POSITION;
@@ -2945,9 +2930,8 @@ void c_step(Drive *env) {
             }
         }
     } else if (env->goal_behavior == GOAL_TRIAL && !env->env_episode_ended) {
-        // B'': env-level trial. All egos share one clock. Trial-end fires when
-        // ALL active egos are off-map (removed=1, set by goal-reach branch) OR
-        // env's per_trial_timeout has elapsed.
+        // Env-level trial: all egos share one clock. Trial-end fires when
+        // every active ego is off-map OR per_trial_timeout has elapsed.
         int total_egos = 0;
         int reached_egos = 0;
         for (int i = 0; i < env->active_agent_count; i++) {
@@ -2990,7 +2974,7 @@ void c_step(Drive *env) {
                 }
 
                 if (is_episode_end) {
-                    // Option D: idle off-grid until c_reset.
+                    // Idle off-grid until c_reset.
                     env->terminals[i] = 1;
                     add_log_one_agent(env, i);
                     e->removed = 1;
@@ -3874,10 +3858,9 @@ void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_
             EndMode3D();
         }
 
-        // Draw scenario/trial counter overlay. Under gb=3 B'' we read the
-        // env-level trial counter (per-entity trial_count is no longer
-        // updated). Clamp to max so the last-tick "just incremented" value
-        // doesn't show as K+1.
+        // Trial counter overlay reads the env-level counter (per-entity
+        // trial_count is no longer updated). Clamp to max so the just-
+        // incremented value on the last tick doesn't show as K+1.
         if (env->goal_behavior == GOAL_TRIAL && env->max_trials_per_episode > 1) {
             int trial_n = env->env_trial_count + 1;
             if (trial_n > env->max_trials_per_episode) trial_n = env->max_trials_per_episode;

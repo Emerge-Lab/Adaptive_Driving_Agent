@@ -84,10 +84,8 @@ class Serial:
 
         set_buffers(self, buf)
 
-        # `removed` is a Drive-specific SHM channel for the B'' off-map flag.
-        # Pass it through buf so each env's slice is a view into the same
-        # parent array — needed for pufferl to read a unified view via
-        # vecenv.removed regardless of backend.
+        # Drive-specific: `removed` is a SHM-backed off-map flag. Each env's
+        # slice views the same parent array so pufferl sees worker writes.
         if buf is not None and "removed" in buf:
             self.removed = buf["removed"]
         else:
@@ -393,8 +391,6 @@ class Multiprocessing:
             terminals=RawArray("b", num_agents),
             truncateds=RawArray("b", num_agents),
             masks=RawArray("b", num_agents),
-            # Drive B'' off-map flag. Workers write per-agent removed bits;
-            # main process reads via self.removed to drive KV-cache masking.
             removed=RawArray("b", num_agents),
             semaphores=RawArray("c", num_workers),
             notify=RawArray("b", num_workers),
@@ -483,8 +479,7 @@ class Multiprocessing:
             notify=np.ndarray(num_workers, dtype=bool, buffer=self.shm["notify"]),
         )
         self.buf["semaphores"][:] = MAIN
-        # Flat (num_agents,) view of the SHM removed buffer. Reading this
-        # from the main process sees writes from any worker.
+        # Flat view of the SHM removed buffer; main sees worker writes.
         self.removed = self.buf["removed"].ravel()
 
         from multiprocessing import Pipe, Process

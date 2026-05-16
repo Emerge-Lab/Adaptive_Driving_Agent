@@ -20,10 +20,8 @@ class AdaptiveDrivingAgent(Drive):
         kwargs["resample_frequency"] = self.k_scenarios * self.scenario_length
         self.episode_length = kwargs["resample_frequency"]
 
-        # Under GOAL_TRIAL: k_scenarios IS the trial count, scenario_length IS
-        # per-trial-timeout. No fallback to INI defaults. Tests that need a
-        # custom trial budget should override k_scenarios + scenario_length
-        # directly.
+        # Under GOAL_TRIAL: k_scenarios == trial count, scenario_length ==
+        # per-trial timeout. No INI fallback; tests override these directly.
         if int(kwargs.get("goal_behavior", 0)) == 3:
             assert self.k_scenarios <= 8, (
                 f"k_scenarios={self.k_scenarios} > 8 not supported under goal_behavior=3 "

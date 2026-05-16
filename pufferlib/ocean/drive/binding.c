@@ -83,8 +83,7 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
         }
         env->trial_ended_this_step = PyArray_DATA(trial_arr);
     }
-    // removed (per-agent off-map flag, B''). Same pattern as
-    // trial_ended_this_step: C is the only writer; Python reads.
+    // `removed` is C-owned (single writer); Python reads it.
     PyObject *removed_obj = PyDict_GetItemString(kwargs, "removed");
     if (removed_obj != NULL) {
         if (!PyObject_TypeCheck(removed_obj, &PyArray_Type)) {

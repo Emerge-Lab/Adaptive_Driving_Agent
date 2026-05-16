@@ -202,10 +202,6 @@ class PuffeRL:
         self.rewards = torch.zeros(segments, horizon, device=device)
         self.terminals = torch.zeros(segments, horizon, device=device)
         self.truncations = torch.zeros(segments, horizon, device=device)
-        # Per-step per-agent off-map flag (gb=3 B''). Same shape as terminals.
-        # Used in training to (a) add a garbage-attention mask matching the
-        # eval-time `garbage_mask`, and (b) gate PPO loss/entropy/value-loss
-        # so limbo tuples don't contribute gradient.
         self.removed_history = torch.zeros(segments, horizon, device=device, dtype=torch.bool)
         self.ratio = torch.ones(segments, horizon, device=device)
         self.importance = torch.ones(segments, horizon, device=device)
@@ -251,21 +247,11 @@ class PuffeRL:
                 self.transformer_position = {
                     i * n: torch.zeros(n, dtype=torch.long, device=device) for i in range(num_chunks)
                 }
-            # K/V cache persistence for the streaming forward_eval path.
-            # The model lazy-allocates k_cache and v_cache (list of per-layer
-            # tensors) on first call when state.get("k_cache") is None. We
-            # persist them here so the next rollout step finds the cache
-            # already populated with past timesteps' projections — without
-            # this, every step would lazy-allocate fresh empty caches and
-            # the policy would attend only to the current step (silent bug
-            # discovered 2026-05-02; broke all in-context-learning runs
-            # prior to that). None initially → first call allocates.
+            # K/V caches persist across rollout steps; lazy-allocated by the
+            # model's forward_eval on first call. Without persistence the
+            # policy would attend only to the current step.
             self.transformer_k_cache = {i * n: None for i in range(num_chunks)}
             self.transformer_v_cache = {i * n: None for i in range(num_chunks)}
-            # B'' garbage_mask: per-agent per-cache-slot bool. The model marks
-            # current slot True when env.removed[i]=1 (ego off-map). Attention
-            # then excludes those slots. Lazy-allocated by the model on first
-            # forward_eval — None here mirrors the k_cache pattern.
             self.transformer_garbage_mask = {i * n: None for i in range(num_chunks)}
             self.horizon = int(getattr(policy, "horizon", config.get("horizon", 0)) or 0)
 
@@ -650,10 +636,8 @@ class PuffeRL:
 
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
-            # KV cache + PE reset gate on `d` (terminals) only. Trial
-            # boundaries (`t`, truncations) keep the cache so the policy
-            # adapts across trials within an episode. See
-            # docs/src/trial_mode.md.
+            # KV cache + PE reset gate on terminals only — trial boundaries
+            # (truncations) keep the cache so the policy adapts across trials.
             done_mask = d
             self.global_step += int(mask.sum())
 
@@ -693,21 +677,14 @@ class PuffeRL:
                     state["k_cache"] = self.transformer_k_cache[state_key]
                     state["v_cache"] = self.transformer_v_cache[state_key]
                     state["garbage_mask"] = self.transformer_garbage_mask[state_key]
-                    # B'' off-map flag. The model uses this to (a) mark the
-                    # current cache slot as garbage in garbage_mask, and
-                    # (b) exclude existing garbage slots from this step's
-                    # attention. Unified flat (num_agents,) view exposed by
-                    # the vec backend: Multiprocessing returns a SHM view
-                    # so worker writes are visible; Serial/native return
-                    # the in-process numpy array. None or all-False if the
-                    # env doesn't expose `removed` (e.g. non-gb=3 modes).
+                    # `removed` is the env's off-map flag; flat (num_agents,) view
+                    # backed by SHM under Multiprocessing so worker writes are seen.
                     rem_buf = getattr(self.vecenv, "removed", None)
                     if rem_buf is None:
                         rem_buf = getattr(self.vecenv.driver_env, "removed", None)
                     if rem_buf is not None:
                         rem_np = np.asarray(rem_buf)[env_id]
                         state["removed"] = torch.as_tensor(rem_np, device=device, dtype=torch.bool)
-                    # Note: terminals not needed for eval since we're doing single-step inference
 
                 # print(".", end="", flush=True)  # Prevents multiprocessing deadlock
                 logits, value = self.policy.forward_eval(o_device, state)
@@ -736,18 +713,10 @@ class PuffeRL:
                     transformer_key = (env_id.start // batch_size) * batch_size
                     self.transformer_context[transformer_key] = state["transformer_context"]
                     self.transformer_position[transformer_key] = state["transformer_position"]
-                    # Persist the K/V cache the model just wrote/updated so
-                    # the next forward_eval call sees the accumulated past.
-                    # state.get(...) is defensive: model may not have set
-                    # these if it took the legacy path.
                     self.transformer_k_cache[transformer_key] = state.get("k_cache")
                     self.transformer_v_cache[transformer_key] = state.get("v_cache")
                     self.transformer_garbage_mask[transformer_key] = state.get("garbage_mask")
 
-                    # Episode-boundary reset. pos is a shared (1,) scalar
-                    # across the chunk; cache rows are per-agent. Filter
-                    # done indices against the cache's batch dim, not the
-                    # pos buffer's (1,) shape.
                     if done_mask.any():
                         done_indices = torch.where(torch.from_numpy(done_mask))[0]
                         if len(done_indices) > 0:
@@ -794,15 +763,11 @@ class PuffeRL:
                 self.logprobs[batch_rows, l] = logprob
                 self.rewards[batch_rows, l] = r
                 self.terminals[batch_rows, l] = d.float()
-                # Persist truncations for GAE bootstrap-stop. Stays out of
-                # state["terminals"] so attention/PE span trial boundaries.
+                # Truncations feed GAE bootstrap-stop without bleeding into
+                # state["terminals"], so attention/PE span trial boundaries.
                 t_tensor = torch.as_tensor(t, device=device).float()
                 self.truncations[batch_rows, l] = t_tensor
                 self.values[batch_rows, l] = value.flatten()
-                # Persist per-step `removed` flag for train/eval mask parity.
-                # During training we (a) add a garbage-attention mask matching
-                # eval's `garbage_mask`, and (b) gate PPO losses so limbo
-                # tuples don't contribute gradient.
                 rem_buf = getattr(self.vecenv, "removed", None)
                 if rem_buf is None:
                     rem_buf = getattr(self.vecenv.driver_env, "removed", None)
@@ -895,13 +860,8 @@ class PuffeRL:
             else:
                 gammas = torch.full((self.segments,), config["gamma"], device=device, dtype=torch.float32)
 
-            # GAE bootstrap-stop = terminals ∨ truncations ∨ removed.
-            # - terminals: episode boundary (full reset)
-            # - truncations: trial boundary under gb=3 (world resets, KV cache persists)
-            # - removed: ego is off-map (limbo). V at limbo is computed from
-            #   garbage (INVALID_POSITION) obs; bootstrapping from it would
-            #   poison the prior step's advantage. Treat each limbo slot as
-            #   a value-chain cut.
+            # `removed` cuts the value chain at limbo steps — V is computed
+            # from garbage obs there and would poison the prior advantage.
             bootstrap_stop = (
                 self.terminals + self.truncations + self.removed_history.float()
             ).clamp(max=1.0)
@@ -968,7 +928,7 @@ class PuffeRL:
             mb_rewards = self.rewards[idx]
             mb_terminals = self.terminals[idx]
             mb_truncations = self.truncations[idx]
-            mb_removed = self.removed_history[idx]  # (B, T) bool — 1 = limbo step
+            mb_removed = self.removed_history[idx]
             mb_ratio = self.ratio[idx]
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
@@ -995,8 +955,8 @@ class PuffeRL:
             elif config.get("rnn_name", "Recurrent") == "Transformer":
                 state["transformer_context"] = None
                 state["transformer_position"] = None
-                state["terminals"] = mb_terminals  # For episode boundary masking
-                state["removed"] = mb_removed      # Train/eval mask parity (gb=3)
+                state["terminals"] = mb_terminals
+                state["removed"] = mb_removed
 
             logits, newvalue = self.policy(mb_obs, state)
 
@@ -1020,9 +980,8 @@ class PuffeRL:
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
             logratio = newlogprob - mb_logprobs
             ratio = logratio.exp()
-            # Limbo importance ratios are computed from garbage obs / actions
-            # and would poison the outer GAE's v-trace coefficients on the
-            # next minibatch. Preserve the existing ratio at limbo positions.
+            # Keep prior ratio at limbo positions — limbo ratios come from
+            # garbage obs and would poison the next minibatch's GAE v-trace.
             ratio_to_store = ratio.detach()
             if mb_removed is not None:
                 ratio_to_store = torch.where(mb_removed, self.ratio[idx], ratio_to_store)
@@ -1044,8 +1003,6 @@ class PuffeRL:
             else:
                 mb_gammas = torch.full((len(idx),), config["gamma"], device=device, dtype=torch.float32)
 
-            # Recompute advantages with new ratios — bootstrap-stop is
-            # terminals OR truncations OR removed (see outer GAE call comment).
             mb_bootstrap_stop = (
                 mb_terminals + mb_truncations + mb_removed.float()
             ).clamp(max=1.0)
@@ -1080,13 +1037,8 @@ class PuffeRL:
             adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
 
-            # Losses
-            # Per-step validity mask: 1 where the agent was ACTIVE (not limbo),
-            # 0 where removed=1 (off-map). All per-sample losses are weighted
-            # by this and normalized by the count of valid samples, so limbo
-            # tuples contribute zero gradient. mb_removed has shape (B, T)
-            # matching the per-step losses below.
-            valid_mask = (~mb_removed).to(adv.dtype)            # (B, T)
+            # Losses — gated on ~removed so limbo tuples contribute no gradient.
+            valid_mask = (~mb_removed).to(adv.dtype)
             n_valid = valid_mask.sum().clamp(min=1.0)
 
             pg_loss1 = -adv * ratio
@@ -1099,10 +1051,7 @@ class PuffeRL:
             v_loss_clipped = (v_clipped - mb_returns) ** 2
             v_loss = 0.5 * (torch.max(v_loss_unclipped, v_loss_clipped) * valid_mask).sum() / n_valid
 
-            # Entropy-weighted loss if entropy conditioning is enabled.
-            # NOTE: entropy comes back from sample_logits FLAT — shape (B*T,)
-            # — while valid_mask is (B, T). Flatten valid_mask once for these
-            # mults so we don't crash on broadcast.
+            # entropy comes back FLAT (B*T,) from sample_logits; flatten the mask to match.
             valid_mask_flat = valid_mask.reshape(-1)
             n_valid_flat = valid_mask_flat.sum().clamp(min=1.0)
             if hasattr(self.vecenv.driver_env, "entropy_conditioned") and self.vecenv.driver_env.entropy_conditioned:
@@ -1128,14 +1077,8 @@ class PuffeRL:
                 loss = pg_loss + config["vf_coef"] * v_loss - config["ent_coef"] * entropy_loss
             self.amp_context.__enter__()  # TODO: AMP needs some debugging
 
-            # Write back the new value-head output for the next outer GAE.
-            # CRITICAL: preserve limbo positions — at those slots `newvalue`
-            # was computed from garbage obs (INVALID_POSITION) and writing
-            # it back would poison subsequent GAE calls. The old `mb_values`
-            # at limbo positions is also garbage (also computed from limbo
-            # obs at rollout time), so neither choice is "right" — but
-            # keeping the prior value at limbo positions prevents
-            # mb-by-mb drift across PPO epochs.
+            # Preserve prior value at limbo positions — newvalue there comes
+            # from garbage obs and would drift across PPO epochs.
             new_v = newvalue.detach().float()
             if mb_removed is not None:
                 new_v = torch.where(mb_removed, mb_values.float(), new_v)

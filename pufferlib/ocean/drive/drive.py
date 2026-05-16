@@ -424,18 +424,12 @@ class Drive(pufferlib.PufferEnv):
                 self.co_player_device = torch.device("cpu")
                 self._set_co_player_state()
 
-        # B'' off-map flag. C writes 1 when an ego reaches goal mid-trial
-        # (entity goes off-map); 0 when env trial-end resets the world.
-        # pufferl reads this via vecenv.removed to mask off-map slots in
-        # the KV cache attention. Sourced from buf["removed"] when the vec
-        # backend (Multiprocessing or Serial) allocates SHM for it; falls
-        # back to a private numpy array for standalone use.
+        # Off-map flag: C writes 1 when an ego goes off-map mid-trial. Sourced
+        # from buf["removed"] when the vec backend allocates SHM, else private.
         _removed_external = buf["removed"] if (buf is not None and "removed" in buf) else None
 
         super().__init__(buf=buf)
 
-        # Per-trial-boundary flag. C writes 1 at env trial-end under gb=3;
-        # Python reads. See docs/src/trial_mode.md.
         self.trial_ended_this_step = np.zeros(self.num_agents, dtype=bool)
         if _removed_external is not None:
             assert _removed_external.shape == (self.num_agents,), (
@@ -1059,10 +1053,9 @@ class Drive(pufferlib.PufferEnv):
 
     def step(self, actions):
         self.terminals[:] = 0
-        # Under gb=3, C owns both `truncations` and `trial_ended_this_step`:
-        # zeroes them at top of c_step and writes 1 at each trial boundary.
-        # Under non-trial modes, Python still owns `truncations` (k_eff
-        # curriculum below writes it directly), so zero here only if non-3.
+        # Under GOAL_TRIAL C owns truncations + trial_ended_this_step. Under
+        # other modes Python writes truncations (k_eff curriculum), so only
+        # zero here when we own them.
         if self.goal_behavior != 3:
             self.truncations[:] = 0
 
@@ -1084,10 +1077,8 @@ class Drive(pufferlib.PufferEnv):
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
-                # Under GOAL_TRIAL: derive ada_delta_trial_K_minus_0 from the
-                # per-trial-index success rates the C side now emits as
-                # trial_K_score. Surfaces in wandb every report_interval; no
-                # need to wait for eval-time HumanReplayEvaluator.
+                # Surface ada_delta_trial_K_minus_0 every report_interval so
+                # wandb sees in-context adaptation without waiting for eval.
                 if self.goal_behavior == 3:
                     self._inject_trial_deltas(log)
                 if self.adaptive_driving_agent:
@@ -1100,9 +1091,8 @@ class Drive(pufferlib.PufferEnv):
                     # Non-adaptive mode: always append
                     info.append(log)
 
-            # Surface the entropy bound + sampled distribution that
-            # _set_co_player_conditioning stashed at the most recent reset.
-            # Drained on emit so each fresh sampling gets logged exactly once.
+            # Drain pending logs (entropy bound + sampled distribution stashed
+            # by _set_co_player_conditioning at the last reset).
             if self._pending_entropy_log is not None:
                 info.append(self._pending_entropy_log)
                 self._pending_entropy_log = None
@@ -1110,10 +1100,9 @@ class Drive(pufferlib.PufferEnv):
                 info.append(self._pending_k_eff_log)
                 self._pending_k_eff_log = None
 
-        # Per-scenario block (gb != 3 only): every scenario_length ticks,
-        # aggregate per-scenario metrics, rotate partner / maps. Under gb=3
-        # trial boundaries are variable-length so this fixed-time block would
-        # land mid-trial; metrics flow through add_log_one_agent instead.
+        # Per-scenario block (non-trial modes): aggregate metrics + rotate
+        # partner/maps on the fixed scenario boundary. GOAL_TRIAL uses
+        # variable-length trials, so add_log_one_agent handles aggregation.
         run_per_scenario_block = self.tick % self.scenario_length == 0 and self.goal_behavior != 3
         if run_per_scenario_block:
             if self.adaptive_driving_agent and self.current_scenario_infos:
@@ -1192,13 +1181,13 @@ class Drive(pufferlib.PufferEnv):
                 self.truncations[self.ego_ids] = 1
                 self.terminals[self.ego_ids] = 1
 
-        # Map-rotation boundary. Option D's idle-after-max_trials prevents the
-        # 1-map-many-short-episodes pathology that motivated rotating on every
-        # terminals.any() (250ms/call × ~10 calls/sec was infeasible).
+        # Map-rotation on the resample boundary; idle-after-max_trials avoids
+        # the 1-map-many-short-episodes thrash that rotating on terminals
+        # caused (~250ms/call was infeasible at ~10 calls/sec).
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
-            # Force-flush env->log under gb=3 before reinit zeros it. Slow
-            # agents that didn't finish max_trials this cycle don't bump
-            # log.n, so the standard vec_log gate may not fire on its own.
+            # Force-flush env->log before reinit zeros it. Slow egos that
+            # didn't finish all trials this cycle don't bump log.n, so the
+            # standard vec_log gate may not fire on its own.
             if self.goal_behavior == 3:
                 log = binding.vec_log(self.c_envs, 1)
                 if log and log.get("n", 0) > 0:
