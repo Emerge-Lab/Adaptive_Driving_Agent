@@ -9,29 +9,30 @@
 #SBATCH --account=torch_pr_355_tandon_advanced
 #SBATCH --cpus-per-task=40
 #SBATCH --gres=gpu:1
-#SBATCH --array=0-1
+#SBATCH --array=0-11
 
-# k=4 gb=3 (GOAL_TRIAL) adaptive sweep, 2 partners.
-# Each array task is ONE partner on ONE GPU with nw=32.
+# k=4 gb=3 (GOAL_TRIAL) adaptive sweep: 4 partners × 3 seeds = 12 tasks.
+# Each array task is ONE partner × ONE seed on ONE GPU with nw=32.
 #
-# Sized for cluster:
-#   --mem=256GB      : pinned obs = 32 * 1024 * 804 * 1850 * 4 = 181 GiB,
-#                      plus overhead + eval-spike → 256 GB headroom
-#   --cpus-per-task=40 : nw=32 workers + main + xvfb + co-player CPU
-#   --gres=gpu:1     : single GPU per task; array fans out across partners
-#   --array=0-1      : 2 partners (extend by adding to ZIPPED_RUNS)
+# Array indexing: TASK_ID = partner_idx * 3 + seed_idx
+#   partner_idx ∈ {0..3}  → PARTNERS[partner_idx]
+#   seed_idx    ∈ {0..2}  → SEEDS[seed_idx]
 #
-# Submit with:
-#   sbatch scripts/adaptive/cluster_nuplan_transformer_k4_gb3.sh
+# Submit: sbatch scripts/adaptive/cluster_nuplan_transformer_k4_gb3.sh
 
-# (label, partner_id, entropy_ub) — partner conditioning matches each
-# co-player's training entropy-weight-ub.
-ZIPPED_RUNS=(
-  "p005_miku2puk_gb3_k4   miku2puk   0.05"
-  "p010_2e029h15_gb3_k4   2e029h15   0.10"
+# (label, partner_id, entropy_ub)
+PARTNERS=(
+  "p005   miku2puk   0.05"
+  "p010   2e029h15   0.10"
+  "p020   m2ygolog   0.20"
+  "p050   6rauydj2   0.50"
 )
+SEEDS=(42 43 44)
 
-read -r LABEL PARTNER_ID ENTROPY_UB <<< "${ZIPPED_RUNS[$SLURM_ARRAY_TASK_ID]}"
+PARTNER_IDX=$((SLURM_ARRAY_TASK_ID / 3))
+SEED_IDX=$((SLURM_ARRAY_TASK_ID % 3))
+read -r LABEL PARTNER_ID ENTROPY_UB <<< "${PARTNERS[$PARTNER_IDX]}"
+SEED=${SEEDS[$SEED_IDX]}
 COPLAYER_PATH="experiments/puffer_drive_${PARTNER_ID}.pt"
 
 # Fixed
@@ -42,7 +43,6 @@ LANE_REWARD=0.025
 DISCOUNT_LB=0.4
 DISCOUNT_UB=1
 NUPLAN_NUM_MAPS=4999
-SEED=42
 TOTAL_TIMESTEPS=2000000000   # 2B
 
 K_SCENARIOS=4
@@ -53,7 +53,7 @@ NUM_WORKERS=32; NUM_ENVS=32
 MINIBATCH_MULTIPLIER=25                       # minibatch_size = 25 * 804 = 20100
 MAX_MINIBATCH_SIZE=20100
 
-TAG="ada_k4_gb3_${LABEL}_g${GAMMA}_lane${LANE_REWARD}_nw${NUM_WORKERS}"
+TAG="ada_k4_gb3_${LABEL}_${PARTNER_ID}_s${SEED}_g${GAMMA}_lane${LANE_REWARD}_nw${NUM_WORKERS}"
 
 singularity exec --nv \
  --overlay "$OVERLAY_FILE:ro" \
