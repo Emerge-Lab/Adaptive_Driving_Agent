@@ -33,6 +33,7 @@ class Drive(pufferlib.PufferEnv):
         reward_goal_post_respawn=0.5,
         reward_lane_align=0.0,  # GIGAFLOW lane alignment reward (0 = disabled)
         reward_vel_align=1.0,  # Velocity alignment coefficient for lane reward
+        reward_trial_index_multiplier=0.0,  # GOAL_TRIAL cross-trial reward shaping (0 = baseline)
         goal_behavior=0,
         max_trials_per_episode=2,  # GOAL_TRIAL only
         per_trial_timeout=None,  # GOAL_TRIAL only; None → C defaults to scenario_length
@@ -100,6 +101,7 @@ class Drive(pufferlib.PufferEnv):
         self.reward_goal_post_respawn = reward_goal_post_respawn
         self.reward_lane_align = reward_lane_align
         self.reward_vel_align = reward_vel_align
+        self.reward_trial_index_multiplier = reward_trial_index_multiplier
         self.goal_radius = goal_radius
         self.goal_speed = goal_speed
         self.goal_behavior = goal_behavior
@@ -488,6 +490,7 @@ class Drive(pufferlib.PufferEnv):
                 reward_goal_post_respawn=reward_goal_post_respawn,
                 reward_lane_align=self.reward_lane_align,
                 reward_vel_align=self.reward_vel_align,
+                reward_trial_index_multiplier=self.reward_trial_index_multiplier,
                 goal_radius=goal_radius,
                 goal_speed=goal_speed,
                 goal_behavior=self.goal_behavior,
@@ -946,6 +949,7 @@ class Drive(pufferlib.PufferEnv):
                 reward_goal_post_respawn=self.reward_goal_post_respawn,
                 reward_lane_align=self.reward_lane_align,
                 reward_vel_align=self.reward_vel_align,
+                reward_trial_index_multiplier=self.reward_trial_index_multiplier,
                 goal_speed=self.goal_speed,
                 goal_target_distance=self.goal_target_distance,
                 dt=self.dt,

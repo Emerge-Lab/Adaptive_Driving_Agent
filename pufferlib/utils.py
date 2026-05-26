@@ -5,6 +5,89 @@ import shutil
 import subprocess
 import json
 
+import numpy as np
+
+
+def _fixed_bin_histogram(arr, low, high, num_bins=30):
+    """wandb.Histogram with fixed bin edges so cross-step comparisons are valid.
+
+    Returns None on empty/NaN-only input or any wandb-side failure so a single
+    bad histogram never kills the whole eval log.
+    """
+    import wandb
+
+    arr = np.asarray(arr, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    try:
+        counts, edges = np.histogram(arr, bins=num_bins, range=(low, high))
+        return wandb.Histogram(np_histogram=(counts.tolist(), edges.tolist()))
+    except Exception:
+        return None
+
+
+def _build_per_map_wandb_payload(per_agent_log):
+    """Build a wandb log dict with one summary Table + histograms under eval_maps/.
+
+    Each record in `per_agent_log` is {"rollout": r, "agent": a, "t0|s0": 0/1, ...}.
+    Agent index = map index (eval uses 1 controlled SDC per scene).
+    """
+    import wandb
+
+    if not per_agent_log:
+        return {}
+
+    trial_keys = sorted(
+        [
+            k
+            for k in per_agent_log[0].keys()
+            if k and k[0] in ("t", "s") and k[1:].isdigit()
+        ],
+        key=lambda k: int(k[1:]),
+    )
+    if not trial_keys:
+        return {}
+
+    n_agents = max(r["agent"] for r in per_agent_log) + 1
+    n_rollouts = max(r["rollout"] for r in per_agent_log) + 1
+    K = len(trial_keys)
+
+    grid = np.zeros((n_rollouts, n_agents, K), dtype=np.int8)
+    for rec in per_agent_log:
+        for ti, tk in enumerate(trial_keys):
+            grid[rec["rollout"], rec["agent"], ti] = rec.get(tk, 0)
+
+    per_map_rate = grid.mean(axis=0)  # (n_agents, K)
+    ada_delta = per_map_rate[:, -1] - per_map_rate[:, 0]
+
+    payload = {}
+
+    cols = ["map_id"] + trial_keys + ["ada_delta_last_minus_0"]
+    table = wandb.Table(columns=cols)
+    for m in range(n_agents):
+        row = (
+            [int(m)]
+            + [float(per_map_rate[m, ti]) for ti in range(K)]
+            + [float(ada_delta[m])]
+        )
+        table.add_data(*row)
+    payload["eval_maps/per_map_summary"] = table
+
+    # Fixed-bin histograms — domains are [0,1] for per-trial rates and [-1,1]
+    # for ada_delta. Fixed bins make histograms across training steps
+    # directly comparable.
+    if K > 1:
+        h = _fixed_bin_histogram(ada_delta, low=-1.0, high=1.0)
+        if h is not None:
+            payload["eval_maps/hist_ada_delta_per_map"] = h
+    for ti, tk in enumerate(trial_keys):
+        h = _fixed_bin_histogram(per_map_rate[:, ti], low=0.0, high=1.0)
+        if h is not None:
+            payload[f"eval_maps/hist_{tk}_success_rate_per_map"] = h
+
+    return payload
+
 
 def run_human_replay_eval_in_subprocess(config, logger, global_step):
     """Run human replay evaluation in a subprocess and log metrics to wandb.
@@ -98,7 +181,7 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             str(conditioning.get("discount_weight_ub", 0.98)),
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=os.getcwd())
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=os.getcwd())
 
         if result.returncode != 0:
             print(f"Human replay evaluation failed (exit {result.returncode}): {result.stderr}")
@@ -123,6 +206,16 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
         for k, v in metrics.items():
             if isinstance(v, (int, float)):
                 log_data[f"eval/human_replay_{k}"] = v
+
+        # Per-(rollout, agent, trial) success records → per-map table + histograms
+        # under eval_maps/. agent index = map index (eval uses 1 SDC per scene).
+        per_agent_log = metrics.get("per_agent_success_log")
+        if per_agent_log:
+            try:
+                log_data.update(_build_per_map_wandb_payload(per_agent_log))
+            except Exception as e:
+                print(f"per-map wandb payload failed: {e}")
+
         logger.wandb.log(log_data, step=global_step)
 
     except subprocess.TimeoutExpired:

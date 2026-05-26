@@ -1,12 +1,16 @@
 """Render attention + garbage_mask heatmaps from inspect_system outputs.
 
-For each mode in outputs/inspect_v2/{coplayer,human_replay,ego_only}/:
+For each mode in <root>/{coplayer,human_replay,ego_only}/:
   - attention_over_time.png : (step, source_slot) heatmap of mean-over-heads
     attention weight + mask overlay + trial-boundary markers
-  - attention_per_head.png  : per-head attention at 3 chosen ticks
-                              (mid-trial-1, mid-trial-2, episode-end)
+  - attention_per_head.png  : per-head attention at 3 chosen ticks (one per trial)
+
+Usage:
+  python tests/plot_attention.py --root outputs/inspect/rwg5a65x_iter76 \
+      --k 4 --scen-len 201 --modes human_replay
 """
 from __future__ import annotations
+import argparse
 import sys
 from pathlib import Path
 import numpy as np
@@ -15,14 +19,38 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-ROOT = Path("/workspace/ADA/outputs/inspect_v2")
-MODES = ["coplayer", "human_replay", "ego_only"]
-TRIAL_BOUNDARIES = [200, 401]  # k=2 × per_trial_timeout=201
 
-def load(mode):
-    attn = np.load(ROOT / mode / "attn_layer0.npz")["attn"]        # (T, B, H, horizon)
-    gm   = np.load(ROOT / mode / "garbage_mask.npz")["mask"]       # (T, B, horizon)
-    kn   = np.load(ROOT / mode / "kv_cache.npz")["k_norms"]        # (T, n_layers, H, horizon)
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", type=Path, required=True, help="dir with mode subdirs (e.g. outputs/inspect/<wid_iter>)")
+    ap.add_argument("--modes", nargs="+", default=["coplayer", "human_replay", "ego_only"],
+                    choices=["coplayer", "human_replay", "ego_only"])
+    ap.add_argument("--k", type=int, default=4, help="k_scenarios (= max_trials_per_episode under gb=3)")
+    ap.add_argument("--scen-len", type=int, default=201, help="scenario_length (= per_trial_timeout)")
+    ap.add_argument("--agent", type=int, default=None,
+                    help="which agent to plot (default: auto-pick longest-active)")
+    ap.add_argument("--all-agents", action="store_true",
+                    help="emit heatmaps for every agent (writes attention_*_env{i}_*.png)")
+    ap.add_argument("--flat", action="store_true",
+                    help="treat --root as a flat dir (no per-mode subdir); used for render_all_scenes outputs")
+    return ap.parse_args()
+
+
+# Filled in main() from CLI args
+ROOT: Path = Path(".")
+TRIAL_BOUNDARIES: list[int] = []
+PER_HEAD_TICKS: tuple[int, ...] = ()
+
+def load(mode, flat=False):
+    base = ROOT if flat else ROOT / mode
+    attn = np.load(base / "attn_layer0.npz")["attn"]            # (T, B, H, horizon)
+    gm   = np.load(base / "garbage_mask.npz")["mask"]           # (T, B, horizon)
+    # kv_cache.npz is only produced by inspect_system.py, not render_all_scenes.py
+    kv_path = base / "kv_cache.npz"
+    if kv_path.exists():
+        kn = np.load(kv_path)["k_norms"]                        # (T, n_layers, H, horizon)
+    else:
+        kn = None
     return attn, gm, kn
 
 def plot_over_time(mode, attn, gm, agent=0):
@@ -204,26 +232,78 @@ def plot_limbo_verify(mode, attn, gm, agent):
     return out
 
 def main():
-    for mode in MODES:
-        print(f"\n== {mode} ==")
-        attn, gm, kn = load(mode)
-        print(f"  attn shape: {attn.shape}  gm: {gm.shape}  kn: {kn.shape}")
-        agent = 0
-        p1 = plot_over_time(mode, attn, gm, agent=agent)
-        print(f"  saved: {p1}")
-        p2 = plot_per_head(mode, attn, gm, agent=agent, ticks=(100, 250, 401))
-        print(f"  saved: {p2}")
-        # Limbo verify: pick agent 0 if it goes limbo, else the first agent that does
-        verify_agent = agent
-        if find_limbo_entry(gm, verify_agent) < 0:
-            for a in range(gm.shape[1]):
-                if find_limbo_entry(gm, a) >= 0:
-                    verify_agent = a
-                    print(f"  agent 0 never goes limbo; using agent {a} for limbo-verify")
-                    break
-        p3 = plot_limbo_verify(mode, attn, gm, agent=verify_agent)
-        if p3:
-            print(f"  saved: {p3}  (verifies slot at limbo-entry goes from non-zero → 0 next step)")
+    global ROOT, TRIAL_BOUNDARIES, PER_HEAD_TICKS
+    args = parse_args()
+    ROOT = args.root
+    TRIAL_BOUNDARIES = [args.scen_len * i for i in range(1, args.k)]
+    # One tick in the middle of each trial
+    PER_HEAD_TICKS = tuple(args.scen_len * i + args.scen_len // 2 for i in range(args.k))
+    print(f"root: {ROOT}")
+    print(f"trial boundaries: {TRIAL_BOUNDARIES}")
+    print(f"per-head ticks: {PER_HEAD_TICKS}")
+
+    import shutil
+    for mode in args.modes:
+        mode_dir = (ROOT if args.flat else ROOT / mode)
+        if not mode_dir.exists():
+            print(f"\n== {mode} ==  SKIP (no dir {mode_dir})")
+            continue
+        print(f"\n== {mode} ==  dir={mode_dir}")
+        attn, gm, kn = load(mode, flat=args.flat)
+        print(f"  attn shape: {attn.shape}  gm: {gm.shape}")
+
+        T, B, _, _ = attn.shape
+        last_active = []
+        for a in range(B):
+            la = -1
+            for t in range(T):
+                if not gm[t, a, t]:
+                    la = t
+            last_active.append(la)
+        print(f"  per-agent last_active: {last_active}")
+
+        # Decide which agents to plot
+        if args.all_agents:
+            agents = list(range(B))
+        elif args.agent is None:
+            agents = [int(np.argmax(last_active))]
+            print(f"  auto-pick: agent {agents[0]} (last_active={last_active[agents[0]]})")
+        else:
+            agents = [args.agent]
+
+        # The plot functions write to ROOT/{mode}/{stem}.png (fixed name).
+        # For --flat, mode is unused as a subdir — we save into ROOT itself.
+        # We work around this by temporarily monkey-patching ROOT to mode_dir
+        # so plot funcs land their fixed-name pngs there, then rename per-agent.
+        save_dir = mode_dir
+        # Compute the dir the plot functions WILL use given the current `mode`
+        # arg passed: plot_over_time uses `ROOT / mode / "attention_over_time.png"`.
+        # If --flat, ROOT itself is mode_dir, and `mode` will be the subdir name.
+        # Easiest: just pass a mode value such that ROOT/mode == mode_dir.
+        if args.flat:
+            # tell plot funcs to use `.` as the mode dir so output lands in ROOT
+            plot_mode = "."
+        else:
+            plot_mode = mode
+
+        for agent in agents:
+            print(f"  -- agent {agent} (last_active={last_active[agent]}) --")
+            plot_over_time(plot_mode, attn, gm, agent=agent)
+            for stem in ("attention_over_time", "attention_per_head"):
+                src = save_dir / f"{stem}.png"
+                if src.exists():
+                    dst = save_dir / f"{stem}_env{agent}.png"
+                    shutil.move(str(src), str(dst))
+                    print(f"    saved: {dst}")
+            plot_per_head(plot_mode, attn, gm, agent=agent, ticks=PER_HEAD_TICKS)
+            for stem in ("attention_per_head", "attention_over_time"):
+                src = save_dir / f"{stem}.png"
+                if src.exists():
+                    dst = save_dir / f"{stem}_env{agent}.png"
+                    if not dst.exists():
+                        shutil.move(str(src), str(dst))
+                        print(f"    saved: {dst}")
+
 
 if __name__ == "__main__":
     main()

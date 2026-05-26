@@ -137,6 +137,7 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->reward_goal_post_respawn = conf.reward_goal_post_respawn;
     env->reward_lane_align = (float)unpack(kwargs, "reward_lane_align");
     env->reward_vel_align = (float)unpack(kwargs, "reward_vel_align");
+    env->reward_trial_index_multiplier = (float)unpack(kwargs, "reward_trial_index_multiplier");
     env->scenario_length = conf.scenario_length;
 
     // GOAL_TRIAL config (only used when goal_behavior == GOAL_TRIAL).

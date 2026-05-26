@@ -915,9 +915,19 @@ class PuffeRL:
             #   garbage (INVALID_POSITION) obs; bootstrapping from it would
             #   poison the prior step's advantage. Treat each limbo slot as
             #   a value-chain cut.
-            bootstrap_stop = (
-                self.terminals + self.truncations + self.removed_history.float()
-            ).clamp(max=1.0)
+            #
+            # Env var GAE_BOOTSTRAP_AT_TRUNCATIONS=1 restores standard GAE:
+            # bootstrap V(s_{t+1}) across truncations, only cut at true
+            # terminals + removed. Tests whether the trial-end bootstrap cut
+            # is the cause of low gb=3 scores.
+            if os.environ.get("GAE_BOOTSTRAP_AT_TRUNCATIONS", "0") == "1":
+                bootstrap_stop = (
+                    self.terminals + self.removed_history.float()
+                ).clamp(max=1.0)
+            else:
+                bootstrap_stop = (
+                    self.terminals + self.truncations + self.removed_history.float()
+                ).clamp(max=1.0)
             if _TRIAL_DEBUG_ENABLED:
                 _trial_debug_log(
                     "gae_outer_pre",

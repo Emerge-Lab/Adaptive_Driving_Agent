@@ -387,6 +387,12 @@ struct Drive {
     float reward_goal_post_respawn;
     float reward_lane_align;
     float reward_vel_align;
+    // GOAL_TRIAL only: goal-reach reward at trial K is scaled by
+    // (1 + reward_trial_index_multiplier * K). Default 0 → all trials
+    // equal (baseline). >0 → later trials worth more, creating direct
+    // gradient pressure to succeed in trials 1..K-1 using cross-trial
+    // cache info from trial 0.
+    float reward_trial_index_multiplier;
     float goal_radius;
     float goal_speed;
     int max_controlled_agents;
@@ -2859,12 +2865,19 @@ void c_step(Drive *env) {
                 env->entities[agent_idx].current_goal_reached = 0;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
             } else { // GOAL_STOP or GOAL_TRIAL
-                env->rewards[i] = env->goal_weights[i];
+                float goal_reward = env->goal_weights[i];
+                // GOAL_TRIAL cross-trial reward shaping: trial K success is worth
+                // (1 + α * K) * base, where α = reward_trial_index_multiplier.
+                // env_trial_count is the index of the current trial (0 for first).
+                if (env->goal_behavior == GOAL_TRIAL && env->reward_trial_index_multiplier > 0.0f) {
+                    goal_reward *= (1.0f + env->reward_trial_index_multiplier * (float)env->env_trial_count);
+                }
+                env->rewards[i] = goal_reward;
 
                 if (is_ego) {
-                    env->logs[i].episode_return = env->goal_weights[i];
+                    env->logs[i].episode_return = goal_reward;
                 } else if (is_co_player) {
-                    env->co_player_logs[i].episode_return = env->goal_weights[i];
+                    env->co_player_logs[i].episode_return = goal_reward;
                 }
 
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
@@ -3100,7 +3113,7 @@ static void start_video_recorder(Client *client, const char *basename) {
         for (int fd = 3; fd < 256; fd++) {
             close(fd);
         }
-        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", size_str, "-r", "10", "-i", "-",
+        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", size_str, "-r", "30", "-i", "-",
                "-c:v", "libx264", "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-crf", "23",
                "-loglevel", "error", filename, NULL);
         fprintf(stderr, "Failed to exec ffmpeg\n");
@@ -3889,6 +3902,19 @@ void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_
             char scenario_text[64];
             snprintf(scenario_text, sizeof(scenario_text), "Scenario %d / %d", current_scenario + 1, k_scenarios);
             DrawText(scenario_text, 40, 40, 120, WHITE);
+        }
+
+        // Frame counter on the right side: current_tick / episode_budget.
+        // Under GOAL_TRIAL the budget is max_trials * per_trial_timeout; under
+        // standard k-scenario modes it's k * scenario_length.
+        {
+            int budget = (env->goal_behavior == GOAL_TRIAL && env->max_trials_per_episode > 1)
+                            ? env->max_trials_per_episode * env->per_trial_timeout
+                            : (k_scenarios > 1 ? k_scenarios * env->scenario_length : env->scenario_length);
+            char frame_text[64];
+            snprintf(frame_text, sizeof(frame_text), "%d / %d", env->timestep, budget);
+            int frame_text_w = MeasureText(frame_text, 120);
+            DrawText(frame_text, (int)client->width - frame_text_w - 40, 40, 120, WHITE);
         }
 
         EndDrawing();

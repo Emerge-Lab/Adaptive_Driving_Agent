@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ada_k4_gb3
+#SBATCH --job-name=k1_gb3
 #SBATCH --output=/scratch/mmk9418/logs/%A_%a_%x.out
 #SBATCH --error=/scratch/mmk9418/logs/%A_%a_%x.err
 #SBATCH --mem=256GB
@@ -9,79 +9,53 @@
 #SBATCH --account=torch_pr_355_tandon_advanced
 #SBATCH --cpus-per-task=40
 #SBATCH --gres=gpu:h100:1
-#SBATCH --array=0-11
+#SBATCH --array=0-0
 
-# k=4 gb=3 (GOAL_TRIAL) adaptive sweep: 4 partners × 3 seeds = 12 tasks.
-# Each array task is ONE partner × ONE seed on ONE GPU with nw=32.
+# gb=3 with k_scenarios=1, scenario_length=201 (single 201-step trial).
+# Single variable change from the k=2 gb=3 sweep: k=1 instead of k=2.
+# This isolates whether the bug is in multi-trial logic vs single-trial
+# trial-end termination.
 #
-# Array indexing: TASK_ID = partner_idx * 3 + seed_idx
-#   partner_idx ∈ {0..3}  → PARTNERS[partner_idx]
-#   seed_idx    ∈ {0..2}  → SEEDS[seed_idx]
+# Outcomes:
+#   - Trains to ~0.9+: bug is multi-trial-specific (state reset at boundary,
+#     KV cache handling across truncations, ada_delta plumbing).
+#   - Plateaus at ~0.3: bug is in single-trial gb=3 termination itself
+#     (C-side trial-end reward/terminal/obs interaction).
 #
-# Submit: sbatch scripts/adaptive/cluster_nuplan_transformer_k4_gb3.sh
+# Submit: sbatch scripts/adaptive/cluster_k1_gb3_diagnostic.sh
 
-# (label, partner_id, entropy_ub)
-PARTNERS=(
-  "p005   miku2puk   0.05"
-  "p010   2e029h15   0.10"
-  "p020   m2ygolog   0.20"
-  "p050   6rauydj2   0.50"
-)
-SEEDS=(42 43 44)
+SEED=42
+LR=3e-3
+ENT_COEF=0.005
 
-PARTNER_IDX=$((SLURM_ARRAY_TASK_ID / 3))
-SEED_IDX=$((SLURM_ARRAY_TASK_ID % 3))
-read -r LABEL PARTNER_ID ENTROPY_UB <<< "${PARTNERS[$PARTNER_IDX]}"
-SEED=${SEEDS[$SEED_IDX]}
+# Fixed partner: p010 (entropy_ub=0.10)
+PARTNER_ID=2e029h15
+ENTROPY_UB=0.10
 COPLAYER_PATH="experiments/puffer_drive_${PARTNER_ID}.pt"
-
-# ---- Continual-pretraining wandb IDs from the prior 2B-step training ----
-# Indexed by SLURM_ARRAY_TASK_ID (= PARTNER_IDX * 3 + SEED_IDX).
-# Order: (p005 s42, p005 s43, p005 s44, p010 s42, ...).
-WIDS=(
-  j8fzsd4h zq2s65ho 1nqg55jg     # p005: s42, s43, s44
-  sk8xg6oo xoz7toqw qmrkhu3a     # p010: s42, s43, s44
-  qq1i5zf6 tfozuiw8 35nl2qov     # p020: s42, s43, s44
-  l95bxzny jmdep249 eptd954t     # p050: s42, s43, s44
-)
-WID=${WIDS[$SLURM_ARRAY_TASK_ID]}
-CKPT_DIR="experiments/puffer_adaptive_drive_${WID}"
-# Pick the latest model_*.pt; pufferl.py:344 auto-loads the sibling
-# trainer_state.pt to restore optimizer + epoch + global_step.
-LOAD_MODEL_PATH=$(ls -1 ${CKPT_DIR}/model_puffer_adaptive_drive_*.pt 2>/dev/null | sort -V | tail -1)
-if [ -z "$LOAD_MODEL_PATH" ]; then
-  echo "ERROR: no checkpoint found for wid=$WID under $CKPT_DIR" >&2
-  exit 1
-fi
-echo "[continual] task=$SLURM_ARRAY_TASK_ID  partner=$PARTNER_ID  seed=$SEED  wid=$WID"
-echo "[continual] resuming from: $LOAD_MODEL_PATH"
 
 # Fixed
 GAMMA=0.995
 COLLISION_LB=-2
 OFFROAD_LB=-2
-LANE_REWARD=0.1
+LANE_REWARD=0.05
 DISCOUNT_LB=0.4
 DISCOUNT_UB=1
 NUPLAN_NUM_MAPS=4999
-TOTAL_TIMESTEPS=6000000000   # 6B total — continual pretraining from ~2.85B loaded global_step
+TOTAL_TIMESTEPS=3000000000
 
-K_SCENARIOS=4
+K_SCENARIOS=1
 SCENARIO_LENGTH=201
-HORIZON=$((K_SCENARIOS * SCENARIO_LENGTH))   # 804
+HORIZON=$((K_SCENARIOS * SCENARIO_LENGTH))   # 201
 COLLISION_PENALTY_EGO=-0.5
 OFFROAD_PENALTY_EGO=-0.5
 
 NUM_WORKERS=32; NUM_ENVS=32
-MINIBATCH_MULTIPLIER=50                       # minibatch_size = 25 * 804 = 20100
-MAX_MINIBATCH_SIZE=40200
+MINIBATCH_MULTIPLIER=50                       # minibatch_size = 50 * 201 = 10050
+MAX_MINIBATCH_SIZE=10050
 
-TAG="ada_k4_gb3_xtrialBonus0.5"
-# Cross-trial reward shaping: trial K success worth (1 + α*K) × base reward.
-# With α=0.5: trial 0 = 1.0, trial 1 = 1.5, trial 2 = 2.0, trial 3 = 2.5.
-# Direct gradient pressure to use cross-trial cache info; tests whether the
-# architecture can learn adaptation given an explicit signal.
-TRIAL_INDEX_MULT=0.5
+TAG="baseline_k1_gb3_lane0.05"
+
+echo "[k1_gb3] seed=$SEED  lr=$LR  ent_coef=$ENT_COEF  tag=$TAG  horizon=$HORIZON"
 
 singularity exec --nv \
  --overlay "$OVERLAY_FILE:ro" \
@@ -102,10 +76,10 @@ singularity exec --nv \
    xvfb-run -a puffer train puffer_adaptive_drive \
      --wandb --wandb-project adaptive_aligned_v2 \
      --tag $TAG \
-     --load-model-path $LOAD_MODEL_PATH \
-     --load-id $WID \
      --policy-architecture Transformer --rnn-name Transformer \
      --train.gamma $GAMMA \
+     --train.learning-rate $LR \
+     --train.ent-coef $ENT_COEF \
      --train.horizon $HORIZON \
      --train.minibatch-multiplier $MINIBATCH_MULTIPLIER \
      --train.max-minibatch-size $MAX_MINIBATCH_SIZE \
@@ -124,7 +98,6 @@ singularity exec --nv \
      --env.reward-lane-align $LANE_REWARD \
      --env.reward-vehicle-collision $COLLISION_PENALTY_EGO \
      --env.reward-offroad-collision $OFFROAD_PENALTY_EGO \
-     --env.reward-trial-index-multiplier $TRIAL_INDEX_MULT \
      --env.co-player-enabled 1 \
      --env.co-player-policy.policy-path $COPLAYER_PATH \
      --env.co-player-policy.architecture Transformer \
