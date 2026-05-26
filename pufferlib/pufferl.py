@@ -95,7 +95,12 @@ ADVANTAGE_CUDA = shutil.which("nvcc") is not None
 class PuffeRL:
     def __init__(self, config, vecenv, policy, logger=None):
         # Backend perf optimization
-        torch.set_float32_matmul_precision("high")
+        # "high" allows TF32 in matmul. To get TRUE fp32 (no Tensor Core
+        # TF32 degradation), use "highest". Set via env var
+        # PUFFER_FP32_MATMUL_PRECISION (default "high" for speed).
+        torch.set_float32_matmul_precision(
+            os.environ.get("PUFFER_FP32_MATMUL_PRECISION", "high")
+        )
         torch.backends.cudnn.deterministic = config["torch_deterministic"]
         torch.backends.cudnn.benchmark = True
 
@@ -920,19 +925,9 @@ class PuffeRL:
             #   garbage (INVALID_POSITION) obs; bootstrapping from it would
             #   poison the prior step's advantage. Treat each limbo slot as
             #   a value-chain cut.
-            #
-            # Env var GAE_BOOTSTRAP_AT_TRUNCATIONS=1 restores standard GAE:
-            # bootstrap V(s_{t+1}) across truncations, only cut at true
-            # terminals + removed. Tests whether the trial-end bootstrap cut
-            # is the cause of low gb=3 scores.
-            if os.environ.get("GAE_BOOTSTRAP_AT_TRUNCATIONS", "0") == "1":
-                bootstrap_stop = (
-                    self.terminals + self.removed_history.float()
-                ).clamp(max=1.0)
-            else:
-                bootstrap_stop = (
-                    self.terminals + self.truncations + self.removed_history.float()
-                ).clamp(max=1.0)
+            bootstrap_stop = (
+                self.terminals + self.truncations + self.removed_history.float()
+            ).clamp(max=1.0)
             if _TRIAL_DEBUG_ENABLED:
                 _trial_debug_log(
                     "gae_outer_pre",
@@ -1066,74 +1061,6 @@ class PuffeRL:
                 approx_kl = (((ratio - 1) - logratio) * _diag_mask).sum() / _diag_n
                 clipfrac = (((ratio - 1.0).abs() > config["clip_coef"]).float() * _diag_mask).sum() / _diag_n
 
-            # Parity probe: at epoch 0 mb 0, replay batch-row-0 through the
-            # EVAL-PATH forward step by step and compare logits per position
-            # against the train-path logits. Gated by PUFFER_PARITY_PROBE=1.
-            if (
-                self.epoch == 0
-                and mb == 0
-                and os.environ.get("PUFFER_PARITY_PROBE", "0") == "1"
-            ):
-                import pickle
-                B0, T0 = mb_obs.shape[0], mb_obs.shape[1]
-                # Pick batch row 0
-                b0_obs = mb_obs[0:1].to(device)  # (1, T, obs_dim)
-                b0_removed = mb_removed[0:1].to(device)  # (1, T) bool
-                b0_terminals = mb_terminals[0:1].to(device)  # (1, T) float
-                eval_state = dict(
-                    transformer_context=None,
-                    transformer_position=None,
-                    k_cache=None,
-                    v_cache=None,
-                    garbage_mask=None,
-                )
-                eval_logits_per_step = []
-                # Unwrap compiled policy if necessary. Keep model in TRAIN
-                # mode (no .eval() toggle) to match original rollout behavior.
-                _pol = getattr(self.policy, "_orig_mod", self.policy)
-                with torch.no_grad():
-                    for t in range(T0):
-                        # On terminal at position t, reset cache like pufferl does
-                        # for the rollout. Under our gb=3 setup, terminal only fires
-                        # at position 401 (end of episode), not within.
-                        if t > 0 and float(b0_terminals[0, t - 1].item()) > 0.5:
-                            eval_state["k_cache"] = None
-                            eval_state["v_cache"] = None
-                            eval_state["transformer_position"] = torch.zeros(1, dtype=torch.long, device=device)
-                            eval_state["garbage_mask"] = None
-                        obs_t = b0_obs[:, t, :]  # (1, obs_dim)
-                        eval_state["removed"] = b0_removed[:, t]
-                        l_t, _v = _pol.forward_eval(obs_t, eval_state)
-                        if isinstance(l_t, tuple):
-                            l_t = l_t[0]
-                        eval_logits_per_step.append(l_t.detach().cpu())
-                eval_logits = torch.stack(eval_logits_per_step, dim=1).squeeze(0)  # (T, A)
-
-                # Train logits for batch row 0
-                if isinstance(logits, tuple):
-                    _lt = logits[0]
-                else:
-                    _lt = logits
-                # _lt is shape (B*T, A) usually
-                train_logits_b0 = _lt.detach().cpu().view(B0, T0, -1)[0]  # (T, A)
-
-                _probe_path = "/scratch/mmk9418/projects/Adaptive_Driving_Agent/logs/parity_probe_v2.pkl"
-                with open(_probe_path, "wb") as _f:
-                    pickle.dump(
-                        {
-                            "logits_train_b0": train_logits_b0,
-                            "logits_eval_b0": eval_logits,
-                            "mb_actions_b0": mb_actions[0].cpu(),
-                            "mb_logprobs_b0": mb_logprobs[0].cpu(),
-                            "newlogprob_b0": newlogprob[0].cpu(),
-                            "mb_removed_b0": b0_removed[0].cpu(),
-                            "mb_terminals_b0": b0_terminals[0].cpu(),
-                            "mb_truncations_b0": mb_truncations[0].cpu(),
-                        },
-                        _f,
-                    )
-                print(f"[parity_probe_v2] dumped batch-row-0 train+eval logits to {_probe_path}", flush=True)
-
             adv = advantages[idx]
             if hasattr(self.vecenv.driver_env, "discount_conditioned") and self.vecenv.driver_env.discount_conditioned:
                 mb_gammas = gammas[idx]
@@ -1146,11 +1073,6 @@ class PuffeRL:
                 mb_terminals + mb_truncations + mb_removed.float()
             ).clamp(max=1.0)
             if _TRIAL_DEBUG_ENABLED:
-                # Split ratio by mb_removed to localize parity bug.
-                active = ~mb_removed
-                limbo = mb_removed
-                ratio_active = ratio[active] if active.any() else ratio.new_empty(0)
-                ratio_limbo = ratio[limbo] if limbo.any() else ratio.new_empty(0)
                 _trial_debug_log(
                     "gae_inner",
                     epoch=int(self.epoch),
@@ -1162,16 +1084,6 @@ class PuffeRL:
                     ratio_mean=float(ratio.mean().item()),
                     ratio_min=float(ratio.min().item()),
                     ratio_max=float(ratio.max().item()),
-                    active_n=int(active.sum().item()),
-                    active_ratio_mean=float(ratio_active.mean().item()) if ratio_active.numel() else 0.0,
-                    active_ratio_min=float(ratio_active.min().item()) if ratio_active.numel() else 0.0,
-                    active_ratio_max=float(ratio_active.max().item()) if ratio_active.numel() else 0.0,
-                    active_ratio_std=float(ratio_active.std().item()) if ratio_active.numel() > 1 else 0.0,
-                    limbo_n=int(limbo.sum().item()),
-                    limbo_ratio_mean=float(ratio_limbo.mean().item()) if ratio_limbo.numel() else 0.0,
-                    limbo_ratio_min=float(ratio_limbo.min().item()) if ratio_limbo.numel() else 0.0,
-                    limbo_ratio_max=float(ratio_limbo.max().item()) if ratio_limbo.numel() else 0.0,
-                    limbo_ratio_std=float(ratio_limbo.std().item()) if ratio_limbo.numel() > 1 else 0.0,
                     approx_kl=float(approx_kl.item()),
                     clipfrac=float(clipfrac.item()),
                     adv_mean_pre=float(adv.mean().item()),
