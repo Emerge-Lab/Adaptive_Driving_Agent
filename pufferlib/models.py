@@ -14,8 +14,11 @@ from torch.utils.checkpoint import checkpoint
 import math
 
 
-# Set PUFFER_TRANSFORMER_LEGACY_EVAL=1 to fall back to the pre-KV-cache path.
-_USE_LEGACY_EVAL = os.environ.get("PUFFER_TRANSFORMER_LEGACY_EVAL", "0") == "1"
+# Set PUFFER_TRANSFORMER_LEGACY_EVAL=0 to opt back into the streaming KV-cache
+# eval forward. Legacy full-context is the default because the streaming path
+# produces bf16 numerics that diverge from the training-path forward under
+# sparse attention (gb=3 limbo masking), breaking PPO ratio parity.
+_USE_LEGACY_EVAL = os.environ.get("PUFFER_TRANSFORMER_LEGACY_EVAL", "1") == "1"
 
 
 class Default(nn.Module):

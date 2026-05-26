@@ -42,6 +42,8 @@ TAG="trial_debug_gb${GOAL_BEHAVIOR}"
 export PUFFER_TRIAL_DEBUG_FILE="$DEBUG_FILE"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=disabled   # short diagnostic — no wandb noise
+# Use legacy full-context eval forward to match train's computation pattern.
+export PUFFER_TRANSFORMER_LEGACY_EVAL=1
 
 echo "[trial_debug] gb=$GOAL_BEHAVIOR  seed=$SEED  total_timesteps=$TOTAL_TIMESTEPS"
 echo "[trial_debug] debug file = $DEBUG_FILE"
