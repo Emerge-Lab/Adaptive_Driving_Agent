@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -e
+
+# Submit the job and capture the job ID
+JOB_OUTPUT=$(sbatch --gres=gpu:l40s:1 \
+       --cpus-per-task=32 \
+       -t 24:00:00 \
+       --mem=40G \
+       --account=torch_pr_355_tandon_priority <<EOF
+#!/bin/bash
+sleep infinity
+EOF
+)
+
+# Extract job ID from "Submitted batch job XXXXXX"
+JOB_ID=$(echo "$JOB_OUTPUT" | grep -oP 'Submitted batch job \K\d+')
+echo "Submitted batch job $JOB_ID"
+
+# Wait for job to start running
+echo "Waiting for job $JOB_ID to start..."
+while true; do
+    STATE=$(squeue -j "$JOB_ID" -h -o "%t" 2>/dev/null || echo "")
+    if [[ "$STATE" == "R" ]]; then
+        echo "Job is running!"
+        break
+    elif [[ -z "$STATE" ]]; then
+        echo "Job no longer in queue (may have failed)"
+        exit 1
+    fi
+    sleep 2
+done
+
+# Connect to the job with singularity and set up environment
+srun --jobid="$JOB_ID" --pty \
+    singularity exec --nv --overlay "$OVERLAY_FILE:ro" "$SINGULARITY_IMAGE" \
+    bash -c 'cd /scratch/mmk9418/projects/Adaptive_Driving_Agent && source .venv/bin/activate && exec bash'
