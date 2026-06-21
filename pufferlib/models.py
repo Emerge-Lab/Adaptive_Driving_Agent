@@ -664,7 +664,46 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         context_with_pos = context + pos_embed
         causal_mask = self.get_causal_mask(self.horizon, device)
 
-        output = self.transformer(context_with_pos, mask=causal_mask, is_causal=True)
+        if state.get("_probe_attention", False):
+            # Manual layer-by-layer transformer pass that captures softmax
+            # attention weights. Numerically equivalent to nn.TransformerEncoder
+            # (norm_first=True, dropout=0). Used by render_all_scenes / probes
+            # to inspect attention without changing the trained-policy
+            # behavior. Only the current read slot's weights are stored, so
+            # the probe array stays small.
+            T_full = self.horizon
+            H = self.num_heads
+            D = self.head_dim
+            x = context_with_pos
+            read_idx_int = int(((pos - 1) % self.horizon).item())
+            for li, layer in enumerate(self.transformer.layers):
+                attn = layer.self_attn
+                x_norm = layer.norm1(x)
+                qkv = F.linear(x_norm, attn.in_proj_weight, attn.in_proj_bias)
+                q, k, v = qkv.chunk(3, dim=-1)
+                q = q.view(B, T_full, H, D).transpose(1, 2)  # (B, H, T, D)
+                k = k.view(B, T_full, H, D).transpose(1, 2)
+                v = v.view(B, T_full, H, D).transpose(1, 2)
+                scale = 1.0 / math.sqrt(D)
+                attn_logits = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, H, T, T)
+                attn_logits = attn_logits + causal_mask  # additive -inf above diagonal
+                weights = F.softmax(attn_logits, dim=-1)  # (B, H, T, T)
+                # Save only the current read slot's row to keep storage tractable
+                state.setdefault("_attn_weights", []).append(
+                    {"layer": li, "slot": read_idx_int,
+                     "weights": weights[:, :, read_idx_int : read_idx_int + 1, :].detach().cpu()}
+                )
+                attn_out = torch.matmul(weights, v)  # (B, H, T, D)
+                attn_out = attn_out.transpose(1, 2).reshape(B, T_full, self.hidden_size)
+                attn_out = F.linear(attn_out, attn.out_proj.weight, attn.out_proj.bias)
+                x = x + attn_out
+                x_norm2 = layer.norm2(x)
+                ffn_h = layer.activation(F.linear(x_norm2, layer.linear1.weight, layer.linear1.bias))
+                ffn_out = F.linear(ffn_h, layer.linear2.weight, layer.linear2.bias)
+                x = x + ffn_out
+            output = x
+        else:
+            output = self.transformer(context_with_pos, mask=causal_mask, is_causal=True)
         output = self.output_norm(output)
 
         read_idx = ((pos - 1) % self.horizon).long()

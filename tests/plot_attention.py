@@ -51,73 +51,117 @@ def load(mode, flat=False):
         kn = np.load(kv_path)["k_norms"]                        # (T, n_layers, H, horizon)
     else:
         kn = None
-    return attn, gm, kn
+    active_path = base / "active.npz"
+    if active_path.exists():
+        active = np.load(active_path)["active"]                 # (T, N) bool
+    else:
+        active = None
+    return attn, gm, kn, active
 
-def plot_over_time(mode, attn, gm, agent=0):
+def plot_over_time(mode, attn, gm, agent=0, active=None):
     """Time-evolution heatmap: y=tick, x=source slot.
-    Top:    full mean-over-heads attention (includes the self-attention "ghost diagonal").
-    Middle: same attention but with the diagonal hidden — so you can see PAST-attention only.
-    Bottom: garbage mask binary heatmap on same axes."""
+
+    Three panels:
+      Top:    full mean-over-heads attention (with the per-step self-spike on the diagonal).
+      Middle: garbage_mask (red where slot was limbo at the time the row's query ran).
+      Bottom: zoomed attention — only the active range, with auto-rescaled colormap.
+
+    Per-agent trial-event lines (computed from the `active` array, NOT the timeout cap):
+      * goal-reach (active True→False): bright yellow solid — "trial K ended for this
+        agent because it reached the goal".
+      * active-restart (active False→True): cyan solid — "env did its trial-end reset
+        and the agent is back driving in the next trial".
+    Vertical line at the same source slot too (the cache position where this transition
+    was recorded).
+    """
     T, B, H, S = attn.shape
     a_mean = attn[:, agent].mean(axis=1)  # (T, S)
+    g = gm[:, agent].astype(float)        # (T, S) bool→float
 
-    # Off-diagonal mean: zero out the (t, t) cell for each row so you only see
-    # what the policy attends to in the PAST. The per-step self-spike (head 1)
-    # otherwise dominates the visual.
-    a_offdiag = a_mean.copy()
-    diag_mask = np.eye(min(T, S), dtype=bool)
-    if a_offdiag.shape == diag_mask.shape:
-        a_offdiag[diag_mask] = 0.0
+    # Per-agent trial events from the `active` array (T, N). Falls back to the
+    # diagonal of garbage_mask if `active` is None (older runs).
+    if active is not None:
+        act = active[:, agent].astype(bool)
     else:
-        for t in range(min(T, S)):
-            a_offdiag[t, t] = 0.0
+        act = np.array([g[t, t] < 0.5 for t in range(min(T, S))], dtype=bool)
+        if len(act) < T:  # pad if needed
+            act = np.concatenate([act, np.zeros(T - len(act), dtype=bool)])
 
-    g = gm[:, agent].astype(float)
+    # last-active = last tick where agent was active
+    last_active = int(np.where(act)[0].max() + 1) if act.any() else T
+
+    # Transitions
+    goal_reach_steps = []   # active True→False (agent went to limbo)
+    restart_steps = []      # active False→True (env trial-end reset; agent active again)
+    for t in range(1, min(T, len(act))):
+        if act[t - 1] and not act[t]:
+            goal_reach_steps.append(t)
+        elif (not act[t - 1]) and act[t]:
+            restart_steps.append(t)
 
     fig, axes = plt.subplots(
-        3, 1, figsize=(14, 14), sharex=True,
-        gridspec_kw={"height_ratios": [3, 3, 1]},
+        3, 1, figsize=(14, 16), sharex=False,
+        gridspec_kw={"height_ratios": [3, 1, 3]},
     )
 
-    # Panel 1: full attention (with self-spike diagonal)
+    def _trial_lines(ax, max_axis=None, vertical=True):
+        """Draw per-agent goal-reach (yellow) + restart (cyan) lines."""
+        for tb in goal_reach_steps:
+            if max_axis is not None and tb >= max_axis:
+                continue
+            ax.axhline(tb, color="yellow", linestyle="-", linewidth=1.8, alpha=0.95)
+            if vertical:
+                ax.axvline(tb, color="yellow", linestyle=":", linewidth=1.2, alpha=0.6)
+        for tb in restart_steps:
+            if max_axis is not None and tb >= max_axis:
+                continue
+            ax.axhline(tb, color="cyan", linestyle="-", linewidth=1.8, alpha=0.95)
+            if vertical:
+                ax.axvline(tb, color="cyan", linestyle=":", linewidth=1.2, alpha=0.6)
+
+    # Panel 1: full attention over the whole rollout
     im0 = axes[0].imshow(
         a_mean, aspect="auto", origin="upper",
         cmap="viridis", vmin=0, vmax=np.percentile(a_mean[a_mean > 0], 99),
         interpolation="nearest",
     )
     axes[0].set_ylabel("tick (query step)")
-    axes[0].set_title(f"{mode}: mean-over-heads attention (agent {agent}) — diagonal = per-step self-spike (head 1)")
-    for tb in TRIAL_BOUNDARIES:
-        axes[0].axhline(tb, color="white", linestyle="--", linewidth=1, alpha=0.7)
-        axes[0].axvline(tb, color="orange", linestyle=":", linewidth=1, alpha=0.7)
+    axes[0].set_xlabel("source slot (cache position)")
+    axes[0].set_title(f"{mode}: mean-over-heads attention (agent {agent}) — yellow = goal-reach (trial ended for this agent), cyan = trial restart")
+    _trial_lines(axes[0])
     plt.colorbar(im0, ax=axes[0], label="attention weight")
 
-    # Panel 2: off-diagonal — past-only attention
-    vmax2 = np.percentile(a_offdiag[a_offdiag > 0], 99) if (a_offdiag > 0).any() else 0.01
+    # Panel 2: garbage_mask
     im1 = axes[1].imshow(
-        a_offdiag, aspect="auto", origin="upper",
-        cmap="viridis", vmin=0, vmax=vmax2,
-        interpolation="nearest",
-    )
-    axes[1].set_ylabel("tick (query step)")
-    axes[1].set_title("same, BUT diagonal zeroed → shows PAST-only attention. Dark regions above the diagonal = mask-blocked limbo slots.")
-    for tb in TRIAL_BOUNDARIES:
-        axes[1].axhline(tb, color="white", linestyle="--", linewidth=1, alpha=0.7)
-        axes[1].axvline(tb, color="orange", linestyle=":", linewidth=1, alpha=0.7)
-    plt.colorbar(im1, ax=axes[1], label="attention weight")
-
-    # Panel 3: garbage_mask
-    im2 = axes[2].imshow(
         g, aspect="auto", origin="upper",
         cmap="Reds", vmin=0, vmax=1, interpolation="nearest",
     )
-    axes[2].set_ylabel("tick")
+    axes[1].set_ylabel("tick")
+    axes[1].set_xlabel("source slot (cache position)")
+    axes[1].set_title("garbage_mask: True (red) = slot was limbo at this attention time")
+    _trial_lines(axes[1])
+    plt.colorbar(im1, ax=axes[1], label="garbage")
+
+    # Panel 3: ZOOMED attention — only ticks before this agent first went to limbo,
+    # AND only source slots up to that point. Re-scale colormap for that subregion.
+    zoom_T = last_active
+    zoom_S = last_active
+    a_zoom = a_mean[:zoom_T, :zoom_S]
+    vmax_zoom = (
+        np.percentile(a_zoom[a_zoom > 0], 99) if (a_zoom > 0).any() else 0.01
+    )
+    im2 = axes[2].imshow(
+        a_zoom, aspect="auto", origin="upper",
+        cmap="viridis", vmin=0, vmax=vmax_zoom, interpolation="nearest",
+    )
+    axes[2].set_ylabel("tick (query step)")
     axes[2].set_xlabel("source slot (cache position)")
-    axes[2].set_title("garbage_mask: True (red) = slot was limbo (= these source slots are MASKED at later attention)")
-    for tb in TRIAL_BOUNDARIES:
-        axes[2].axhline(tb, color="black", linestyle="--", linewidth=1, alpha=0.7)
-        axes[2].axvline(tb, color="black", linestyle=":", linewidth=1, alpha=0.7)
-    plt.colorbar(im2, ax=axes[2], label="garbage")
+    axes[2].set_title(
+        f"ZOOMED on active range only (ticks 0..{zoom_T - 1}, slots 0..{zoom_S - 1}) "
+        "— colorbar auto-rescaled to this subregion"
+    )
+    _trial_lines(axes[2], max_axis=zoom_T)
+    plt.colorbar(im2, ax=axes[2], label="attention weight")
 
     fig.tight_layout()
     out = ROOT / mode / "attention_over_time.png"
@@ -249,7 +293,7 @@ def main():
             print(f"\n== {mode} ==  SKIP (no dir {mode_dir})")
             continue
         print(f"\n== {mode} ==  dir={mode_dir}")
-        attn, gm, kn = load(mode, flat=args.flat)
+        attn, gm, kn, active = load(mode, flat=args.flat)
         print(f"  attn shape: {attn.shape}  gm: {gm.shape}")
 
         T, B, _, _ = attn.shape
@@ -288,7 +332,7 @@ def main():
 
         for agent in agents:
             print(f"  -- agent {agent} (last_active={last_active[agent]}) --")
-            plot_over_time(plot_mode, attn, gm, agent=agent)
+            plot_over_time(plot_mode, attn, gm, agent=agent, active=active)
             for stem in ("attention_over_time", "attention_per_head"):
                 src = save_dir / f"{stem}.png"
                 if src.exists():
