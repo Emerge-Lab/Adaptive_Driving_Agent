@@ -6,11 +6,25 @@
 #include <math.h>
 #include <assert.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include "raylib.h"
 #include "raymath.h"
 #include "rlgl.h"
 #include <time.h>
+#include <errno.h>
 #include "error.h"
+
+// Render modes
+#define RENDER_OFF 0
+#define RENDER_HEADLESS 1
+#define RENDER_WINDOW 2
+
+// View modes for rendering
+#define VIEW_MODE_SIM_STATE 0     // Full simulation state (top-down orthographic)
+#define VIEW_MODE_BEV_AGENT_OBS 1 // Bird's eye view centered on agent
+#define VIEW_MODE_AGENT_PERSP 2   // Agent perspective (3rd person)
 
 // Entity Types
 #define NONE 0
@@ -60,7 +74,17 @@
 #define OFFROAD_IDX 1
 #define REACHED_GOAL_IDX 2
 #define LANE_ALIGNED_IDX 3
-#define AVG_DISPLACEMENT_ERROR_IDX 4
+#define LANE_DIST_IDX 4
+#define LANE_ANGLE_IDX 5
+#define AVG_DISPLACEMENT_ERROR_IDX 6
+
+// Lane alignment constants (from GIGAFLOW)
+#define LANE_DISTANCE_NORMALIZATION 4.0f
+#define LANE_SELECTION_DISTANCE_WEIGHT 0.7f
+#define LANE_SELECTION_HEADING_WEIGHT 0.3f
+#define LANE_SWITCH_THRESHOLD 0.5f
+#define LANE_ALIGN_COS_THRESHOLD 0.965f // ~15 degrees
+#define MAX_CHECKED_LANES 32
 
 // Grid cell size
 #define GRID_CELL_SIZE 5.0f
@@ -92,16 +116,17 @@
 #define GOAL_RESPAWN 0
 #define GOAL_GENERATE_NEW 1
 #define GOAL_STOP 2
-
-#define PARTNER_FEATURES 7
+#define GOAL_TRIAL 3 // up to max_trials_per_episode trials; ends on goal or per-trial timeout
 
 #define ROAD_FEATURES 7
 #define ROAD_FEATURES_ONEHOT 13
 #define PARTNER_FEATURES 7
 
 // Ego features depend on dynamics model
-#define EGO_FEATURES_CLASSIC 7
-#define EGO_FEATURES_JERK 10
+// Classic: goal_x, goal_y, speed, width, length, collision, respawn, lane_dist, lane_angle
+#define EGO_FEATURES_CLASSIC 9
+// Jerk: + steering_angle, a_long, a_lat
+#define EGO_FEATURES_JERK 12
 
 // Jerk action space (for JERK dynamics model)
 static const float JERK_LONG[4] = {-15.0f, -4.0f, 0.0f, 4.0f};
@@ -135,6 +160,7 @@ const Color PUFF_BACKGROUND = (Color){6, 24, 24, 255};
 const Color PUFF_BACKGROUND2 = (Color){18, 72, 72, 255};
 const Color LIGHTGREEN = (Color){152, 255, 152, 255};
 const Color LIGHTYELLOW = (Color){255, 255, 152, 255};
+const Color LIGHTBLUE = (Color){152, 200, 255, 255};
 const Color SOFT_YELLOW = (Color){245, 245, 220, 255};
 
 struct timespec ts;
@@ -170,7 +196,16 @@ struct Log {
     float avg_goal_weight;
     float avg_entropy_weight;
     float avg_discount_weight;
+    // Per-trial metrics (GOAL_TRIAL only). All zero under other goal_behavior.
+    float n_trials_completed;
+    float n_trials_goal_reached;
+    float n_trials_timed_out;
+    float trial_total_length; // running sum, divided by n_trials_completed in add_log
+    // Per-trial-index goal-reach counters. After vec_log normalization, each
+    // slot IS trial_K_score. k_scenarios > 8 isn't supported for this metric.
+    float trial_k_goal_reached[8];
 };
+#define N_TRIAL_K_SLOTS 8
 
 typedef struct Entity Entity;
 struct Entity {
@@ -196,7 +231,8 @@ struct Entity {
     float init_goal_y;
     int mark_as_expert;
     int collision_state;
-    float metrics_array[5]; // metrics_array: [collision, offroad, reached_goal, lane_aligned
+    float metrics_array[7]; // metrics_array: [collision, offroad, reached_goal, lane_aligned, lane_dist, lane_angle,
+                            // avg_disp_error]
     float x;
     float y;
     float z;
@@ -207,6 +243,7 @@ struct Entity {
     float heading_x;
     float heading_y;
     int current_lane_idx;
+    int current_lane_geometry_idx;
     int valid;
     int respawn_timestep;
     int respawn_count;
@@ -214,6 +251,9 @@ struct Entity {
     float goals_reached_this_episode;
     float goals_sampled_this_episode;
     int current_goal_reached;
+    int collided_this_trial;  // GOAL_TRIAL only: 1 if any collision/offroad this trial
+    int trial_count;          // GOAL_TRIAL only: trials completed this episode
+    int trial_start_timestep; // GOAL_TRIAL only: tick when current trial began
     int active_agent;
     float cumulative_displacement;
     int displacement_sample_count;
@@ -304,6 +344,14 @@ struct Drive {
     float *actions;
     float *rewards;
     unsigned char *terminals;
+    unsigned char *trial_ended_this_step; // GOAL_TRIAL: per-agent trial-boundary flag
+    unsigned char *truncations;           // GOAL_TRIAL: trial-end bootstrap-stop signal
+    unsigned char *removed;               // GOAL_TRIAL B'': per-agent off-map flag
+    // Env-level trial state (GOAL_TRIAL B''). All egos in this env share one
+    // trial clock; trial-end fires when all egos have removed=1 or timeout.
+    int env_trial_count;
+    int env_trial_start_timestep;
+    int env_episode_ended; // 1 after episode end (Option D); cleared by c_reset
     Log log;
     Log *logs;
     int num_agents;
@@ -335,6 +383,14 @@ struct Drive {
     float dt;
     float reward_goal;
     float reward_goal_post_respawn;
+    float reward_lane_align;
+    float reward_vel_align;
+    // GOAL_TRIAL only: goal-reach reward at trial K is scaled by
+    // (1 + reward_trial_index_multiplier * K). Default 0 → all trials
+    // equal (baseline). >0 → later trials worth more, creating direct
+    // gradient pressure to succeed in trials 1..K-1 using cross-trial
+    // cache info from trial 0.
+    float reward_trial_index_multiplier;
     float goal_radius;
     float goal_speed;
     int max_controlled_agents;
@@ -350,6 +406,9 @@ struct Drive {
     int *tracks_to_predict_indices;
     int init_mode;
     int control_mode;
+
+    int max_trials_per_episode; // GOAL_TRIAL: max trials per episode (default 2)
+    int per_trial_timeout;      // GOAL_TRIAL: ticks per trial (default scenario_length)
 
     // Reward conditioning
     bool use_rc;
@@ -380,7 +439,103 @@ struct Drive {
     int *co_player_ids;
     int *ego_agent_ids;
     bool population_play;
+    // Rendering
+    int render_mode;          // RENDER_OFF, RENDER_HEADLESS, or RENDER_WINDOW
+    char video_basename[256]; // Full mp4 basename (without ".mp4") set by Python via vec_set_video_suffix. Defaults to
+                              // "render".
 };
+
+// Per-agent variant of add_log used at GOAL_TRIAL episode end. Can't reuse
+// add_log because it assumes a synchronized scenario boundary; under gb=3
+// each agent's episode ends at its own trial_count == max_trials.
+void add_log_one_agent(Drive *env, int i) {
+    Entity *e = &env->entities[env->active_agent_indices[i]];
+
+    if (e->is_ego) {
+        // BUG-FIX: these increments were OUTSIDE this guard before, so
+        // co-player goal counts contaminated the ego aggregate. Now gated
+        // on is_ego so env->log.goals_* reflect ego progress only.
+        env->log.goals_reached_this_episode += e->goals_reached_this_episode;
+        env->log.goals_sampled_this_episode += e->goals_sampled_this_episode;
+
+        int offroad = env->logs[i].offroad_rate;
+        int collided = env->logs[i].collision_rate;
+        env->log.offroad_rate += offroad;
+        env->log.collision_rate += collided;
+        env->log.offroad_per_agent += env->logs[i].offroad_per_agent;
+        env->log.collisions_per_agent += env->logs[i].collisions_per_agent;
+        env->log.lane_alignment_rate += env->logs[i].lane_alignment_rate;
+        env->log.speed_at_goal += env->logs[i].speed_at_goal;
+        env->log.episode_length += env->logs[i].episode_length;
+        env->log.episode_return += env->logs[i].episode_return;
+        env->log.active_agent_count += env->active_agent_count;
+        env->log.expert_static_agent_count += env->expert_static_agent_count;
+        env->log.static_agent_count += env->static_agent_count;
+
+        // Score is accumulated per-trial in c_step's trial-end loop:
+        // each clean trial (goal reached + no collision/offroad this trial)
+        // contributes 1/max_trials_per_episode. So score ∈ [0, 1] per ego.
+        // dnf_rate keeps episode-level "did not finish all trials cleanly".
+        float denom = (float)env->max_trials_per_episode;
+        float frac = (denom > 0.0f) ? e->goals_reached_this_episode / denom : 0.0f;
+        if (!offroad && !collided && frac < 1.0f)
+            env->log.dnf_rate += 1.0f;
+        env->log.n += 1.0f;
+    }
+
+    if (e->is_co_player && env->co_player_logs != NULL) {
+        int co_offroad = env->co_player_logs[i].offroad_rate;
+        int co_collided = env->co_player_logs[i].collision_rate;
+        env->co_player_log.offroad_rate += co_offroad;
+        env->co_player_log.collision_rate += co_collided;
+        env->co_player_log.offroad_per_agent += env->co_player_logs[i].offroad_per_agent;
+        env->co_player_log.collisions_per_agent += env->co_player_logs[i].collisions_per_agent;
+        env->co_player_log.lane_alignment_rate += env->co_player_logs[i].lane_alignment_rate;
+        env->co_player_log.speed_at_goal += env->co_player_logs[i].speed_at_goal;
+        env->co_player_log.episode_length += env->co_player_logs[i].episode_length;
+        env->co_player_log.episode_return += env->co_player_logs[i].episode_return;
+
+        // Same per-trial denominator fix as the ego branch above.
+        float co_denom = (float)env->max_trials_per_episode;
+        float co_frac = (co_denom > 0.0f) ? e->goals_reached_this_episode / co_denom : 0.0f;
+        float co_threshold = 0.99f;
+        if (env->max_trials_per_episode == 2)
+            co_threshold = 0.5f;
+        else if (env->max_trials_per_episode < 5)
+            co_threshold = 0.8f;
+        else
+            co_threshold = 0.9f;
+        if (co_frac > co_threshold && !co_collided)
+            env->co_player_log.score += 1.0f;
+        if (!co_offroad && !co_collided && co_frac < 1.0f)
+            env->co_player_log.dnf_rate += 1.0f;
+        env->co_player_log.n += 1.0f;
+    }
+
+    // Mirror EVERY per-entity field c_reset clears. c_reset is bypassed under
+    // gb=3 (no scenario-length early-return); stale state would carry to the
+    // next episode (e.g. respawn_timestep stuck != -1 hides ego in renders).
+    env->logs[i] = (Log){0};
+    if (env->population_play && env->co_player_logs != NULL)
+        env->co_player_logs[i] = (Log){0};
+    e->goals_reached_this_episode = 0.0f;
+    e->goals_sampled_this_episode = 1.0f;
+    e->collided_before_goal = 0;
+    e->current_goal_reached = 0;
+    e->respawn_timestep = -1;
+    e->respawn_count = 0;
+    e->stopped = 0;
+    // Don't reset `removed`: Option D sets it AFTER this call so the agent
+    // idles until resample_frequency. c_reset is what clears it.
+    e->metrics_array[COLLISION_IDX] = 0.0f;
+    e->metrics_array[OFFROAD_IDX] = 0.0f;
+    e->metrics_array[REACHED_GOAL_IDX] = 0.0f;
+    e->metrics_array[LANE_ALIGNED_IDX] = 0.0f;
+    e->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;
+    e->metrics_array[LANE_ANGLE_IDX] = 0.0f;
+    e->current_lane_idx = -1;
+    e->current_lane_geometry_idx = -1;
+}
 
 void add_log(Drive *env) {
     for (int i = 0; i < env->active_agent_count; i++) {
@@ -413,8 +568,12 @@ void add_log(Drive *env) {
                 threshold = 0.9f; // Require ≥90% completion for 5+ goals
             }
 
-            int collision_occurred =
-                (env->goal_behavior == GOAL_RESPAWN) ? e->collided_before_goal : env->logs[i].collision_rate;
+            // Use the "before goal" flag in respawn AND stop modes so that a
+            // post-goal rear-end (which the SDC can't avoid once it has stopped)
+            // does not deny the score award.
+            int collision_occurred = (env->goal_behavior == GOAL_RESPAWN || env->goal_behavior == GOAL_STOP)
+                                         ? e->collided_before_goal
+                                         : env->logs[i].collision_rate;
 
             if (frac_goal_reached > threshold && !collision_occurred) {
                 env->log.score += 1.0f;
@@ -458,8 +617,10 @@ void add_log(Drive *env) {
                 co_threshold = 0.9f;
             }
 
-            int co_collision_occurred =
-                (env->goal_behavior == GOAL_RESPAWN) ? e->collided_before_goal : env->co_player_logs[i].collision_rate;
+            // Same post-goal-collision exemption as the ego score check above.
+            int co_collision_occurred = (env->goal_behavior == GOAL_RESPAWN || env->goal_behavior == GOAL_STOP)
+                                            ? e->collided_before_goal
+                                            : env->co_player_logs[i].collision_rate;
 
             if (co_frac_goal_reached > co_threshold && !co_collision_occurred) {
                 env->co_player_log.score += 1.0f;
@@ -549,10 +710,16 @@ Entity *load_map_binary(const char *filename, Drive *env) {
         return NULL;
 
     // Read sdc_track_index
-    fread(&env->sdc_track_index, sizeof(int), 1, file);
+    if (fread(&env->sdc_track_index, sizeof(int), 1, file) != 1) {
+        fclose(file);
+        return NULL;
+    }
 
     // Read tracks_to_predict
-    fread(&env->num_tracks_to_predict, sizeof(int), 1, file);
+    if (fread(&env->num_tracks_to_predict, sizeof(int), 1, file) != 1) {
+        fclose(file);
+        return NULL;
+    }
     if (env->num_tracks_to_predict > 0) {
         env->tracks_to_predict_indices = (int *)malloc(env->num_tracks_to_predict * sizeof(int));
 
@@ -569,10 +736,22 @@ Entity *load_map_binary(const char *filename, Drive *env) {
     Entity *entities = (Entity *)malloc(env->num_entities * sizeof(Entity));
     for (int i = 0; i < env->num_entities; i++) {
         // Read base entity data
-        fread(&entities[i].scenario_id, sizeof(int), 1, file);
-        fread(&entities[i].type, sizeof(int), 1, file);
-        fread(&entities[i].id, sizeof(int), 1, file);
-        fread(&entities[i].array_size, sizeof(int), 1, file);
+        if (fread(&entities[i].scenario_id, sizeof(int), 1, file) != 1 ||
+            fread(&entities[i].type, sizeof(int), 1, file) != 1 || fread(&entities[i].id, sizeof(int), 1, file) != 1 ||
+            fread(&entities[i].array_size, sizeof(int), 1, file) != 1) {
+            // File truncated - adjust entity count and break
+            env->num_entities = i;
+            env->num_objects = (i < env->num_objects) ? i : env->num_objects;
+            env->num_roads = env->num_entities - env->num_objects;
+            break;
+        }
+        // Validate array_size is reasonable (max 1000 timesteps = 100s at 0.1s dt)
+        if (entities[i].array_size <= 0 || entities[i].array_size > 1000) {
+            env->num_entities = i;
+            env->num_objects = (i < env->num_objects) ? i : env->num_objects;
+            env->num_roads = env->num_entities - env->num_objects;
+            break;
+        }
         // Allocate arrays based on type
         int size = entities[i].array_size;
         entities[i].traj_x = (float *)malloc(size * sizeof(float));
@@ -659,14 +838,21 @@ void set_start_position(Drive *env) {
         e->heading_y = sinf(e->heading);
         e->valid = e->traj_valid[env->init_steps];
         e->collision_state = 0;
-        e->metrics_array[COLLISION_IDX] = 0.0f;    // vehicle collision
-        e->metrics_array[OFFROAD_IDX] = 0.0f;      // offroad
-        e->metrics_array[REACHED_GOAL_IDX] = 0.0f; // reached goal
-        e->metrics_array[LANE_ALIGNED_IDX] = 0.0f; // lane aligned
+        e->metrics_array[COLLISION_IDX] = 0.0f;                        // vehicle collision
+        e->metrics_array[OFFROAD_IDX] = 0.0f;                          // offroad
+        e->metrics_array[REACHED_GOAL_IDX] = 0.0f;                     // reached goal
+        e->metrics_array[LANE_ALIGNED_IDX] = 0.0f;                     // lane aligned
+        e->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION; // far from lane
+        e->metrics_array[LANE_ANGLE_IDX] = 0.0f;                       // no alignment
+        e->current_lane_idx = -1;
+        e->current_lane_geometry_idx = -1;
         e->respawn_timestep = -1;
         e->stopped = 0;
         e->removed = 0;
         e->respawn_count = 0;
+        e->trial_count = 0;
+        e->trial_start_timestep = 0;
+        e->collided_this_trial = 0;
 
         // Dynamics
         e->a_long = 0.0f;
@@ -773,12 +959,14 @@ void init_grid_map(Drive *env) {
                 float x_center = (env->entities[i].traj_x[j] + env->entities[i].traj_x[j + 1]) / 2;
                 float y_center = (env->entities[i].traj_y[j] + env->entities[i].traj_y[j + 1]) / 2;
                 int grid_index = getGridIndex(env, x_center, y_center);
-                env->grid_map->cell_entities_count[grid_index]++;
+                if (grid_index != -1) {
+                    env->grid_map->cell_entities_count[grid_index]++;
+                }
             }
         }
     }
-    int cell_entities_insert_index[grid_cell_count]; // Helper array for insertion index
-    memset(cell_entities_insert_index, 0, grid_cell_count * sizeof(int));
+    // Use heap allocation instead of VLA to avoid stack overflow on large maps
+    int *cell_entities_insert_index = (int *)calloc(grid_cell_count, sizeof(int));
 
     // Initialize grid cells
     for (int grid_index = 0; grid_index < grid_cell_count; grid_index++) {
@@ -804,6 +992,7 @@ void init_grid_map(Drive *env) {
             }
         }
     }
+    free(cell_entities_insert_index);
 }
 
 void init_neighbor_offsets(Drive *env) {
@@ -966,6 +1155,21 @@ void set_means(Drive *env) {
 void move_expert(Drive *env, float *actions, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
     int t = env->timestep;
+    // GOAL_TRIAL B'': humans replay on the env's trial clock so they reset to
+    // frame 0 at every env trial-end. Visual consequence: if humans have
+    // late-valid windows (enter scene at frame 30+) and trials are short
+    // (ego reaches goal fast), humans may not appear in those trials —
+    // that's the data, not a bug. We don't care about what humans do during
+    // a trial, only about ego-side strict trial-equivalence.
+    if (env->goal_behavior == GOAL_TRIAL && agent->array_size > 0) {
+        // Recording frame = init_steps + ticks-since-trial-start. Matches what
+        // set_start_position uses at c_reset (init_steps) and advances from
+        // there. Every trial begins at the same recording frame as trial 1.
+        t = env->init_steps + (env->timestep - env->env_trial_start_timestep);
+        t = t % agent->array_size;
+        if (t < 0)
+            t += agent->array_size;
+    }
     if (t < 0 || t >= agent->array_size) {
         agent->x = INVALID_POSITION;
         agent->y = INVALID_POSITION;
@@ -1157,6 +1361,117 @@ int collision_check(Drive *env, int agent_idx) {
     return car_collided_with_index;
 }
 
+// ============================================================================
+// Lane Alignment Helper Functions (from GIGAFLOW / PufferDrive 3.0)
+// ============================================================================
+
+// Normalize heading to [-π, π]
+float normalize_heading(float h) {
+    while (h > M_PI)
+        h -= 2.0f * M_PI;
+    while (h < -M_PI)
+        h += 2.0f * M_PI;
+    return h;
+}
+
+// Compute signed heading difference between agent and lane, normalized to [-π, π]
+float compute_heading_diff(float agent_heading, float lane_heading) {
+    float diff = normalize_heading(agent_heading - lane_heading);
+    return diff;
+}
+
+// Find closest segment on lane polyline, return signed lateral distance
+// Positive = right of lane center, Negative = left of lane center
+float find_closest_segment_on_lane(Entity *lane, float px, float py, int *segment_idx) {
+    if (!lane || lane->array_size < 2) {
+        *segment_idx = 0;
+        return LANE_DISTANCE_NORMALIZATION;
+    }
+
+    float min_dist = LANE_DISTANCE_NORMALIZATION * 10.0f;
+    int best_idx = 0;
+    float best_signed_dist = 0.0f;
+
+    for (int i = 0; i < lane->array_size - 1; i++) {
+        float x1 = lane->traj_x[i];
+        float y1 = lane->traj_y[i];
+        float x2 = lane->traj_x[i + 1];
+        float y2 = lane->traj_y[i + 1];
+
+        float dx = x2 - x1;
+        float dy = y2 - y1;
+        float seg_len_sq = dx * dx + dy * dy;
+
+        if (seg_len_sq < 1e-6f)
+            continue;
+
+        // Project point onto segment
+        float t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq;
+        t = fmaxf(0.0f, fminf(1.0f, t));
+
+        float closest_x = x1 + t * dx;
+        float closest_y = y1 + t * dy;
+
+        float dist = sqrtf((px - closest_x) * (px - closest_x) + (py - closest_y) * (py - closest_y));
+
+        if (dist < min_dist) {
+            min_dist = dist;
+            best_idx = i;
+
+            // Compute signed distance (cross product gives sign)
+            // Positive if point is to the right of the lane direction
+            float cross = dx * (py - y1) - dy * (px - x1);
+            best_signed_dist = (cross >= 0) ? dist : -dist;
+        }
+    }
+
+    *segment_idx = best_idx;
+    return best_signed_dist;
+}
+
+// Compute lane heading using weighted average of neighboring segments
+float compute_multi_segment_alignment(Entity *lane, int segment_idx) {
+    if (!lane || lane->array_size < 2)
+        return 0.0f;
+
+    // Clamp to valid range
+    if (segment_idx < 0)
+        segment_idx = 0;
+    if (segment_idx >= lane->array_size - 1)
+        segment_idx = lane->array_size - 2;
+
+    float sum_heading = 0.0f;
+    float sum_weight = 0.0f;
+
+    // Consider current segment and neighbors
+    for (int offset = -1; offset <= 1; offset++) {
+        int idx = segment_idx + offset;
+        if (idx < 0 || idx >= lane->array_size - 1)
+            continue;
+
+        float dx = lane->traj_x[idx + 1] - lane->traj_x[idx];
+        float dy = lane->traj_y[idx + 1] - lane->traj_y[idx];
+        float heading = atan2f(dy, dx);
+
+        // Weight by distance from main segment (center segment has highest weight)
+        float weight = (offset == 0) ? 2.0f : 1.0f;
+
+        // Handle angle wrapping for averaging
+        if (sum_weight > 0) {
+            float diff = heading - (sum_heading / sum_weight);
+            if (diff > M_PI)
+                heading -= 2.0f * M_PI;
+            else if (diff < -M_PI)
+                heading += 2.0f * M_PI;
+        }
+
+        sum_heading += weight * heading;
+        sum_weight += weight;
+    }
+
+    return (sum_weight > 0) ? normalize_heading(sum_heading / sum_weight) : 0.0f;
+}
+
 int check_lane_aligned(Entity *car, Entity *lane, int geometry_idx) {
     // Validate lane geometry length
     if (!lane || lane->array_size < 2)
@@ -1205,10 +1520,13 @@ int check_lane_aligned(Entity *car, Entity *lane, int geometry_idx) {
 
 void reset_agent_metrics(Drive *env, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
-    agent->metrics_array[COLLISION_IDX] = 0.0f;    // vehicle collision
-    agent->metrics_array[OFFROAD_IDX] = 0.0f;      // offroad
-    agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f; // lane aligned
+    agent->metrics_array[COLLISION_IDX] = 0.0f;                        // vehicle collision
+    agent->metrics_array[OFFROAD_IDX] = 0.0f;                          // offroad
+    agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f;                     // lane aligned
+    agent->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION; // far from lane
+    agent->metrics_array[LANE_ANGLE_IDX] = 0.0f;                       // no alignment
     agent->collision_state = 0;
+    agent->current_lane_geometry_idx = -1;
 }
 
 float point_to_segment_distance_2d(float px, float py, float x1, float y1, float x2, float y2) {
@@ -1266,6 +1584,11 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
     GridMapEntity entity_list[MAX_ENTITIES_PER_CELL * 25]; // Array big enough for all neighboring cells
     int list_size =
         checkNeighbors(env, agent->x, agent->y, entity_list, MAX_ENTITIES_PER_CELL * 25, collision_offsets, 25);
+
+    // Track checked lanes to avoid duplicate processing (reset before loop)
+    int checked_lanes[MAX_CHECKED_LANES];
+    int num_checked = 0;
+
     for (int i = 0; i < list_size; i++) {
         if (entity_list[i].entity_idx == -1)
             continue;
@@ -1291,43 +1614,84 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
         if (collided == OFFROAD)
             break;
 
-        // Find closest point on the road centerline to the agent
+        // Find closest lane using GIGAFLOW-style scoring (distance + heading)
         if (entity->type == ROAD_LANE) {
             int entity_idx = entity_list[i].entity_idx;
-            int geometry_idx = entity_list[i].geometry_idx;
 
-            float start[2] = {entity->traj_x[geometry_idx], entity->traj_y[geometry_idx]};
-            float end[2] = {entity->traj_x[geometry_idx + 1], entity->traj_y[geometry_idx + 1]};
+            // Skip if already checked this lane
+            int already_checked = 0;
+            for (int c = 0; c < num_checked; c++) {
+                if (checked_lanes[c] == entity_idx) {
+                    already_checked = 1;
+                    break;
+                }
+            }
+            if (already_checked)
+                continue;
+            if (num_checked < MAX_CHECKED_LANES)
+                checked_lanes[num_checked++] = entity_idx;
 
-            float dist = point_to_segment_distance_2d(agent->x, agent->y, start[0], start[1], end[0], end[1]);
-            float heading_diff = fabsf(atan2f(end[1] - start[1], end[0] - start[0]) - agent->heading);
+            // Find closest segment on this lane (returns signed distance)
+            int segment_idx;
+            float signed_dist = find_closest_segment_on_lane(entity, agent->x, agent->y, &segment_idx);
+            float abs_dist = fabsf(signed_dist);
+            if (abs_dist > LANE_DISTANCE_NORMALIZATION)
+                continue;
 
-            // Normalize heading difference to [0, pi]
-            if (heading_diff > M_PI)
-                heading_diff = 2.0f * M_PI - heading_diff;
+            // Compute lane heading using multi-segment alignment
+            float lane_heading = compute_multi_segment_alignment(entity, segment_idx);
 
-            // Penalize if heading differs by more than 30 degrees
-            if (heading_diff > (M_PI / 6.0f))
-                dist += 3.0f;
+            // Compute heading alignment penalty (0.0 = perfect, 1.0 = opposite)
+            float heading_diff = fabsf(compute_heading_diff(agent->heading, lane_heading));
+            float heading_penalty = heading_diff / M_PI;
 
-            if (dist < min_distance) {
-                min_distance = dist;
+            // Normalize distance for scoring
+            float distance_penalty = abs_dist / LANE_DISTANCE_NORMALIZATION;
+
+            // Combined score using defined weights
+            float score =
+                LANE_SELECTION_DISTANCE_WEIGHT * distance_penalty + LANE_SELECTION_HEADING_WEIGHT * heading_penalty;
+
+            // Hysteresis: penalize switching away from current lane
+            if (agent->current_lane_idx != entity_idx && agent->current_lane_idx != -1) {
+                score += LANE_SWITCH_THRESHOLD;
+            }
+
+            // Track best candidate
+            if (score < min_distance) { // Using min_distance to store best score
+                min_distance = score;
                 closest_lane_entity_idx = entity_idx;
-                closest_lane_geometry_idx = geometry_idx;
+                closest_lane_geometry_idx = segment_idx;
             }
         }
     }
 
-    // check if aligned with closest lane and set current lane
-    // 4.0m threshold: agents more than 4 meters from any lane are considered off-road
-    if (min_distance > 4.0f || closest_lane_entity_idx == -1) {
-        agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f;
-        agent->current_lane_idx = -1;
-    } else {
+    // Update lane metrics using GIGAFLOW Frenet coordinates
+    if (closest_lane_entity_idx != -1) {
+        Entity *lane = &env->entities[closest_lane_entity_idx];
+
+        // Recompute signed distance and heading for best lane
+        int segment_idx;
+        float signed_dist = find_closest_segment_on_lane(lane, agent->x, agent->y, &segment_idx);
+        float lane_heading = compute_multi_segment_alignment(lane, segment_idx);
+        float theta_f = compute_heading_diff(agent->heading, lane_heading);
+
+        // Store lane metrics
         agent->current_lane_idx = closest_lane_entity_idx;
-        int lane_aligned =
-            check_lane_aligned(agent, &env->entities[closest_lane_entity_idx], closest_lane_geometry_idx);
+        agent->current_lane_geometry_idx = closest_lane_geometry_idx;
+        agent->metrics_array[LANE_DIST_IDX] = signed_dist;
+        agent->metrics_array[LANE_ANGLE_IDX] = cosf(theta_f);
+
+        // Binary lane aligned flag (within ~15 degrees)
+        int lane_aligned = (fabsf(agent->metrics_array[LANE_ANGLE_IDX]) > LANE_ALIGN_COS_THRESHOLD) ? 1 : 0;
         agent->metrics_array[LANE_ALIGNED_IDX] = lane_aligned;
+    } else {
+        // Not on any lane
+        agent->current_lane_idx = -1;
+        agent->current_lane_geometry_idx = -1;
+        agent->metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;
+        agent->metrics_array[LANE_ANGLE_IDX] = 0.0f;
+        agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f;
     }
 
     // Check for vehicle collisions
@@ -1336,6 +1700,10 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
         collided = VEHICLE_COLLISION;
 
     agent->collision_state = collided;
+    if (collided != 0) {
+        // GOAL_TRIAL per-trial clean-success tracker. Cleared at trial-end.
+        agent->collided_this_trial = 1;
+    }
 
     if (collided == VEHICLE_COLLISION) {
         if (env->collision_behavior == STOP_AGENT && !agent->stopped) {
@@ -1371,7 +1739,6 @@ bool should_control_agent(Drive *env, int agent_idx) {
 
     Entity *entity = &env->entities[agent_idx];
 
-    // TODO: Move this elsewhere or remove
     entity->width *= 0.7f;
     entity->length *= 0.7f;
 
@@ -1599,7 +1966,7 @@ void init(Drive *env) {
     env->entities = load_map_binary(env->map_name, env);
     set_means(env);
     init_grid_map(env);
-    env->grid_map->vision_range = 21; // TODO: Why is this hardcoded?
+    env->grid_map->vision_range = 21;
     init_neighbor_offsets(env);
     cache_neighbor_offsets(env);
     env->logs_capacity = 0;
@@ -1625,21 +1992,6 @@ void init(Drive *env) {
             env->co_player_logs = NULL;
         }
 
-        if (env->active_agent_count > 0) {
-            env->co_player_logs = (Log *)calloc(env->active_agent_count, sizeof(Log));
-        } else {
-            env->co_player_logs = NULL;
-        }
-
-        memset(&env->co_player_log, 0, sizeof(Log));
-    }
-    if (env->population_play) {
-
-        if (env->co_player_logs) {
-            free(env->co_player_logs);
-            env->co_player_logs = NULL;
-        }
-
         // Always allocate for all active agents, not just co-players
         // because we index by x which goes from 0 to active_agent_count-1
         if (env->active_agent_count > 0) {
@@ -1652,7 +2004,34 @@ void init(Drive *env) {
     }
 }
 
+void close_client(Client *client);
+
+// Render-mode helper: stash env->client across vec_close + re-vectorize so the
+// raylib window + ffmpeg pipe survive a map swap. Needed because raylib's
+// CloseWindow → InitWindow cycle segfaults on LoadModel under our xvfb-headless
+// setup (stale GL state). We keep a single global slot — the renderer is
+// always single-env, single-window. Multi-env render would need an array.
+static Client *g_donated_client = NULL;
+
+void c_donate_client(Drive *env) {
+    if (env->client != NULL) {
+        g_donated_client = env->client;
+        env->client = NULL; // c_close now no-ops the client teardown.
+    }
+}
+
+void c_adopt_client(Drive *env) {
+    if (g_donated_client != NULL) {
+        env->client = g_donated_client;
+        g_donated_client = NULL;
+    }
+}
+
 void c_close(Drive *env) {
+    if (env->client != NULL) {
+        close_client(env->client);
+        env->client = NULL;
+    }
     if (env->population_play && env->co_player_logs != NULL) {
         free(env->co_player_logs);
         free(env->co_player_ids);
@@ -1686,7 +2065,7 @@ void c_close(Drive *env) {
 
 void allocate(Drive *env) {
     init(env);
-    int base_ego_dim = (env->dynamics_model == JERK) ? 10 : 7;
+    int base_ego_dim = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
     int conditioning_dims = (env->use_rc ? 3 : 0) + (env->use_ec ? 1 : 0) + (env->use_dc ? 1 : 0);
     int ego_dim = base_ego_dim + conditioning_dims;
 
@@ -1702,6 +2081,7 @@ void allocate(Drive *env) {
     env->actions = (float *)calloc(env->active_agent_count * 2, sizeof(float));
     env->rewards = (float *)calloc(env->active_agent_count, sizeof(float));
     env->terminals = (unsigned char *)calloc(env->active_agent_count, sizeof(unsigned char));
+    env->trial_ended_this_step = (unsigned char *)calloc(env->active_agent_count, sizeof(unsigned char));
 }
 
 void free_allocated(Drive *env) {
@@ -1709,6 +2089,7 @@ void free_allocated(Drive *env) {
     free(env->actions);
     free(env->rewards);
     free(env->terminals);
+    free(env->trial_ended_this_step);
 
     // Always free weight arrays
     free(env->collision_weights);
@@ -1729,13 +2110,7 @@ float clipSpeed(float speed) {
     return speed;
 }
 
-float normalize_heading(float heading) {
-    if (heading > M_PI)
-        heading -= 2 * M_PI;
-    if (heading < -M_PI)
-        heading += 2 * M_PI;
-    return heading;
-}
+// normalize_heading is defined earlier in this file (around line 1222)
 
 float normalize_value(float value, float min, float max) { return (value - min) / (max - min); }
 
@@ -1991,7 +2366,7 @@ void c_get_road_edge_polylines(Drive *env, float *x_out, float *y_out, int *leng
 }
 
 void compute_observations(Drive *env) {
-    int base_ego_dim = (env->dynamics_model == JERK) ? 10 : 7;
+    int base_ego_dim = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
     int conditioning_dims = (env->use_rc ? 3 : 0) + (env->use_ec ? 1 : 0) + (env->use_dc ? 1 : 0);
     int ego_dim = base_ego_dim + conditioning_dims;
     int max_obs = ego_dim + 7 * (MAX_AGENTS - 1) + 7 * MAX_ROAD_SEGMENT_OBSERVATIONS;
@@ -2027,15 +2402,21 @@ void compute_observations(Drive *env) {
         obs[5] = (ego_entity->collision_state > 0) ? 1.0f : 0.0f;
         obs[6] = (ego_entity->respawn_timestep != -1) ? 1 : 0;
 
+        // Lane alignment observations (GIGAFLOW Frenet coordinates)
+        float lane_center_dist = ego_entity->metrics_array[LANE_DIST_IDX] / LANE_DISTANCE_NORMALIZATION;
+        lane_center_dist = fmaxf(-1.0f, fminf(1.0f, lane_center_dist)); // Clamp to [-1, 1]
+        obs[7] = lane_center_dist;
+        obs[8] = ego_entity->metrics_array[LANE_ANGLE_IDX]; // cos(theta_f), already in [-1, 1]
+
         if (env->dynamics_model == JERK) {
-            obs[7] = ego_entity->steering_angle / M_PI;
+            obs[9] = ego_entity->steering_angle / M_PI;
             // Asymmetric normalization for a_long to match action space
-            obs[8] =
+            obs[10] =
                 (ego_entity->a_long < 0) ? ego_entity->a_long / (-JERK_LONG[0]) : ego_entity->a_long / JERK_LONG[3];
-            obs[9] = ego_entity->a_lat / JERK_LAT[2];
+            obs[11] = ego_entity->a_lat / JERK_LAT[2];
         }
 
-        int obs_idx = (env->dynamics_model == JERK) ? 10 : 7;
+        int obs_idx = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
         // Add conditioning weights to observations
         if (env->use_rc) {
             obs[obs_idx++] = env->collision_weights[i];
@@ -2227,9 +2608,11 @@ void sample_new_goal(Drive *env, int agent_idx) {
 
 void c_reset(Drive *env) {
     env->timestep = env->init_steps;
+    env->env_trial_count = 0;
+    env->env_trial_start_timestep = env->timestep;
+    env->env_episode_ended = 0;
     set_start_position(env);
 
-    // Initialize all conditioning weights even when no conditioning (lb=ub)
     for (int i = 0; i < env->active_agent_count; i++) {
         env->collision_weights[i] = ((float)rand() / RAND_MAX) * (env->collision_weight_ub - env->collision_weight_lb) +
                                     env->collision_weight_lb;
@@ -2257,8 +2640,16 @@ void c_reset(Drive *env) {
         env->entities[agent_idx].metrics_array[OFFROAD_IDX] = 0.0f;
         env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 0.0f;
         env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX] = 0.0f;
+        env->entities[agent_idx].metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;
+        env->entities[agent_idx].metrics_array[LANE_ANGLE_IDX] = 0.0f;
+        env->entities[agent_idx].current_lane_idx = -1;
+        env->entities[agent_idx].current_lane_geometry_idx = -1;
         env->entities[agent_idx].stopped = 0;
         env->entities[agent_idx].removed = 0;
+        if (env->removed != NULL)
+            env->removed[x] = 0;
+        env->entities[agent_idx].trial_count = 0;
+        env->entities[agent_idx].trial_start_timestep = env->init_steps;
 
         if (env->goal_behavior == GOAL_GENERATE_NEW) {
             env->entities[agent_idx].goal_position_x = env->entities[agent_idx].init_goal_x;
@@ -2274,17 +2665,30 @@ void c_reset(Drive *env) {
 }
 
 void respawn_agent(Drive *env, int agent_idx) {
-    env->entities[agent_idx].x = env->entities[agent_idx].traj_x[0];
-    env->entities[agent_idx].y = env->entities[agent_idx].traj_y[0];
-    env->entities[agent_idx].heading = env->entities[agent_idx].traj_heading[0];
+    // Use the same starting frame as c_reset's set_start_position (init_steps).
+    // Pre-fix this used traj[0], which broke trial-mode strict equivalence:
+    // trial 1 starts at traj[init_steps] (via set_start_position), trial 2..K
+    // would start at traj[0] via respawn_agent. Now both use init_steps.
+    int step = env->init_steps;
+    if (step >= env->entities[agent_idx].array_size)
+        step = env->entities[agent_idx].array_size - 1;
+    if (step < 0)
+        step = 0;
+    env->entities[agent_idx].x = env->entities[agent_idx].traj_x[step];
+    env->entities[agent_idx].y = env->entities[agent_idx].traj_y[step];
+    env->entities[agent_idx].heading = env->entities[agent_idx].traj_heading[step];
     env->entities[agent_idx].heading_x = cosf(env->entities[agent_idx].heading);
     env->entities[agent_idx].heading_y = sinf(env->entities[agent_idx].heading);
-    env->entities[agent_idx].vx = env->entities[agent_idx].traj_vx[0];
-    env->entities[agent_idx].vy = env->entities[agent_idx].traj_vy[0];
+    env->entities[agent_idx].vx = env->entities[agent_idx].traj_vx[step];
+    env->entities[agent_idx].vy = env->entities[agent_idx].traj_vy[step];
     env->entities[agent_idx].metrics_array[COLLISION_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[OFFROAD_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX] = 0.0f;
+    env->entities[agent_idx].metrics_array[LANE_DIST_IDX] = LANE_DISTANCE_NORMALIZATION;
+    env->entities[agent_idx].metrics_array[LANE_ANGLE_IDX] = 0.0f;
+    env->entities[agent_idx].current_lane_idx = -1;
+    env->entities[agent_idx].current_lane_geometry_idx = -1;
 
     env->entities[agent_idx].respawn_timestep = env->timestep;
     env->entities[agent_idx].collided_before_goal = 0;
@@ -2295,11 +2699,26 @@ void respawn_agent(Drive *env, int agent_idx) {
     env->entities[agent_idx].jerk_long = 0.0f;
     env->entities[agent_idx].jerk_lat = 0.0f;
     env->entities[agent_idx].steering_angle = 0.0f;
+    // Allow the next trial (GOAL_TRIAL) to register a fresh goal-reach event.
+    // Without this, the trial-end gate at the start of c_step's goal-reach
+    // block (`!current_goal_reached`) stays false forever after the first
+    // success, suppressing all subsequent trial-end goal_weight rewards.
+    env->entities[agent_idx].current_goal_reached = 0;
 }
 
 void c_step(Drive *env) {
     memset(env->rewards, 0, env->active_agent_count * sizeof(float));
     memset(env->terminals, 0, env->active_agent_count * sizeof(unsigned char));
+    if (env->trial_ended_this_step != NULL) {
+        memset(env->trial_ended_this_step, 0, env->active_agent_count * sizeof(unsigned char));
+    }
+    // C owns truncations under GOAL_TRIAL. Zero at top of step; write 1 at
+    // each trial boundary inside the GOAL_TRIAL branch. Under non-trial
+    // modes Python may still write truncations directly (e.g. k_eff
+    // curriculum), so leave the buffer alone there.
+    if (env->goal_behavior == GOAL_TRIAL && env->truncations != NULL) {
+        memset(env->truncations, 0, env->active_agent_count * sizeof(unsigned char));
+    }
 
     env->timestep++;
 
@@ -2313,7 +2732,8 @@ void c_step(Drive *env) {
         }
     }
 
-    if (env->timestep == env->scenario_length || (!originals_remaining && env->termination_mode == 1)) {
+    if (env->goal_behavior != GOAL_TRIAL &&
+        (env->timestep == env->scenario_length || (!originals_remaining && env->termination_mode == 1))) {
         add_log(env);
         c_reset(env);
         return;
@@ -2356,8 +2776,11 @@ void c_step(Drive *env) {
         int is_co_player = env->entities[agent_idx].is_co_player;
         int reached_goal = env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX];
 
-        // Handle collisions - SAME REWARD for both ego and co-players
-        if (collision_state > 0) {
+        // Handle collisions - SAME REWARD for both ego and co-players.
+        // Skip for agents already stopped (e.g. after reaching the goal in
+        // GOAL_STOP mode): the policy isn't driving anymore, so a rear-end
+        // shouldn't count against its collision/offroad metrics.
+        if (collision_state > 0 && !env->entities[agent_idx].stopped) {
             if (collision_state == VEHICLE_COLLISION) {
                 env->rewards[i] = env->collision_weights[i];
 
@@ -2401,6 +2824,16 @@ void c_step(Drive *env) {
         bool within_distance = distance_to_goal < env->goal_radius;
         bool within_speed = current_speed <= env->goal_speed;
 
+        // Goal-reach block. Invariant: `goals_reached_this_episode` is
+        // incremented at most ONCE per (agent, trial-or-scenario), gated by
+        // `current_goal_reached`. The flag is cleared by:
+        //   - respawn_agent (GOAL_TRIAL mid-episode respawn, GOAL_RESPAWN's
+        //     ghost-respawn)
+        //   - c_reset (GOAL_STOP / scenario boundary)
+        //   - add_log_one_agent (GOAL_TRIAL episode boundary)
+        // GOAL_RESPAWN's ghost-reward path (respawn_timestep != -1) does NOT
+        // increment: that reward fires every step the ghost is in radius, by
+        // design. Only the FIRST goal-reach pre-ghost counts as a "trial succeeded."
         if (within_distance && within_speed && !env->entities[agent_idx].current_goal_reached) {
             if (env->goal_behavior == GOAL_RESPAWN && env->entities[agent_idx].respawn_timestep != -1) {
                 float scaled_post_respawn_reward = env->reward_goal_post_respawn * env->goal_weights[i];
@@ -2424,18 +2857,40 @@ void c_step(Drive *env) {
                 sample_new_goal(env, agent_idx);
                 env->entities[agent_idx].current_goal_reached = 0;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
-            } else { // Zero out the velocity so that the agent stops at the goal
-                env->rewards[i] = env->goal_weights[i];
+            } else { // GOAL_STOP or GOAL_TRIAL
+                float goal_reward = env->goal_weights[i];
+                // GOAL_TRIAL cross-trial reward shaping: trial K success is worth
+                // (1 + α * K) * base, where α = reward_trial_index_multiplier.
+                // env_trial_count is the index of the current trial (0 for first).
+                if (env->goal_behavior == GOAL_TRIAL && env->reward_trial_index_multiplier > 0.0f) {
+                    goal_reward *= (1.0f + env->reward_trial_index_multiplier * (float)env->env_trial_count);
+                }
+                env->rewards[i] = goal_reward;
 
                 if (is_ego) {
-                    env->logs[i].episode_return = env->goal_weights[i];
+                    env->logs[i].episode_return = goal_reward;
                 } else if (is_co_player) {
-                    env->co_player_logs[i].episode_return = env->goal_weights[i];
+                    env->co_player_logs[i].episode_return = goal_reward;
                 }
 
-                env->entities[agent_idx].stopped = 1;
-                env->entities[agent_idx].vx = env->entities[agent_idx].vy = 0.0f;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
+                env->entities[agent_idx].current_goal_reached = 1;
+
+                if (env->goal_behavior == GOAL_TRIAL) {
+                    // B'': go off-map, wait for env trial-end (sync reset).
+                    env->entities[agent_idx].removed = 1;
+                    if (env->removed != NULL)
+                        env->removed[i] = 1;
+                    env->entities[agent_idx].x = INVALID_POSITION;
+                    env->entities[agent_idx].y = INVALID_POSITION;
+                    env->entities[agent_idx].vx = 0.0f;
+                    env->entities[agent_idx].vy = 0.0f;
+                } else {
+                    // GOAL_STOP: freeze in place, collidable.
+                    env->entities[agent_idx].stopped = 1;
+                    env->entities[agent_idx].vx = 0.0f;
+                    env->entities[agent_idx].vy = 0.0f;
+                }
             }
 
             env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 1.0f;
@@ -2444,6 +2899,29 @@ void c_step(Drive *env) {
                 env->logs[i].speed_at_goal = current_speed;
             } else if (is_co_player) {
                 env->co_player_logs[i].speed_at_goal = current_speed;
+            }
+        }
+
+        // Lane alignment reward (GIGAFLOW formula)
+        // Only apply if reward_lane_align > 0 (disabled by default)
+        if (env->reward_lane_align > 0.0f) {
+            float cos_theta = env->entities[agent_idx].metrics_array[LANE_ANGLE_IDX];
+            float theta_f = acosf(fminf(fmaxf(cos_theta, -1.0f), 1.0f)); // Get |θ_f| from cos
+
+            // GIGAFLOW Rl-align: min(cos,0) + vel_align*min(cos*v,0) + 0.0025*(1-|θ|/(π/2))
+            float against_lane_penalty = fminf(cos_theta, 0.0f); // Negative when >90° off
+            float vel_aligned_penalty = env->reward_vel_align * fminf(cos_theta * current_speed, 0.0f);
+            float alignment_bonus = 0.0025f * (1.0f - theta_f / (M_PI / 2.0f));
+
+            float lane_align_reward =
+                env->reward_lane_align * env->dt * (against_lane_penalty + vel_aligned_penalty + alignment_bonus);
+
+            env->rewards[i] += lane_align_reward;
+
+            if (is_ego) {
+                env->logs[i].episode_return += lane_align_reward;
+            } else if (is_co_player) {
+                env->co_player_logs[i].episode_return += lane_align_reward;
             }
         }
 
@@ -2473,6 +2951,87 @@ void c_step(Drive *env) {
                 env->entities[agent_idx].vx = env->entities[agent_idx].vy = 0.0f;
             }
         }
+    } else if (env->goal_behavior == GOAL_TRIAL && !env->env_episode_ended) {
+        // B'': env-level trial. All egos share one clock. Trial-end fires when
+        // ALL active egos are off-map (removed=1, set by goal-reach branch) OR
+        // env's per_trial_timeout has elapsed.
+        int total_egos = 0;
+        int reached_egos = 0;
+        for (int i = 0; i < env->active_agent_count; i++) {
+            Entity *e = &env->entities[env->active_agent_indices[i]];
+            if (!e->is_ego)
+                continue;
+            total_egos++;
+            if (e->removed)
+                reached_egos++;
+        }
+        bool all_egos_done = (total_egos > 0) && (reached_egos == total_egos);
+        bool env_timeout = (env->timestep - env->env_trial_start_timestep) >= env->per_trial_timeout;
+        if (all_egos_done || env_timeout) {
+            int k = env->env_trial_count; // index of the trial that just ended
+            int trial_len = env->timestep - env->env_trial_start_timestep;
+            env->env_trial_count++;
+            bool is_episode_end = (env->env_trial_count >= env->max_trials_per_episode);
+
+            for (int i = 0; i < env->active_agent_count; i++) {
+                int agent_idx = env->active_agent_indices[i];
+                Entity *e = &env->entities[agent_idx];
+
+                if (env->trial_ended_this_step != NULL)
+                    env->trial_ended_this_step[i] = 1;
+                if (env->truncations != NULL)
+                    env->truncations[i] = 1;
+
+                if (e->is_ego) {
+                    env->log.n_trials_completed += 1.0f;
+                    env->log.trial_total_length += (float)trial_len;
+                    if (e->current_goal_reached) {
+                        env->log.n_trials_goal_reached += 1.0f;
+                        if (!e->collided_this_trial) {
+                            // Clean trial success: per-trial score = 1.
+                            // Contributes 1/max_trials_per_episode to episode score.
+                            env->log.score += 1.0f / (float)env->max_trials_per_episode;
+                            if (k >= 0 && k < N_TRIAL_K_SLOTS)
+                                env->log.trial_k_goal_reached[k] += 1.0f;
+                        }
+                    } else {
+                        env->log.n_trials_timed_out += 1.0f;
+                    }
+                    e->collided_this_trial = 0; // reset for the next trial
+                }
+
+                if (is_episode_end) {
+                    // Option D: idle off-grid until c_reset.
+                    env->terminals[i] = 1;
+                    add_log_one_agent(env, i);
+                    e->removed = 1;
+                    if (env->removed != NULL)
+                        env->removed[i] = 1;
+                    e->x = INVALID_POSITION;
+                    e->y = INVALID_POSITION;
+                    e->vx = 0.0f;
+                    e->vy = 0.0f;
+                } else {
+                    // Trial-end (not episode): per-entity trial-mode flags.
+                    // Full position / velocity / metric reset happens via
+                    // set_start_position below.
+                    e->current_goal_reached = 0;
+                    e->removed = 0;
+                    if (env->removed != NULL)
+                        env->removed[i] = 0;
+                }
+            }
+            if (is_episode_end) {
+                env->env_trial_count = 0;
+                env->env_episode_ended = 1;
+            } else {
+                // Reset ALL entities (active + static) to the same initial
+                // state as c_reset's set_start_position so the next trial
+                // is bit-for-bit identical to trial 1.
+                set_start_position(env);
+            }
+            env->env_trial_start_timestep = env->timestep;
+        }
     }
 
     compute_observations(env);
@@ -2492,15 +3051,112 @@ struct Client {
     int car_assignments[MAX_AGENTS]; // To keep car model assignments consistent per vehicle
     Vector3 default_camera_position;
     Vector3 default_camera_target;
+    // Video recording state (for headless rendering)
+    int recorder_pipefd[2]; // Pipe to ffmpeg process
+    pid_t recorder_pid;     // PID of ffmpeg process
+    // Original map dimensions (for consistent rendering across scenarios)
+    float original_map_width;
+    float original_map_height;
 };
+
+// Stop the running ffmpeg recorder (if any) and wait for it to finish writing.
+static void stop_video_recorder(Client *client) {
+    if (client->recorder_pipefd[1] >= 0) {
+        close(client->recorder_pipefd[1]);
+        client->recorder_pipefd[1] = -1;
+    }
+    if (client->recorder_pipefd[0] >= 0) {
+        close(client->recorder_pipefd[0]);
+        client->recorder_pipefd[0] = -1;
+    }
+    if (client->recorder_pid > 0) {
+        int status;
+        waitpid(client->recorder_pid, &status, 0);
+        client->recorder_pid = 0;
+    }
+}
+
+// Start (or restart) the ffmpeg recorder. Stops any in-flight recorder first
+// so callers can switch output files mid-life without recreating raylib state.
+static void start_video_recorder(Client *client, const char *basename) {
+    stop_video_recorder(client);
+
+    if (pipe(client->recorder_pipefd) == -1) {
+        fprintf(stderr, "Failed to create pipe for video recording\n");
+        client->recorder_pipefd[0] = -1;
+        client->recorder_pipefd[1] = -1;
+        return;
+    }
+
+    char size_str[64];
+    snprintf(size_str, sizeof(size_str), "%dx%d", (int)client->width, (int)client->height);
+
+    char filename[320];
+    snprintf(filename, sizeof(filename), "%s.mp4", basename && basename[0] ? basename : "render");
+
+    client->recorder_pid = fork();
+    if (client->recorder_pid == -1) {
+        fprintf(stderr, "Failed to fork ffmpeg process\n");
+        close(client->recorder_pipefd[0]);
+        close(client->recorder_pipefd[1]);
+        client->recorder_pipefd[0] = -1;
+        client->recorder_pipefd[1] = -1;
+        client->recorder_pid = 0;
+        return;
+    }
+
+    if (client->recorder_pid == 0) {
+        // Child: run ffmpeg
+        close(client->recorder_pipefd[1]);
+        dup2(client->recorder_pipefd[0], STDIN_FILENO);
+        close(client->recorder_pipefd[0]);
+        for (int fd = 3; fd < 256; fd++) {
+            close(fd);
+        }
+        execlp("ffmpeg", "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", size_str, "-r", "30", "-i", "-",
+               "-c:v", "libx264", "-threads", "4", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-crf", "23",
+               "-loglevel", "error", filename, NULL);
+        fprintf(stderr, "Failed to exec ffmpeg\n");
+        _exit(1);
+    }
+
+    close(client->recorder_pipefd[0]); // parent: keep write end only
+    client->recorder_pipefd[0] = -1;
+    fprintf(stderr, "[drive] ffmpeg forked: pid=%d file=%s size=%s\n", client->recorder_pid, filename, size_str);
+}
 
 Client *make_client(Drive *env) {
     Client *client = (Client *)calloc(1, sizeof(Client));
-    client->width = 1280;
-    client->height = 704;
-    SetConfigFlags(FLAG_MSAA_4X_HINT);
-    InitWindow(client->width, client->height, "PufferDrive");
-    SetTargetFPS(30);
+    client->recorder_pid = 0;
+    client->recorder_pipefd[0] = -1;
+    client->recorder_pipefd[1] = -1;
+
+    if (env->render_mode == RENDER_WINDOW) {
+        // Interactive window mode
+        client->width = 1280;
+        client->height = 704;
+        SetConfigFlags(FLAG_MSAA_4X_HINT);
+        InitWindow(client->width, client->height, "PufferDrive");
+        SetTargetFPS(30);
+    } else if (env->render_mode == RENDER_HEADLESS) {
+        // Headless rendering mode - hidden window with ffmpeg pipe
+        float map_width = env->grid_map->bottom_right_x - env->grid_map->top_left_x;
+        float map_height = env->grid_map->top_left_y - env->grid_map->bottom_right_y;
+        float scale = 6.0f;
+        client->width = (int)roundf(map_width * scale / 2.0f) * 2;
+        client->height = (int)roundf(map_height * scale / 2.0f) * 2;
+        client->original_map_width = map_width;
+        client->original_map_height = map_height;
+
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        SetConfigFlags(FLAG_MSAA_4X_HINT);
+        InitWindow(client->width, client->height, "PufferDrive Headless");
+        SetTargetFPS(6000);
+
+        start_video_recorder(client, env->video_basename);
+    }
+
+    // Load textures and models (for both window and headless modes)
     client->puffers = LoadTexture("resources/puffers_128.png");
     client->cars[0] = LoadModel("resources/drive/RedCar.glb");
     client->cars[1] = LoadModel("resources/drive/WhiteCar.glb");
@@ -2515,23 +3171,14 @@ Client *make_client(Drive *env) {
     for (int i = 0; i < MAX_AGENTS; i++) {
         client->car_assignments[i] = (rand() % 4) + 1;
     }
-    // Get initial target position from first active agent
-    Vector3 target_pos = {
-        0,
-        0, // Y is up
-        1  // Z is depth
-    };
 
-    // Set up camera to look at target from above and behind
-    client->default_camera_position = (Vector3){
-        0,      // Same X as target
-        120.0f, // 20 units above target
-        175.0f  // 20 units behind target
-    };
+    // Set up camera defaults
+    Vector3 target_pos = {0, 0, 1};
+    client->default_camera_position = (Vector3){0, 120.0f, 175.0f};
     client->default_camera_target = target_pos;
     client->camera.position = client->default_camera_position;
     client->camera.target = client->default_camera_target;
-    client->camera.up = (Vector3){0.0f, -1.0f, 0.0f}; // Y is up
+    client->camera.up = (Vector3){0.0f, -1.0f, 0.0f};
     client->camera.fovy = 45.0f;
     client->camera.projection = CAMERA_PERSPECTIVE;
     client->camera_zoom = 1.0f;
@@ -2623,7 +3270,9 @@ void draw_agent_obs(Drive *env, int agent_index, int mode, int obs_only, int las
         return;
     }
 
-    int ego_dim = (env->dynamics_model == JERK) ? 10 : 7;
+    int base_ego_dim = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
+    int conditioning_dims = (env->use_rc ? 3 : 0) + (env->use_ec ? 1 : 0) + (env->use_dc ? 1 : 0);
+    int ego_dim = base_ego_dim + conditioning_dims;
     int max_obs = ego_dim + 7 * (MAX_AGENTS - 1) + 7 * MAX_ROAD_SEGMENT_OBSERVATIONS;
     float (*observations)[max_obs] = (float (*)[max_obs])env->observations;
     float *agent_obs = &observations[agent_index][0];
@@ -2948,8 +3597,16 @@ void draw_scene(Drive *env, Client *client, int mode, int obs_only, int lasers, 
                 Color car_color = GRAY; // default for static
                 if (is_expert)
                     car_color = GOLD; // expert replay
-                if (is_active_agent)
-                    car_color = BLUE; // policy-controlled
+                if (is_active_agent) {
+                    // Distinguish ego (magenta) from co-player (blue) so renders
+                    // make it obvious which policy controls which car. Without
+                    // this both look identical and behavioral debugging is
+                    // ambiguous.
+                    if (env->entities[i].is_ego)
+                        car_color = MAGENTA;
+                    else
+                        car_color = BLUE;
+                }
                 if (is_active_agent && env->entities[i].collision_state > 0)
                     car_color = RED;
                 rlSetLineWidth(3.0f);
@@ -2996,10 +3653,6 @@ void draw_scene(Drive *env, Client *client, int mode, int obs_only, int lasers, 
                 Vector3 model_size = {bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y,
                                       bounds.max.z - bounds.min.z};
                 Vector3 scale = {size.x / model_size.x, size.y / model_size.y, size.z / model_size.z};
-                // if((obs_only ||  IsKeyDown(KEY_LEFT_CONTROL)) && agent_index != env->human_agent_idx){
-                //     rlPopMatrix();
-                //     continue;
-                // }
                 if (env->entities[i].type == CYCLIST) {
                     scale = (Vector3){0.01, 0.01, 0.01};
                     car_model = client->cyclist;
@@ -3121,6 +3774,163 @@ void draw_scene(Drive *env, Client *client, int mode, int obs_only, int lasers, 
     }
 }
 
+// Headless rendering helper: write frame to ffmpeg pipe
+static void write_frame_to_pipe(Client *client) {
+    if (client->recorder_pipefd[1] < 0)
+        return;
+
+    int w = (int)client->width;
+    int h = (int)client->height;
+    unsigned char *screen_data = rlReadScreenPixels(w, h);
+    if (screen_data) {
+        write(client->recorder_pipefd[1], screen_data, w * h * 4);
+        RL_FREE(screen_data);
+    }
+}
+
+// Render with view_mode and draw_traces parameters (for Python-based rendering)
+void c_render_with_mode(Drive *env, int view_mode, int draw_traces, int current_scenario, int k_scenarios) {
+    if (env->client == NULL) {
+        env->client = make_client(env);
+    }
+    if (env->client == NULL)
+        return; // make_client may fail in headless mode
+
+    Client *client = env->client;
+    Color road = (Color){35, 35, 37, 255};
+
+    if (env->render_mode == RENDER_HEADLESS) {
+        // Headless rendering mode.
+        // Use the CURRENT env's grid bounds for camera fovy. The original code
+        // used client->original_map_height (captured once at make_client) for
+        // "consistent resolution across scenarios", but with map_rand_per_scenario
+        // the new map can have entirely different bounds. Locking to scenario 0's
+        // dims meant new maps got cropped or off-centered, even though the env
+        // state was correct (ego scores stay ~0.99 in s_1; the agents are fine,
+        // just rendered outside the camera view). Read live so the camera always
+        // frames the actual current map.
+        float live_map_height = env->grid_map->top_left_y - env->grid_map->bottom_right_y;
+        float render_map_height = live_map_height > 0.0f ? live_map_height : client->original_map_height;
+
+        Camera3D camera = {0};
+
+        if (view_mode == VIEW_MODE_SIM_STATE) {
+            // Top-down orthographic view of full simulation state
+            // Using original_map_height keeps pixels-per-world-unit consistent
+            camera.position = (Vector3){0.0f, 0.0f, 400.0f};
+            camera.target = (Vector3){0.0f, 0.0f, 0.0f};
+            camera.up = (Vector3){0.0f, -1.0f, 0.0f};
+            camera.projection = CAMERA_ORTHOGRAPHIC;
+            camera.fovy = render_map_height;
+
+            BeginDrawing();
+            ClearBackground(road);
+            BeginMode3D(camera);
+
+            if (draw_traces) {
+                // Draw trajectory traces for all active agents
+                for (int i = 0; i < env->active_agent_count; i++) {
+                    int idx = env->active_agent_indices[i];
+                    int t_end = env->scenario_length;
+                    if (t_end > env->entities[idx].array_size) {
+                        t_end = env->entities[idx].array_size;
+                    }
+                    for (int t = env->init_steps; t < t_end; t++) {
+                        if (env->entities[idx].traj_valid[t]) {
+                            DrawPoint3D((Vector3){env->entities[idx].traj_x[t], env->entities[idx].traj_y[t], 0.5f},
+                                        LIGHTBLUE);
+                        }
+                    }
+                }
+            }
+            draw_scene(env, client, 1, 0, 0, 0);
+            EndMode3D();
+
+        } else if (view_mode == VIEW_MODE_BEV_AGENT_OBS) {
+            // Bird's eye view centered on human-controlled agent
+            int agent_idx = env->active_agent_indices[env->human_agent_idx];
+            Entity *agent = &env->entities[agent_idx];
+
+            camera.position = (Vector3){agent->x, agent->y, 400.0f};
+            camera.target = (Vector3){agent->x, agent->y, 0.0f};
+            camera.up = (Vector3){0.0f, -1.0f, 0.0f};
+            camera.projection = CAMERA_ORTHOGRAPHIC;
+            camera.fovy = env->grid_map->vision_range * GRID_CELL_SIZE * 2.0f;
+
+            BeginDrawing();
+            ClearBackground(road);
+            BeginMode3D(camera);
+            draw_scene(env, client, 1, 1, 0, 0);
+            EndMode3D();
+
+        } else {
+            // Agent perspective (3rd person chase camera)
+            int agent_idx = env->active_agent_indices[env->human_agent_idx];
+            Entity *agent = &env->entities[agent_idx];
+
+            camera.position =
+                (Vector3){agent->x - (25.0f * cosf(agent->heading)), agent->y - (25.0f * sinf(agent->heading)), 15.0f};
+            camera.target =
+                (Vector3){agent->x + 40.0f * cosf(agent->heading), agent->y + 40.0f * sinf(agent->heading), 1.0f};
+            camera.up = (Vector3){0.0f, 0.0f, 1.0f};
+            camera.fovy = 60.0f;
+            camera.projection = CAMERA_PERSPECTIVE;
+
+            BeginDrawing();
+            ClearBackground(road);
+            BeginMode3D(camera);
+            draw_scene(env, client, 0, 0, 0, 1);
+            EndMode3D();
+        }
+
+        // Draw scenario/trial counter overlay. Under gb=3 B'' we read the
+        // env-level trial counter (per-entity trial_count is no longer
+        // updated). Clamp to max so the last-tick "just incremented" value
+        // doesn't show as K+1.
+        if (env->goal_behavior == GOAL_TRIAL && env->max_trials_per_episode > 1) {
+            int trial_n = env->env_trial_count + 1;
+            if (trial_n > env->max_trials_per_episode)
+                trial_n = env->max_trials_per_episode;
+            char trial_text[64];
+            snprintf(trial_text, sizeof(trial_text), "Trial %d / %d", trial_n, env->max_trials_per_episode);
+            DrawText(trial_text, 40, 40, 120, WHITE);
+        } else if (k_scenarios > 1) {
+            char scenario_text[64];
+            snprintf(scenario_text, sizeof(scenario_text), "Scenario %d / %d", current_scenario + 1, k_scenarios);
+            DrawText(scenario_text, 40, 40, 120, WHITE);
+        }
+
+        // Frame counter on the right side: current_tick / episode_budget.
+        // Under GOAL_TRIAL the budget is max_trials * per_trial_timeout; under
+        // standard k-scenario modes it's k * scenario_length.
+        {
+            int budget = (env->goal_behavior == GOAL_TRIAL && env->max_trials_per_episode > 1)
+                             ? env->max_trials_per_episode * env->per_trial_timeout
+                             : (k_scenarios > 1 ? k_scenarios * env->scenario_length : env->scenario_length);
+            char frame_text[64];
+            snprintf(frame_text, sizeof(frame_text), "%d / %d", env->timestep, budget);
+            int frame_text_w = MeasureText(frame_text, 120);
+            DrawText(frame_text, (int)client->width - frame_text_w - 40, 40, 120, WHITE);
+        }
+
+        EndDrawing();
+
+        // Write frame to ffmpeg pipe
+        write_frame_to_pipe(client);
+
+    } else {
+        // Interactive window mode - use default rendering
+        BeginDrawing();
+        ClearBackground(road);
+        BeginMode3D(client->camera);
+        handle_camera_controls(env->client);
+        draw_scene(env, client, 0, 0, 0, 0);
+        EndMode3D();
+        EndDrawing();
+    }
+}
+
+// Original c_render for backward compatibility (interactive window mode)
 void c_render(Drive *env) {
     if (env->client == NULL) {
         env->client = make_client(env);
@@ -3132,6 +3942,7 @@ void c_render(Drive *env) {
     BeginMode3D(client->camera);
     handle_camera_controls(env->client);
     draw_scene(env, client, 0, 0, 0, 0);
+    EndMode3D();
 
     if (IsKeyPressed(KEY_TAB)) {
         env->human_agent_idx = (env->human_agent_idx + 1) % env->active_agent_count;
@@ -3206,7 +4017,24 @@ void c_render(Drive *env) {
     EndDrawing();
 }
 
+// Set the full mp4 basename (without ".mp4") for headless rendering.
+// If a recorder is already running for this env, it's stopped and a new one
+// is started so multiple basenames can be used in a single env lifetime.
+void set_video_suffix(Drive *env, const char *basename) {
+    if (basename) {
+        strncpy(env->video_basename, basename, sizeof(env->video_basename) - 1);
+        env->video_basename[sizeof(env->video_basename) - 1] = '\0';
+    } else {
+        env->video_basename[0] = '\0';
+    }
+
+    if (env->client != NULL && env->render_mode == RENDER_HEADLESS) {
+        start_video_recorder(env->client, env->video_basename);
+    }
+}
+
 void close_client(Client *client) {
+    stop_video_recorder(client);
     for (int i = 0; i < 6; i++) {
         UnloadModel(client->cars[i]);
     }

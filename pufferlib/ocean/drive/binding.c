@@ -1,6 +1,8 @@
 #define Env Drive
 #define MY_SHARED
 #define MY_PUT
+
+#include <Python.h>
 #include "binding.h"
 
 static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
@@ -63,6 +65,39 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
         return 1;
     }
     env->terminals = PyArray_DATA(terminals);
+    // env->truncations is wired from positional args by env_binding.h's
+    // env_init handler (zero-copy view of the PufferLib SHM buffer).
+
+    // trial_ended_this_step is OPTIONAL — older callers may not pass it.
+    // Defaults to NULL; c_step's memset is guarded.
+    PyObject *trial = PyDict_GetItemString(kwargs, "trial_ended_this_step");
+    if (trial != NULL) {
+        if (!PyObject_TypeCheck(trial, &PyArray_Type)) {
+            PyErr_SetString(PyExc_TypeError, "trial_ended_this_step must be a NumPy array");
+            return 1;
+        }
+        PyArrayObject *trial_arr = (PyArrayObject *)trial;
+        if (!PyArray_ISCONTIGUOUS(trial_arr) || PyArray_NDIM(trial_arr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "trial_ended_this_step must be 1D contiguous");
+            return 1;
+        }
+        env->trial_ended_this_step = PyArray_DATA(trial_arr);
+    }
+    // removed (per-agent off-map flag, B''). Same pattern as
+    // trial_ended_this_step: C is the only writer; Python reads.
+    PyObject *removed_obj = PyDict_GetItemString(kwargs, "removed");
+    if (removed_obj != NULL) {
+        if (!PyObject_TypeCheck(removed_obj, &PyArray_Type)) {
+            PyErr_SetString(PyExc_TypeError, "removed must be a NumPy array");
+            return 1;
+        }
+        PyArrayObject *removed_arr = (PyArrayObject *)removed_obj;
+        if (!PyArray_ISCONTIGUOUS(removed_arr) || PyArray_NDIM(removed_arr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "removed must be 1D contiguous");
+            return 1;
+        }
+        env->removed = PyArray_DATA(removed_arr);
+    }
     return 0;
 }
 
@@ -100,7 +135,22 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->reward_offroad_collision = conf.reward_offroad_collision;
     env->reward_goal = conf.reward_goal;
     env->reward_goal_post_respawn = conf.reward_goal_post_respawn;
+    env->reward_lane_align = (float)unpack(kwargs, "reward_lane_align");
+    env->reward_vel_align = (float)unpack(kwargs, "reward_vel_align");
+    env->reward_trial_index_multiplier = (float)unpack(kwargs, "reward_trial_index_multiplier");
     env->scenario_length = conf.scenario_length;
+
+    // GOAL_TRIAL config (only used when goal_behavior == GOAL_TRIAL).
+    env->max_trials_per_episode = 2;
+    env->per_trial_timeout = conf.scenario_length;
+    if (kwargs && PyDict_GetItemString(kwargs, "max_trials_per_episode")) {
+        env->max_trials_per_episode = (int)unpack(kwargs, "max_trials_per_episode");
+    }
+    if (kwargs && PyDict_GetItemString(kwargs, "per_trial_timeout")) {
+        int v = (int)unpack(kwargs, "per_trial_timeout");
+        if (v > 0)
+            env->per_trial_timeout = v; // 0 means "use default" (scenario_length)
+    }
 
     env->termination_mode = conf.termination_mode;
     env->collision_behavior = conf.collision_behavior;
@@ -174,6 +224,11 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
 
     env->init_mode = (int)unpack(kwargs, "init_mode");
     env->control_mode = (int)unpack(kwargs, "control_mode");
+    // Render mode: 0=RENDER_OFF, 1=RENDER_HEADLESS, 2=RENDER_WINDOW
+    env->render_mode = RENDER_OFF; // Default to off
+    if (kwargs && PyDict_GetItemString(kwargs, "render_mode")) {
+        env->render_mode = (int)unpack(kwargs, "render_mode");
+    }
     env->goal_behavior = (int)unpack(kwargs, "goal_behavior");
     env->goal_target_distance = (float)unpack(kwargs, "goal_target_distance");
     env->goal_radius = (float)unpack(kwargs, "goal_radius");
@@ -188,6 +243,37 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->map_name = strdup(map_file);
     env->init_steps = init_steps;
     env->timestep = init_steps;
+
+    // trial_ended_this_step is OPTIONAL. NULL is safe (c_step's memset is guarded).
+    env->trial_ended_this_step = NULL;
+    PyObject *trial = PyDict_GetItemString(kwargs, "trial_ended_this_step");
+    if (trial != NULL) {
+        if (!PyObject_TypeCheck(trial, &PyArray_Type)) {
+            PyErr_SetString(PyExc_TypeError, "trial_ended_this_step must be a NumPy array");
+            return -1;
+        }
+        PyArrayObject *trial_arr = (PyArrayObject *)trial;
+        if (!PyArray_ISCONTIGUOUS(trial_arr) || PyArray_NDIM(trial_arr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "trial_ended_this_step must be 1D contiguous");
+            return -1;
+        }
+        env->trial_ended_this_step = PyArray_DATA(trial_arr);
+    }
+    env->removed = NULL;
+    PyObject *removed_obj = PyDict_GetItemString(kwargs, "removed");
+    if (removed_obj != NULL) {
+        if (!PyObject_TypeCheck(removed_obj, &PyArray_Type)) {
+            PyErr_SetString(PyExc_TypeError, "removed must be a NumPy array");
+            return -1;
+        }
+        PyArrayObject *removed_arr = (PyArrayObject *)removed_obj;
+        if (!PyArray_ISCONTIGUOUS(removed_arr) || PyArray_NDIM(removed_arr) != 1) {
+            PyErr_SetString(PyExc_ValueError, "removed must be 1D contiguous");
+            return -1;
+        }
+        env->removed = PyArray_DATA(removed_arr);
+    }
+
     init(env);
     return 0;
 }
@@ -208,5 +294,27 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "goals_reached_this_episode", log->goals_reached_this_episode);
     assign_to_dict(dict, "speed_at_goal", log->speed_at_goal);
     // assign_to_dict(dict, "avg_displacement_error", log->avg_displacement_error);
+
+    // GOAL_TRIAL metrics (zero under other goal_behavior).
+    assign_to_dict(dict, "n_trials_completed", log->n_trials_completed);
+    assign_to_dict(dict, "n_trials_goal_reached", log->n_trials_goal_reached);
+    assign_to_dict(dict, "n_trials_timed_out", log->n_trials_timed_out);
+    if (log->n_trials_completed > 0.0f) {
+        assign_to_dict(dict, "trial_mean_length", log->trial_total_length / log->n_trials_completed);
+        assign_to_dict(dict, "trial_goal_reach_rate", log->n_trials_goal_reached / log->n_trials_completed);
+    } else {
+        assign_to_dict(dict, "trial_mean_length", 0.0f);
+        assign_to_dict(dict, "trial_goal_reach_rate", 0.0f);
+    }
+    // Per-trial-index success rate (GOAL_TRIAL only). n_trials_completed is
+    // the gate: it's only non-zero under GOAL_TRIAL, so gb=0/1/2 won't leak
+    // these keys into wandb / eval output.
+    if (log->n_trials_completed > 0.0f) {
+        char key[32];
+        for (int k = 0; k < N_TRIAL_K_SLOTS; k++) {
+            snprintf(key, sizeof(key), "trial_%d_score", k);
+            assign_to_dict(dict, key, log->trial_k_goal_reached[k]);
+        }
+    }
     return 0;
 }

@@ -128,7 +128,7 @@ static PyObject *env_init(PyObject *self, PyObject *args, PyObject *kwargs) {
         PyErr_SetString(PyExc_ValueError, "Truncations must be 1D");
         return NULL;
     }
-    // env->truncations = PyArray_DATA(truncations);
+    env->truncations = PyArray_DATA(truncations);
 
     PyObject *seed_arg = PyTuple_GetItem(args, 5);
     if (!PyObject_TypeCheck(seed_arg, &PyLong_Type)) {
@@ -519,8 +519,9 @@ static PyObject *vec_step(PyObject *self, PyObject *arg) {
 
 static PyObject *vec_render(PyObject *self, PyObject *args) {
     int num_args = PyTuple_Size(args);
-    if (num_args != 2) {
-        PyErr_SetString(PyExc_TypeError, "vec_render requires 2 arguments");
+    if (num_args != 6) {
+        PyErr_SetString(PyExc_TypeError, "vec_render requires 6 arguments: (vec_env, view_mode, draw_traces, env_id, "
+                                         "current_scenario, k_scenarios)");
         return NULL;
     }
 
@@ -530,14 +531,48 @@ static PyObject *vec_render(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    PyObject *env_id_arg = PyTuple_GetItem(args, 1);
-    if (!PyObject_TypeCheck(env_id_arg, &PyLong_Type)) {
-        PyErr_SetString(PyExc_TypeError, "env_id must be an integer");
+    int view_mode = (int)PyLong_AsLong(PyTuple_GetItem(args, 1));
+    int draw_traces = PyObject_IsTrue(PyTuple_GetItem(args, 2));
+    int env_id = (int)PyLong_AsLong(PyTuple_GetItem(args, 3));
+    int current_scenario = (int)PyLong_AsLong(PyTuple_GetItem(args, 4));
+    int k_scenarios = (int)PyLong_AsLong(PyTuple_GetItem(args, 5));
+
+    if (env_id < 0 || env_id >= vec->num_envs) {
+        PyErr_SetString(PyExc_ValueError, "env_id out of range");
         return NULL;
     }
-    int env_id = PyLong_AsLong(env_id_arg);
 
-    c_render(vec->envs[env_id]);
+    c_render_with_mode(vec->envs[env_id], view_mode, draw_traces, current_scenario, k_scenarios);
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_set_video_suffix(PyObject *self, PyObject *args) {
+    int num_args = PyTuple_Size(args);
+    if (num_args != 3) {
+        PyErr_SetString(PyExc_TypeError, "vec_set_video_suffix requires 3 arguments: (vec_env, env_id, suffix)");
+        return NULL;
+    }
+
+    VecEnv *vec = (VecEnv *)PyLong_AsVoidPtr(PyTuple_GetItem(args, 0));
+    if (!vec) {
+        PyErr_SetString(PyExc_ValueError, "Invalid vec_env handle");
+        return NULL;
+    }
+
+    int env_id = (int)PyLong_AsLong(PyTuple_GetItem(args, 1));
+    if (env_id < 0 || env_id >= vec->num_envs) {
+        PyErr_SetString(PyExc_ValueError, "env_id out of range");
+        return NULL;
+    }
+
+    PyObject *suffix_obj = PyTuple_GetItem(args, 2);
+    const char *suffix = PyUnicode_AsUTF8(suffix_obj);
+    if (!suffix) {
+        PyErr_SetString(PyExc_TypeError, "suffix must be a string");
+        return NULL;
+    }
+
+    set_video_suffix(vec->envs[env_id], suffix);
     Py_RETURN_NONE;
 }
 
@@ -616,12 +651,18 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     float n = aggregate.n;
     // Average across EGO agents only
     if (n > 0) {
+        // Compute completion_rate from raw totals BEFORE averaging
+        float total_goals_reached = aggregate.goals_reached_this_episode;
+        float total_goals_sampled = aggregate.goals_sampled_this_episode;
+        if (total_goals_sampled > 0) {
+            aggregate.completion_rate = total_goals_reached / total_goals_sampled;
+        } else {
+            aggregate.completion_rate = 0.0f;
+        }
+
         for (int i = 0; i < num_keys; i++) {
             ((float *)&aggregate)[i] /= n;
         }
-
-        // Compute completion_rate from aggregated counts
-        aggregate.completion_rate = aggregate.goals_reached_this_episode / aggregate.goals_sampled_this_episode;
     }
 
     // User populates dict
@@ -632,14 +673,19 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     if (has_co_players && co_player_aggregate.n > 0.0f) {
         float co_player_n = co_player_aggregate.n;
 
+        // Compute co-player completion rate from raw totals BEFORE averaging
+        float co_total_goals_reached = co_player_aggregate.goals_reached_this_episode;
+        float co_total_goals_sampled = co_player_aggregate.goals_sampled_this_episode;
+        if (co_total_goals_sampled > 0) {
+            co_player_aggregate.completion_rate = co_total_goals_reached / co_total_goals_sampled;
+        } else {
+            co_player_aggregate.completion_rate = 0.0f;
+        }
+
         // Average co-player metrics across CO-PLAYER agents only
         for (int i = 0; i < num_keys; i++) {
             ((float *)&co_player_aggregate)[i] /= co_player_n;
         }
-
-        // Compute co-player completion rate
-        co_player_aggregate.completion_rate =
-            co_player_aggregate.goals_reached_this_episode / co_player_aggregate.goals_sampled_this_episode;
 
         // Add co-player metrics to dict with co_player_ prefix
         assign_to_dict(dict, "ego_co_player_ratio", n / co_player_n);
@@ -673,6 +719,27 @@ static PyObject *vec_close(PyObject *self, PyObject *args) {
     }
     free(vec->envs);
     free(vec);
+    Py_RETURN_NONE;
+}
+
+// Render-mode helpers: stash env[0]->client into a global before vec_close so
+// raylib + ffmpeg pipe survive the map swap, then re-attach to env[0] of the
+// freshly built vec. Single-slot global: render envs are single-env.
+static PyObject *vec_donate_client(PyObject *self, PyObject *args) {
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec || vec->num_envs == 0) {
+        Py_RETURN_NONE;
+    }
+    c_donate_client(vec->envs[0]);
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_adopt_client(PyObject *self, PyObject *args) {
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec || vec->num_envs == 0) {
+        Py_RETURN_NONE;
+    }
+    c_adopt_client(vec->envs[0]);
     Py_RETURN_NONE;
 }
 
@@ -1008,7 +1075,12 @@ static PyMethodDef methods[] = {
     {"vec_step", vec_step, METH_VARARGS, "Step the vector of environments"},
     {"vec_log", vec_log, METH_VARARGS, "Log the vector of environments"},
     {"vec_render", vec_render, METH_VARARGS, "Render the vector of environments"},
+    {"vec_set_video_suffix", vec_set_video_suffix, METH_VARARGS, "Set video filename suffix for headless rendering"},
     {"vec_close", vec_close, METH_VARARGS, "Close the vector of environments"},
+    {"vec_donate_client", vec_donate_client, METH_VARARGS,
+     "Stash env[0]->client into a global so it survives a subsequent vec_close (render only)"},
+    {"vec_adopt_client", vec_adopt_client, METH_VARARGS,
+     "Re-attach the previously donated client to env[0] of the new vec (render only)"},
     {"shared", (PyCFunction)my_shared, METH_VARARGS | METH_KEYWORDS, "Shared state"},
     {"get_global_agent_state", get_global_agent_state, METH_VARARGS, "Get global agent state"},
     {"vec_get_global_agent_state", vec_get_global_agent_state, METH_VARARGS, "Get agent state from vectorized env"},
@@ -1043,6 +1115,16 @@ PyMODINIT_FUNC PyInit_binding(void) {
     PyModule_AddIntConstant(m, "PARTNER_FEATURES", PARTNER_FEATURES);
     PyModule_AddIntConstant(m, "EGO_FEATURES_CLASSIC", EGO_FEATURES_CLASSIC);
     PyModule_AddIntConstant(m, "EGO_FEATURES_JERK", EGO_FEATURES_JERK);
+
+    // Render mode constants
+    PyModule_AddIntConstant(m, "RENDER_OFF", RENDER_OFF);
+    PyModule_AddIntConstant(m, "RENDER_HEADLESS", RENDER_HEADLESS);
+    PyModule_AddIntConstant(m, "RENDER_WINDOW", RENDER_WINDOW);
+
+    // View mode constants
+    PyModule_AddIntConstant(m, "VIEW_MODE_SIM_STATE", VIEW_MODE_SIM_STATE);
+    PyModule_AddIntConstant(m, "VIEW_MODE_BEV_AGENT_OBS", VIEW_MODE_BEV_AGENT_OBS);
+    PyModule_AddIntConstant(m, "VIEW_MODE_AGENT_PERSP", VIEW_MODE_AGENT_PERSP);
 
     return m;
 }
