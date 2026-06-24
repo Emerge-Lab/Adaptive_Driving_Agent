@@ -104,6 +104,13 @@ class Serial:
         self.initialized = False
         self.flag = RESET
 
+        # Handle population play mode (ego agents only controlled by policy)
+        self.population_play = getattr(self.driver_env, "population_play", False)
+        if self.population_play:
+            ego_agents_per_batch = self.driver_env.num_ego_agents * num_envs
+            self.num_ego_agents = ego_agents_per_batch
+            self.ego_action_space = pufferlib.spaces.joint_space(self.single_action_space, ego_agents_per_batch)
+
     def _avg_infos(self):
         infos = {}
         for e in self.infos:
@@ -334,6 +341,9 @@ class Multiprocessing:
         self.agents_per_batch = driver_env.num_agents * batch_size
 
         agents_per_worker = driver_env.num_agents * envs_per_worker
+        # Persisted on the vecenv so PuffeRL can map per-recv `env_id` back
+        # to a worker index for centralized co-player inference.
+        self.agents_per_worker = agents_per_worker
         obs_space = driver_env.single_observation_space
         obs_shape = obs_space.shape
         self.obs_shape = obs_shape
@@ -397,6 +407,49 @@ class Multiprocessing:
 
         self.atn_batch_shape = (self.workers_per_batch, agents_per_worker, *atn_shape)
         self.actions = np.ndarray((*shape, *atn_shape), dtype=atn_dtype, buffer=self.shm["actions"])
+
+        # ---- Centralized GPU co-player conditioning SHM ----
+        # When `external_co_player_actions` is set in env_kwargs AND the
+        # co-player has non-zero conditioning dims, we allocate a per-worker
+        # buffer so the env (which still samples conditioning at scenario
+        # boundaries) can deposit values for the main process to read before
+        # each forward pass. Sized to the worst-case `co_players_per_worker`.
+        env_k0 = env_kwargs[0] if env_kwargs else {}
+        external_coplayer_flag = env_k0.get("external_co_player_actions", False) and env_k0.get(
+            "co_player_enabled", False
+        )
+        co_player_conditioning_dim = 0
+        if external_coplayer_flag:
+            cond = env_k0.get("co_player_policy", {}).get("conditioning", {}) or {}
+            ctype = cond.get("type", "none")
+            co_player_conditioning_dim = (
+                (3 if ctype in ("reward", "all") else 0)
+                + (1 if ctype in ("entropy", "all") else 0)
+                + (1 if ctype in ("discount", "all") else 0)
+            )
+            if self.population_play and co_player_conditioning_dim > 0:
+                co_players_per_worker = agents_per_worker - ego_agents_per_worker
+                self.shm["co_player_conditioning"] = RawArray(
+                    "f", num_workers * co_players_per_worker * co_player_conditioning_dim
+                )
+                self.co_player_conditioning = np.ndarray(
+                    (num_workers, co_players_per_worker, co_player_conditioning_dim),
+                    dtype=np.float32,
+                    buffer=self.shm["co_player_conditioning"],
+                )
+                # CRITICAL: pufferlib.vector.make() builds env_kwargs as
+                # `[env_kwargs] * num_envs`, which is a list of N references
+                # to the SAME dict. Mutating env_kwargs[i] modifies all
+                # entries. We have to replace each slot with a per-env
+                # copy before adding worker_idx / SHM-slice entries.
+                for i in range(len(env_kwargs)):
+                    w_idx = i // envs_per_worker
+                    env_kwargs[i] = {
+                        **env_kwargs[i],
+                        "worker_idx": w_idx,
+                        "co_player_conditioning_shm": self.co_player_conditioning[w_idx],
+                    }
+        self._co_player_conditioning_dim = co_player_conditioning_dim
 
         self.buf = dict(
             observations=np.ndarray((*shape, *obs_shape), dtype=obs_dtype, buffer=self.shm["observations"]),
@@ -831,6 +884,13 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
 
     # TODO: First step action space check
     env_k = env_kwargs[0]
+    # When external_co_player_actions is set, the *main* process owns the
+    # co-player policy on GPU and writes actions into the shared-memory
+    # action buffer at co_player slots before vec_step. Workers don't load
+    # the model and don't need single-thread CPU mode. We still build the
+    # policy here (to ship it to main via vecenv.co_player_policy_func),
+    # but on GPU and not stuffed into env_kwargs for workers.
+    external_coplayer = env_k.get("external_co_player_actions", False) and env_k.get("co_player_enabled", False)
     if env_k.get("co_player_enabled", False):
         import torch
         import os
@@ -838,19 +898,18 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         import gymnasium
         from pufferlib.ocean.torch import Drive
         import pufferlib.models
+        from pufferlib.ocean.drive import binding
 
-        dynamics_model = env_k.get("dynamics_model", "jerk")
-        # Observation space calculation
-        if dynamics_model == "classic":
-            ego_features = 7
-        elif dynamics_model == "jerk":
-            ego_features = 10
+        dynamics_model = env_k.get("dynamics_model", "classic")
+        action_type = env_k.get("action_type", "discrete")
 
         co_player_policy = env_k["co_player_policy"]
 
         input_size = co_player_policy.get("input_size", 256)
         hidden_size = co_player_policy.get("hidden_size", 256)
         co_player_rnn = co_player_policy.get("rnn", None)
+        co_player_architecture = co_player_policy.get("architecture", "Recurrent")
+        co_player_transformer = co_player_policy.get("transformer", {})
 
         # Get conditioning type from env_k
         co_player_conditioning = co_player_policy.get("conditioning")
@@ -858,27 +917,79 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         reward_conditioned = condition_type in ("reward", "all")
         entropy_conditioned = condition_type in ("entropy", "all")
         discount_conditioned = condition_type in ("discount", "all")
-        # Calculate conditioning dimensions
+
+        if action_type == "discrete":
+            if dynamics_model == "classic":
+                # Joint action space (assume dependence)
+                single_action_space = gymnasium.spaces.MultiDiscrete([7 * 13])
+                # Multi discrete (assume independence)
+                # self.single_action_space = gymnasium.spaces.MultiDiscrete([7, 13])
+            elif dynamics_model == "jerk":
+                # Joint action space (assume dependence) - 4 longitudinal × 3 lateral = 12
+                single_action_space = gymnasium.spaces.MultiDiscrete([4 * 3])
+            else:
+                raise ValueError(f"dynamics_model must be 'classic' or 'jerk'. Got: {dynamics_model}")
+        elif action_type == "continuous":
+            single_action_space = gymnasium.spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        else:
+            raise ValueError(f"action_space must be 'discrete' or 'continuous'. Got: {action_type}")
+
+        # # Observation space calculation
+        ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(dynamics_model)
+
         conditioning_dims = (
             (3 if reward_conditioned else 0) + (1 if entropy_conditioned else 0) + (1 if discount_conditioned else 0)
         )
-        # Base observations + conditioning observations
-        num_obs = ego_features + conditioning_dims + 63 * 7 + 200 * 7
 
-        temp_env = SimpleNamespace(
-            single_action_space=gymnasium.spaces.MultiDiscrete([7 * 13]),
-            single_observation_space=gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32),
+        ego_features += conditioning_dims
+
+        # # Extract observation shapes from constants
+        # # These need to be defined in C, since they determine the shape of the arrays
+        # max_road_objects = 200
+        # max_partner_objects = 63
+        # partner_features = 7
+        # road_features = 7
+
+        # Extract observation shapes from constants
+        # These need to be defined in C, since they determine the shape of the arrays
+        max_road_objects = binding.MAX_ROAD_SEGMENT_OBSERVATIONS
+        max_partner_objects = binding.MAX_AGENTS - 1
+        partner_features = binding.PARTNER_FEATURES
+        road_features = binding.ROAD_FEATURES
+
+        num_obs = ego_features + max_partner_objects * partner_features + max_road_objects * road_features
+
+        single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(num_obs,), dtype=np.float32)
+
+        co_player_env = SimpleNamespace(
+            single_action_space=single_action_space,
+            single_observation_space=single_observation_space,
             reward_conditioned=reward_conditioned,
             entropy_conditioned=entropy_conditioned,
             discount_conditioned=discount_conditioned,
             dynamics_model=dynamics_model,  ## keep these the same I think, multiple dynamics models could get weird
+            max_partner_objects=max_partner_objects,
+            partner_features=partner_features,
+            max_road_objects=max_road_objects,
+            road_features=road_features,
         )
 
-        base_policy = Drive(temp_env, input_size=input_size, hidden_size=hidden_size)
+        base_policy = Drive(co_player_env, input_size=input_size, hidden_size=hidden_size)
 
-        if co_player_rnn:
+        if co_player_architecture == "Transformer":
+            policy = pufferlib.models.TransformerWrapper(
+                co_player_env,
+                base_policy,
+                input_size=co_player_transformer.get("input_size", 256),
+                hidden_size=co_player_transformer.get("hidden_size", 256),
+                num_layers=co_player_transformer.get("num_layers", 2),
+                num_heads=co_player_transformer.get("num_heads", 4),
+                horizon=co_player_transformer.get("horizon", 91),
+                dropout=co_player_transformer.get("dropout", 0.0),
+            )
+        elif co_player_rnn:
             policy = pufferlib.models.LSTMWrapper(
-                temp_env,
+                co_player_env,
                 base_policy,
                 input_size=co_player_rnn.get("input_size"),
                 hidden_size=co_player_rnn.get("hidden_size"),
@@ -891,37 +1002,68 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
+        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
         policy.load_state_dict(state_dict, strict=True)
-        policy.eval()
+        if external_coplayer:
+            # Main owns the co-player on GPU. Don't pin to CPU; don't pass to
+            # workers. We hand the (still-on-CPU) policy to the caller via the
+            # vecenv attribute below — caller will move it to its own device.
+            policy.eval()
+        else:
+            policy = policy.to("cpu")  # Ensure all buffers are on CPU for forked subprocesses
+            policy.eval()
         print(
-            f"Co player policy loaded with {conditioning_dims} conditioning dims (condition_type={condition_type})",
+            f"Co player policy loaded with {conditioning_dims} conditioning dims "
+            f"(condition_type={condition_type}, external={external_coplayer})",
             flush=True,
         )
-        # Store policy and conditioning info in env_k
-        env_k["co_player_policy"]["co_player_policy_func"] = policy
 
-        torch.set_num_threads(
-            1
-        )  # NOTE this is the only way I could get co-player policies to work inside environment evaluation
-        torch.set_num_interop_threads(1)
-        import os
+        if not external_coplayer:
+            # Per-worker CPU path (legacy): hand the policy to env_kwargs so
+            # each forked worker sees it via env_k["co_player_policy"][...].
+            env_k["co_player_policy"]["co_player_policy_func"] = policy
 
-        os.environ["OMP_NUM_THREADS"] = "1"
-        os.environ["MKL_NUM_THREADS"] = "1"
-        os.environ["NUMEXPR_NUM_THREADS"] = "1"
+            # NOTE: Setting threads to 1 is required for co-player policies to work
+            # inside environment evaluation. Higher values cause deadlock.
+            # set_num_interop_threads can only be called once per process; on
+            # subsequent vector-construction calls (e.g. multiple renders) it
+            # raises RuntimeError. Guard so that's idempotent.
+            try:
+                torch.set_num_threads(1)
+            except RuntimeError:
+                pass
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass
 
-        # Disable MKL if available
-        try:
-            torch.backends.mkl.enabled = False
-        except:
-            pass
+            os.environ["OMP_NUM_THREADS"] = "1"
+            os.environ["MKL_NUM_THREADS"] = "1"
+            os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
-        for i in range(len(env_kwargs)):
-            env_kwargs[i]["co_player_policy"]["co_player_policy_func"] = policy
+            # Disable MKL if available
+            try:
+                torch.backends.mkl.enabled = False
+            except:
+                pass
 
-    return backend(env_creators, env_args, env_kwargs, num_envs, **kwargs)
+            for i in range(len(env_kwargs)):
+                env_kwargs[i]["co_player_policy"]["co_player_policy_func"] = policy
+        else:
+            # External path: workers should NOT carry the policy. Ensure their
+            # env_kwargs don't accidentally hold a stale reference.
+            for i in range(len(env_kwargs)):
+                env_kwargs[i]["co_player_policy"]["co_player_policy_func"] = None
+
+    vecenv = backend(env_creators, env_args, env_kwargs, num_envs, **kwargs)
+    if env_k.get("co_player_enabled", False) and external_coplayer:
+        # Stash the GPU-bound co-player policy + the per-worker conditioning
+        # dimension on the vecenv so PuffeRL can pick them up in __init__.
+        vecenv.co_player_policy_func = policy
+        vecenv.co_player_conditioning_dims = conditioning_dims
+        vecenv.co_player_condition_type = condition_type
+    return vecenv
 
 
 def make_seeds(seed, num_envs):

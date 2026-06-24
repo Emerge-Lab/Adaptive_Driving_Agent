@@ -20,6 +20,7 @@ import importlib
 import configparser
 from threading import Thread
 from collections import defaultdict, deque
+from pathlib import Path
 
 import numpy as np
 import psutil
@@ -33,6 +34,7 @@ import pufferlib
 import pufferlib.sweep
 import pufferlib.vector
 import pufferlib.pytorch
+import pufferlib.utils
 import pufferlib.utils
 
 try:
@@ -74,7 +76,17 @@ class PuffeRL:
         # Vecenv info
         self.adaptive_driving_agent = getattr(vecenv.driver_env, "env_name", None) == "adaptive_drive"
         if self.adaptive_driving_agent:
-            config["bptt_horizon"] = vecenv.driver_env.episode_length
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
+                config["bptt_horizon"] = vecenv.driver_env.episode_length
+            if config.get("policy_architecture", "Recurrent") == "Transformer":
+                config["context_length"] = self.context_length = vecenv.driver_env.episode_length
+                config["bptt_horizon"] = (
+                    vecenv.driver_env.episode_length
+                )  ## this is used downstream so you need to define it too
+        else:
+            if config.get("policy_architecture", "Recurrent") == "Transformer":
+                self.context_length = config["context_length"]
+                config["bptt_horizon"] = config["context_length"]
 
         vecenv.async_reset(seed)
         obs_space = vecenv.single_observation_space
@@ -84,7 +96,10 @@ class PuffeRL:
         if self.population_play:
             total_ego_agents = vecenv.num_ego_agents
             agents_for_calc = total_ego_agents
-            batch_size = vecenv.driver_env.num_ego_agents * config["bptt_horizon"] * vecenv.num_workers
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
+                batch_size = vecenv.driver_env.num_ego_agents * config["bptt_horizon"] * vecenv.num_workers
+            if config.get("policy_architecture", "Recurrent") == "Transformer":
+                batch_size = vecenv.driver_env.num_ego_agents * config["context_length"] * vecenv.num_workers
             config["batch_size"] = batch_size  ## this is dynamic and based on ego agents
         else:
             agents_for_calc = total_agents
@@ -93,17 +108,43 @@ class PuffeRL:
         self.total_agents = total_agents
 
         # Experience
-        if config["batch_size"] == "auto" and config["bptt_horizon"] == "auto":
-            raise pufferlib.APIUsageError("Must specify batch_size or bptt_horizon")
+        if (
+            config["batch_size"] == "auto"
+            and config.get("bptt_horizon", "auto") == "auto"
+            and config.get("context_length", "auto") == "auto"
+        ):
+            raise pufferlib.APIUsageError("Must specify batch_size, bptt_horizon, or context_length")
         elif config["batch_size"] == "auto":
-            config["batch_size"] = agents_for_calc * config["bptt_horizon"]
-        elif config["bptt_horizon"] == "auto":
+            if config.get("policy_architecture", "Recurrent") == "Recurrent":
+                config["batch_size"] = agents_for_calc * config["bptt_horizon"]
+            elif config.get("policy_architecture", "Recurrent") == "Transformer":
+                config["batch_size"] = agents_for_calc * config["context_length"]
+        elif (
+            config.get("bptt_horizon", "auto") == "auto"
+            and config.get("policy_architecture", "Recurrent") == "Recurrent"
+        ):
             config["bptt_horizon"] = config["batch_size"] // agents_for_calc
+        elif (
+            config.get("context_length", "auto") == "auto"
+            and config.get("policy_architecture", "Recurrent") == "Transformer"
+        ):
+            config["context_length"] = config["batch_size"] // agents_for_calc
 
         batch_size = config["batch_size"]
-        horizon = config["bptt_horizon"]
+
+        # Set horizon based on model type
+        if config.get("policy_architecture", "Recurrent") == "Recurrent":
+            horizon = config["bptt_horizon"]
+        elif config.get("policy_architecture", "Recurrent") == "Transformer":
+            horizon = config["context_length"]
+        else:
+            horizon = config.get("bptt_horizon", config.get("context_length", 1))
+
+        config["bptt_horizon"] = horizon  # For backward compatibility
+
         segments = batch_size // horizon
         self.segments = segments
+        self.horizon = horizon
         if not self.population_play:
             if total_agents > segments:
                 raise pufferlib.APIUsageError(f"Total agents {total_agents} <= segments {segments}")
@@ -140,11 +181,8 @@ class PuffeRL:
         self.render = config["render"]
         self.render_interval = config["render_interval"]
 
-        if self.render:
-            ensure_drive_binary()
-
         # LSTM
-        if config["use_rnn"]:
+        if config.get("rnn_name", "Recurrent") == "Recurrent":
             h = policy.hidden_size
             if self.population_play:
                 n = vecenv.ego_agents_per_batch  # Use ego agents per batch
@@ -155,6 +193,47 @@ class PuffeRL:
                 n = vecenv.agents_per_batch
                 self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
                 self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
+
+        # TRANSFORMER
+        if config.get("rnn_name", "Recurrent") == "Transformer":
+            h = policy.hidden_size
+
+            if self.population_play:
+                n = vecenv.ego_agents_per_batch  # Use ego agents per batch
+                num_chunks = total_ego_agents // n
+                # Initialize transformer context buffers
+                self.transformer_context = {i * n: torch.zeros(n, 0, h, device=device) for i in range(num_chunks)}
+                self.transformer_position = {
+                    i * n: torch.zeros(n, dtype=torch.long, device=device) for i in range(num_chunks)
+                }
+            else:
+                n = vecenv.agents_per_batch
+                num_chunks = total_agents // n
+                # Initialize transformer context buffers
+                self.transformer_context = {i * n: torch.zeros(n, 0, h, device=device) for i in range(num_chunks)}
+                self.transformer_position = {
+                    i * n: torch.zeros(n, dtype=torch.long, device=device) for i in range(num_chunks)
+                }
+            # K/V cache persistence for the streaming forward_eval path.
+            # The model lazy-allocates k_cache and v_cache (list of per-layer
+            # tensors) on first call when state.get("k_cache") is None. We
+            # persist them here so the next rollout step finds the cache
+            # already populated with past timesteps' projections — without
+            # this, every step would lazy-allocate fresh empty caches and
+            # the policy would attend only to the current step (silent bug
+            # discovered 2026-05-02; broke all in-context-learning runs
+            # prior to that). None initially → first call allocates.
+            self.transformer_k_cache = {i * n: None for i in range(num_chunks)}
+            self.transformer_v_cache = {i * n: None for i in range(num_chunks)}
+
+        # Regression detector for the rnn_name plumbing bug — fires once.
+        print(
+            f"[VERIFY rnn_name] config.get('rnn_name')={config.get('rnn_name')!r}, "
+            f"policy_architecture={config.get('policy_architecture')!r}, "
+            f"has_lstm_h={hasattr(self, 'lstm_h')}, "
+            f"has_transformer_k_cache={hasattr(self, 'transformer_k_cache')}",
+            flush=True,
+        )
 
         # Minibatching & gradient accumulation
         if self.adaptive_driving_agent:
@@ -179,7 +258,7 @@ class PuffeRL:
         self.minibatch_segments = self.minibatch_size // horizon
         if self.minibatch_segments * horizon != self.minibatch_size:
             raise pufferlib.APIUsageError(
-                f"minibatch_size {self.minibatch_size} must be divisible by bptt_horizon {horizon}"
+                f"minibatch_size {self.minibatch_size} must be divisible by horizon {horizon}"
             )
 
         # Torch compile
@@ -187,7 +266,8 @@ class PuffeRL:
         self.policy = policy
         if config["compile"]:
             self.policy = torch.compile(policy, mode=config["compile_mode"])
-            self.policy.forward_eval = torch.compile(policy, mode=config["compile_mode"])
+            if hasattr(policy, "forward_eval"):
+                self.policy.forward_eval = torch.compile(policy.forward_eval, mode=config["compile_mode"])
             pufferlib.pytorch.sample_logits = torch.compile(
                 pufferlib.pytorch.sample_logits, mode=config["compile_mode"]
             )
@@ -217,26 +297,95 @@ class PuffeRL:
             raise ValueError(f"Unknown optimizer: {config['optimizer']}")
 
         self.optimizer = optimizer
+
+        # ---- Resume optimizer / epoch / global_step from trainer_state.pt ----
+        # When --load-model-path points at a checkpoint that has a sibling
+        # trainer_state.pt (which the trainer writes alongside every model
+        # checkpoint), restore optimizer momentum + counters so the resumed
+        # run continues mid-cosine instead of warm-restarting at peak LR with
+        # cold Adam moments.
+        resume_epoch = 0
+        resume_global_step = 0
+        load_path = config.get("load_model_path")
+        if load_path:
+            state_path = os.path.join(os.path.dirname(load_path), "trainer_state.pt")
+            if os.path.exists(state_path):
+                try:
+                    # weights_only=False: trainer_state.pt contains optimizer
+                    # state (with class refs), not just tensors.
+                    saved = torch.load(state_path, map_location=config["device"], weights_only=False)
+                    optimizer.load_state_dict(saved["optimizer_state_dict"])
+                    resume_epoch = int(saved.get("update", 0))
+                    resume_global_step = int(saved.get("global_step", 0))
+                    print(
+                        f"[trainer-state] Resumed optimizer state from {state_path}\n"
+                        f"[trainer-state]   epoch={resume_epoch}  global_step={resume_global_step}",
+                        flush=True,
+                    )
+                except Exception as e:
+                    print(f"[trainer-state] WARNING: could not load {state_path}: {e}", flush=True)
+
         # Logging
         self.logger = logger
         if logger is None:
             self.logger = NoLogger(config)
 
         if self.population_play:
+            # Under external_co_player_actions, driver_env.co_player_policy is
+            # None (worker doesn't load it); the GPU-bound copy lives on the
+            # vecenv as co_player_policy_func.
+            export_co_player = getattr(vecenv, "co_player_policy_func", None) or vecenv.driver_env.co_player_policy
             co_player_path = f"resources/drive/{config['env']}_co_player.bin"
             export_args = {"env_name": config["env"], "path": co_player_path, **config}
             export(
                 args=export_args,
                 env_name=config["env"],
                 vecenv=vecenv,
-                policy=vecenv.driver_env.co_player_policy,
+                policy=export_co_player,
                 path=co_player_path,
                 silent=True,
             )
 
-        # Learning rate scheduler
+        # ---- Centralized GPU co-player inference (when enabled) ------------
+        self.external_co_player = bool(
+            self.population_play
+            and getattr(vecenv, "co_player_policy_func", None) is not None
+            and config.get("env_config", {}).get("external_co_player_actions", False)
+        )
+        if self.external_co_player:
+            co_policy = vecenv.co_player_policy_func.to(config["device"])
+            co_policy.eval()
+            self.co_player_policy = co_policy
+            self.co_player_conditioning_dims = getattr(vecenv, "co_player_conditioning_dims", 0)
+            # One state dict per worker (each worker holds its own slice of
+            # co_players; the per-worker batch size is num_co_players_per_env).
+            num_co_per_worker = vecenv.driver_env.num_co_players
+            num_workers = vecenv.num_workers
+            self._co_player_num_per_worker = num_co_per_worker
+            # Per-worker state dicts. Start each as an empty dict so that
+            # `forward_eval` lazily allocates the K/V cache on first call with
+            # the correct (obs-derived) dtype — avoiding a cache dtype that
+            # mismatches the layer-output dtype during reset_eval_state's
+            # cache-prime path.
+            self.co_player_state = {w: {} for w in range(num_workers)}
+            print(
+                f"[external co-player] Loaded co-player on {device}; "
+                f"per-worker batch={num_co_per_worker}, conditioning_dims={self.co_player_conditioning_dims}, "
+                f"num_workers={num_workers}",
+                flush=True,
+            )
+
+        # Learning rate scheduler — if resuming, advance to the saved epoch
+        # position so cosine annealing continues smoothly.
         epochs = config["total_timesteps"] // config["batch_size"]
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+        last_epoch_arg = -1
+        if resume_epoch > 0:
+            # CosineAnnealingLR requires `initial_lr` in each param_group when
+            # last_epoch != -1; old optimizer states sometimes lack it.
+            for group in optimizer.param_groups:
+                group.setdefault("initial_lr", config["learning_rate"])
+            last_epoch_arg = resume_epoch - 1  # next .step() lands on resume_epoch
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, last_epoch=last_epoch_arg)
         self.total_epochs = epochs
 
         # Automatic mixed precision
@@ -250,9 +399,9 @@ class PuffeRL:
         # Initializations
         self.config = config
         self.vecenv = vecenv
-        self.epoch = 0
-        self.global_step = 0
-        self.last_log_step = 0
+        self.epoch = resume_epoch
+        self.global_step = resume_global_step
+        self.last_log_step = resume_global_step
         self.last_log_time = time.time()
         self.start_time = time.time()
         self.utilization = Utilization()
@@ -260,6 +409,7 @@ class PuffeRL:
         self.stats = defaultdict(list)
         self.last_stats = defaultdict(list)
         self.losses = {}
+
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
@@ -275,6 +425,119 @@ class PuffeRL:
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
+    def _fill_external_co_player_actions(self, full_obs, info, env_id, dones, truncs):
+        """Centralized co-player inference on GPU.
+
+        Workers receive co_player actions via the shared `actions` SHM buffer
+        (filled here) instead of running per-worker CPU forward passes.
+
+        Args:
+            full_obs: numpy obs from vecenv.recv(), shape
+                (num_agents_per_recv_batch, *obs_shape).
+            info: the raw info list from vecenv.recv(). Must contain a dict
+                with key "_external_co_player_ids" giving the actual list of
+                co-player agent indices (worker-local). Computing this from
+                complement-of-ego_ids is wrong: many slots are padding or
+                otherwise inactive, and forwarding garbage obs through them
+                pollutes the shared KV cache.
+            env_id: numpy array of agent indices for the current recv batch.
+            dones, truncs: numpy bool per-agent done/trunc flags.
+        """
+        import numpy as np
+        import torch
+
+        device = self.config["device"]
+        agents_per_worker = self.vecenv.agents_per_worker
+        # batch_size > 1 packs multiple workers into one recv; we handle the
+        # batch_size=1 case (the production setup) here. Generalizing to
+        # batch_size>1 is straightforward (loop over workers in the batch).
+        batch_size = self.vecenv.batch_size
+        if batch_size != 1:
+            raise NotImplementedError(
+                f"external_co_player_actions currently only supports batch_size=1; got batch_size={batch_size}."
+            )
+
+        # Map env_id back to a worker index so we know which co_player_state
+        # to use and which row of vecenv.actions to write to.
+        # For population_play, recv() returns ego-only agent ids
+        # (vecenv.ego_agent_ids), so divide by the per-worker ego count, not
+        # the full agent count.
+        ego_agents_per_worker = getattr(self.vecenv, "ego_agents_per_worker", agents_per_worker)
+        worker_id = int(env_id[0]) // ego_agents_per_worker
+
+        # Pull the actual co_player_ids from info (the env knows them).
+        # Also check for the scenario-boundary cache reset signal.
+        co_ids = None
+        reset_cache = False
+        for item in info:
+            if isinstance(item, dict):
+                if "_external_co_player_ids" in item:
+                    co_ids = list(item["_external_co_player_ids"])
+                if item.get("_external_reset_co_cache"):
+                    reset_cache = True
+        if co_ids is None:
+            raise RuntimeError(
+                "external_co_player_actions=True but the env did not "
+                "publish '_external_co_player_ids' in info. Is drive.py up to date?"
+            )
+        if not co_ids:
+            return  # no co-players in this env this step
+
+        # Drop the cache at scenario boundaries — mirrors the per-worker
+        # OFF path's _reset_co_player_state() which fully reinits state.
+        # Replacing the dict makes forward_eval lazy-allocate fresh K/V on
+        # the next call, matching legacy behavior bit-for-bit at scenario
+        # boundaries.
+        if reset_cache:
+            self.co_player_state[worker_id] = {}
+
+        # Slice the co-player observations. When the ego is in oracle mode
+        # (drive.py `ego_is_oracle=True`) the env's obs is wider than the
+        # partner policy expects — partner conditioning is appended to ego
+        # rows only. Strip trailing oracle dims by slicing columns to the
+        # env's `_c_obs_dim` (the C-side obs width). Defaults to None when
+        # oracle is off → take the full width as before.
+        co_obs_width = getattr(self.vecenv.driver_env, "_c_obs_dim", None)
+        if co_obs_width is None:
+            co_obs_np = full_obs[co_ids]
+        else:
+            co_obs_np = full_obs[co_ids, :co_obs_width]
+        co_obs = torch.as_tensor(co_obs_np, device=device)
+        if self.co_player_conditioning_dims > 0:
+            # Pull this worker's conditioning slice from the SHM buffer the
+            # env wrote at scenario boundaries (or at env init). Insert right
+            # after the base ego_features — matches drive.py's
+            # `_add_co_player_conditioning` exactly.
+            cond_shm = self.vecenv.co_player_conditioning  # (num_workers, max_co, cdim)
+            cond_np = cond_shm[worker_id, : len(co_ids), :]  # only the rows we'll use
+            cond = torch.as_tensor(cond_np, device=device, dtype=co_obs.dtype)
+            from pufferlib.ocean.drive import binding as _b
+
+            base_ego_dim = (
+                _b.EGO_FEATURES_JERK if self.vecenv.driver_env.dynamics_model == "jerk" else _b.EGO_FEATURES_CLASSIC
+            )
+            co_obs = torch.cat([co_obs[:, :base_ego_dim], cond, co_obs[:, base_ego_dim:]], dim=1)
+
+        # NOTE: the OFF (per-worker) path only resets cache at scenario
+        # boundary or reset(), never for individual done agents. So we
+        # don't reset per-done here either — it would diverge from OFF.
+
+        with torch.no_grad():
+            logits, _ = self.co_player_policy.forward_eval(co_obs, self.co_player_state[worker_id])
+
+        # Match the per-worker code path: argmax for discrete actions.
+        if isinstance(logits, tuple):
+            co_action = torch.cat([l.argmax(dim=-1, keepdim=True) for l in logits], dim=-1)
+        else:
+            co_action = logits.argmax(dim=-1)
+        co_action_np = co_action.cpu().numpy().reshape(len(co_ids), -1)
+
+        # Write directly to the worker's slot in the shared-memory action
+        # buffer. The worker's env.step() will call vec_step using these
+        # actions because it has external_co_player_actions=True.
+        co_action_view = self.vecenv.actions[worker_id]  # shape (agents_per_worker, *atn_shape)
+        co_action_view[co_ids] = co_action_np.reshape((len(co_ids),) + co_action_view.shape[1:])
+
     def evaluate(self):
         profile = self.profile
         epoch = self.epoch
@@ -284,36 +547,59 @@ class PuffeRL:
         config = self.config
         device = config["device"]
 
-        if config["use_rnn"]:
+        # Reset hidden states for both RNN and Transformer
+        if config.get("rnn_name", "Recurrent") == "Recurrent":
             for k in self.lstm_h:
                 self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
 
+        if config.get("rnn_name", "Recurrent") == "Transformer":
+            h = self.policy.hidden_size
+            for k in self.transformer_context:
+                n = self.transformer_context[k].shape[0]
+                # Pre-allocate full buffer instead of empty
+                self.transformer_context[k] = torch.zeros(n, self.horizon, h, device=device)
+                self.transformer_position[k] = torch.zeros(1, dtype=torch.long, device=device)
+                # Drop K/V cache so the model lazy-allocates fresh on
+                # the first forward_eval call of this rollout.
+                self.transformer_k_cache[k] = None
+                self.transformer_v_cache[k] = None
+
         self.full_rows = 0
         while self.full_rows < self.segments:
             profile("env", epoch)
+            # print(".", end="", flush=True)  # Workaround: visible I/O prevents multiprocessing deadlock
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
             # print(f"o shape is {o.shape}", flush = True)
             if self.population_play:
                 batch_size = self.vecenv.batch_size
-                ego_ids = info[-1]
+                # Filter info to get only the ego_ids lists (not the metrics dicts)
+                ego_ids_per_env = [item for item in info if isinstance(item, list)]
+
+                if self.external_co_player:
+                    # Run co-player forward on GPU before the ego-only slicing
+                    # below (we need the FULL obs array to extract co-player obs).
+                    self._fill_external_co_player_actions(o, info, env_id, d, t)
 
                 if batch_size > 1:
                     total_agents = len(o)
                     num_agents_per_env = total_agents // batch_size
 
-                    original_shape = o.shape
+                    # Create flat ego_ids by adding batch offset
+                    flat_ego_ids = []
+                    for env_idx in range(batch_size):
+                        ego_ids = ego_ids_per_env[env_idx]
+                        offset = env_idx * num_agents_per_env
+                        flat_ego_ids.extend([int(idx) + offset for idx in ego_ids])
 
-                    o = o.reshape(batch_size, num_agents_per_env, *original_shape[1:])
-                    r = r.reshape(batch_size, num_agents_per_env)
-                    d = d.reshape(batch_size, num_agents_per_env)
-                    t = t.reshape(batch_size, num_agents_per_env)
-
-                    o = o[:, ego_ids].reshape(batch_size * len(ego_ids), *original_shape[1:])
-                    r = r[:, ego_ids].flatten()
-                    d = d[:, ego_ids].flatten()
-                    t = t[:, ego_ids].flatten()
+                    # Simply index with the flat ego_ids
+                    o = o[flat_ego_ids]
+                    r = r[flat_ego_ids]
+                    d = d[flat_ego_ids]
+                    t = t[flat_ego_ids]
                 else:
+                    ego_ids = ego_ids_per_env[0]  # Single environment
+                    ego_ids = [int(idx) for idx in ego_ids]  # Convert to int
                     o = o[ego_ids]
                     r = r[ego_ids]
                     d = d[ego_ids]
@@ -326,9 +612,9 @@ class PuffeRL:
 
             profile("eval_copy", epoch)
             o = torch.as_tensor(o)
-            o_device = o.to(device)  # , non_blocking=True)
-            r = torch.as_tensor(r).to(device)  # , non_blocking=True)
-            d = torch.as_tensor(d).to(device)  # , non_blocking=True)
+            o_device = o.to(device, non_blocking=True)
+            r = torch.as_tensor(r, device=device)
+            d = torch.as_tensor(d, device=device)
 
             profile("eval_forward", epoch)
             with torch.no_grad(), self.amp_context:
@@ -338,29 +624,84 @@ class PuffeRL:
                     env_id=env_id,
                     mask=mask,
                 )
+                # Get appropriate batch key for state lookup
+                if self.population_play:
+                    batch_size = self.vecenv.ego_agents_per_batch
+                else:
+                    batch_size = self.vecenv.agents_per_batch
+                state_key = (env_id.start // batch_size) * batch_size
 
-                if config["use_rnn"]:
-                    state["lstm_h"] = self.lstm_h[env_id.start]
-                    state["lstm_c"] = self.lstm_c[env_id.start]
+                if config.get("rnn_name", "Recurrent") == "Recurrent":
+                    state["lstm_h"] = self.lstm_h[state_key]
+                    state["lstm_c"] = self.lstm_c[state_key]
 
+                if config.get("rnn_name", "Recurrent") == "Transformer":
+                    state["transformer_context"] = self.transformer_context[state_key]
+                    state["transformer_position"] = self.transformer_position[state_key]
+                    # K/V cache for streaming attention. None on the first
+                    # call → model lazy-allocates (and resets pos to 0).
+                    # Subsequent calls reuse the populated cache, which is
+                    # the whole point: each step appends one new K/V slot
+                    # and the policy attends over the full accumulated past.
+                    state["k_cache"] = self.transformer_k_cache[state_key]
+                    state["v_cache"] = self.transformer_v_cache[state_key]
+                    # Note: terminals not needed for eval since we're doing single-step inference
+
+                # print(".", end="", flush=True)  # Prevents multiprocessing deadlock
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
 
             profile("eval_copy", epoch)
             with torch.no_grad():
-                if config["use_rnn"]:
-                    # Use the same lstm_key calculation
+                # Update hidden states after forward pass
+                if config.get("rnn_name", "Recurrent") == "Recurrent":
                     if self.population_play:
                         batch_size = self.vecenv.ego_agents_per_batch
                     else:
                         batch_size = self.vecenv.agents_per_batch
 
                     lstm_key = (env_id.start // batch_size) * batch_size
-
                     self.lstm_h[lstm_key] = state["lstm_h"]
                     self.lstm_c[lstm_key] = state["lstm_c"]
 
+                if config.get("rnn_name", "Recurrent") == "Transformer":
+                    if self.population_play:
+                        batch_size = self.vecenv.ego_agents_per_batch
+                    else:
+                        batch_size = self.vecenv.agents_per_batch
+
+                    transformer_key = (env_id.start // batch_size) * batch_size
+                    self.transformer_context[transformer_key] = state["transformer_context"]
+                    self.transformer_position[transformer_key] = state["transformer_position"]
+                    # Persist the K/V cache the model just wrote/updated so
+                    # the next forward_eval call sees the accumulated past.
+                    # state.get(...) is defensive: model may not have set
+                    # these if it took the legacy path.
+                    self.transformer_k_cache[transformer_key] = state.get("k_cache")
+                    self.transformer_v_cache[transformer_key] = state.get("v_cache")
+
+                    # Episode-boundary reset. pos is a shared (1,) scalar
+                    # across the chunk; cache rows are per-agent. Filter
+                    # done indices against the cache's batch dim, not the
+                    # pos buffer's (1,) shape.
+                    if done_mask.any():
+                        done_indices = torch.where(torch.from_numpy(done_mask))[0]
+                        if len(done_indices) > 0:
+                            batch_start_in_group = env_id.start % batch_size
+                            global_indices = batch_start_in_group + done_indices
+                            kc = self.transformer_k_cache[transformer_key]
+                            vc = self.transformer_v_cache[transformer_key]
+                            cache_batch_dim = kc[0].shape[0] if kc is not None else 0
+                            valid_mask = global_indices < cache_batch_dim
+                            valid_indices = global_indices[valid_mask]
+                            if len(valid_indices) > 0:
+                                self.transformer_position[transformer_key][:] = 0
+                                if kc is not None and vc is not None:
+                                    for c in kc:
+                                        c[valid_indices] = 0
+                                    for c in vc:
+                                        c[valid_indices] = 0
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
                 batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
@@ -378,7 +719,13 @@ class PuffeRL:
 
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
-                if l + 1 >= config["bptt_horizon"]:
+                # Use appropriate horizon based on model type
+                horizon = (
+                    config.get("context_length")
+                    if config.get("policy_architecture", "Recurrent") == "Transformer"
+                    else config["bptt_horizon"]
+                )
+                if l + 1 >= horizon:
                     num_full = env_id.stop - env_id.start
                     self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config["device"]).int()
                     self.ep_lengths[env_id] = 0
@@ -400,12 +747,17 @@ class PuffeRL:
                         self.stats[k].append(v)
 
             profile("env", epoch)
-
             self.vecenv.send(action)
 
         profile("eval_misc", epoch)
         self.free_idx = self.total_agents
-        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
+
+        if self.population_play:
+            total_agents = self.vecenv.num_ego_agents
+        else:
+            total_agents = self.total_agents
+
+        self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.ep_lengths.zero_()
         profile.end()
         return self.stats
@@ -438,9 +790,9 @@ class PuffeRL:
                     hasattr(self.vecenv.driver_env, "dynamics_model")
                     and self.vecenv.driver_env.dynamics_model == "jerk"
                 ):
-                    disc_idx = 10  # base ego obs
+                    disc_idx = 12  # EGO_FEATURES_JERK (was 10 before lane features)
                 else:
-                    disc_idx = 7
+                    disc_idx = 9  # EGO_FEATURES_CLASSIC (was 7 before lane features)
 
                 if self.vecenv.driver_env.reward_conditioned:
                     disc_idx += 3
@@ -468,7 +820,15 @@ class PuffeRL:
             prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
             mb_prio = (self.segments * prio_probs[idx, None]) ** -anneal_beta
-            mb_obs = self.observations[idx]
+            # When cpu_offload=True, self.observations lives on CPU but `idx`
+            # is on the training device (GPU). PyTorch refuses cross-device
+            # fancy indexing, so move the index to CPU for the gather, then
+            # ship the resulting minibatch to the device. Buffer was allocated
+            # with pin_memory=True (see __init__) so the H2D copy is fast.
+            if config["cpu_offload"]:
+                mb_obs = self.observations[idx.cpu()].to(device, non_blocking=True)
+            else:
+                mb_obs = self.observations[idx]
             mb_actions = self.actions[idx]
             mb_logprobs = self.logprobs[idx]
             mb_rewards = self.rewards[idx]
@@ -480,17 +840,45 @@ class PuffeRL:
             mb_advantages = advantages[idx]
 
             profile("train_forward", epoch)
-            if not config["use_rnn"]:
+
+            # Handle observation reshaping based on model type
+            if (
+                not config.get("rnn_name", "Recurrent") == "Recurrent"
+                and not config.get("rnn_name", "Recurrent") == "Transformer"
+            ):
+                # Flatten for non-recurrent models
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
             state = dict(
                 action=mb_actions,
-                lstm_h=None,
-                lstm_c=None,
             )
 
+            # Add appropriate state based on model type
+            if config.get("rnn_name", "Recurrent") == "Recurrent":
+                state["lstm_h"] = None
+                state["lstm_c"] = None
+            elif config.get("rnn_name", "Recurrent") == "Transformer":
+                state["transformer_context"] = None
+                state["transformer_position"] = None
+                state["terminals"] = mb_terminals  # For episode boundary masking
+
             logits, newvalue = self.policy(mb_obs, state)
-            actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+
+            # Handle action sampling based on observation shape
+            if (
+                config.get("rnn_name", "Recurrent") == "Recurrent"
+                or config.get("rnn_name", "Recurrent") == "Transformer"
+            ):
+                # Add this right before calling sample_logits
+                if isinstance(logits, tuple):
+                    logits = logits[0]
+                actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+            else:
+                # Need to flatten actions for non-recurrent models
+                actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(
+                    logits,
+                    action=mb_actions.reshape(-1, *mb_actions.shape[2:]) if len(mb_actions.shape) > 2 else mb_actions,
+                )
 
             profile("train_misc", epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
@@ -508,6 +896,8 @@ class PuffeRL:
                 mb_gammas = gammas[idx]
             else:
                 mb_gammas = torch.full((len(idx),), config["gamma"], device=device, dtype=torch.float32)
+
+            # Recompute advantages with new ratios
             adv = compute_puff_advantage(
                 mb_values,
                 mb_rewards,
@@ -541,9 +931,9 @@ class PuffeRL:
                     hasattr(self.vecenv.driver_env, "dynamics_model")
                     and self.vecenv.driver_env.dynamics_model == "jerk"
                 ):
-                    ent_idx = 10  # base ego obs
+                    ent_idx = 12  # EGO_FEATURES_JERK (was 10 before lane features)
                 else:
-                    ent_idx = 7
+                    ent_idx = 9  # EGO_FEATURES_CLASSIC (was 7 before lane features)
 
                 if self.vecenv.driver_env.reward_conditioned:
                     ent_idx += 3
@@ -607,30 +997,15 @@ class PuffeRL:
             self.msg = f"Checkpoint saved at update {self.epoch}"
 
             if self.render and self.epoch % self.render_interval == 0:
-                model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
-                model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
-
-                if model_files:
-                    # Take the latest checkpoint
-                    latest_cpt = max(model_files, key=os.path.getctime)
-                    bin_path = f"{model_dir}.bin"
-
-                    # Export to .bin for rendering with raylib
-                    try:
-                        export_args = {"env_name": self.config["env"], "load_model_path": latest_cpt, **self.config}
-
-                        export(
-                            args=export_args,
-                            env_name=self.config["env"],
-                            vecenv=self.vecenv,
-                            policy=self.uncompiled_policy,
-                            path=bin_path,
-                            silent=True,
-                        )
-                        pufferlib.utils.render_videos(self.config, self.vecenv, self.logger, self.global_step, bin_path)
-
-                    except Exception as e:
-                        print(f"Failed to export model weights: {e}")
+                torch.cuda.empty_cache()
+                pufferlib.utils.render_videos(
+                    config=self.config,
+                    policy=self.uncompiled_policy,
+                    logger=self.logger,
+                    epoch=self.epoch,
+                    global_step=self.global_step,
+                    device=self.config["device"],
+                )
 
         if self.config["eval"]["wosac_realism_eval"] and (
             self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training
@@ -641,6 +1016,16 @@ class PuffeRL:
             self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training
         ):
             pufferlib.utils.run_human_replay_eval_in_subprocess(self.config, self.logger, self.global_step)
+            torch.cuda.empty_cache()
+            pufferlib.utils.render_videos(
+                config=self.config,
+                policy=self.uncompiled_policy,
+                logger=self.logger,
+                epoch=self.epoch,
+                global_step=self.global_step,
+                device=self.config["device"],
+                human_replay=True,
+            )
 
     def mean_and_log(self):
         config = self.config
@@ -716,6 +1101,12 @@ class PuffeRL:
         state_path = os.path.join(path, "trainer_state.pt")
         torch.save(state, state_path + ".tmp")
         os.rename(state_path + ".tmp", state_path)
+
+        # Sidecar metadata: every render/eval can recover the right
+        # conditioning, dataset, and architecture from <run_dir>/info.json
+        # without the user having to re-pass them on the CLI.
+        write_run_info(path, self.config, run_id)
+
         return model_path
 
     def print_dashboard(self, clear=False, idx=[0], c1="[cyan]", c2="[white]", b1="[bright_cyan]", b2="[bright_white]"):
@@ -1052,6 +1443,7 @@ class WandbLogger:
             save_code=False,
             resume=resume,
             config=args,
+            name=args.get("wandb_name"),
             tags=[args["tag"]] if args["tag"] is not None else [],
         )
         self.wandb = wandb
@@ -1103,11 +1495,26 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         policy = model.to(local_rank)
 
     if args["neptune"]:
-        logger = NeptuneLogger(args)
+        logger = NeptuneLogger(args, load_id=args.get("load_id"))
     elif args["wandb"]:
-        logger = WandbLogger(args)
+        # Pass load_id so the wandb logger resumes the existing run instead
+        # of creating a fresh one. WandbLogger uses resume="allow", so wandb
+        # picks up where the original run left off (history, name, tags).
+        logger = WandbLogger(args, load_id=args.get("load_id"))
 
-    train_config = dict(**args["train"], env=env_name, eval=args.get("eval", {}))
+    train_config = dict(
+        **args["train"],
+        env=env_name,
+        eval=args.get("eval", {}),
+        env_config=args.get("env", {}),
+        policy_architecture=args.get("policy_architecture", "Recurrent"),
+        # rnn_name lives at args top level — must be explicitly propagated,
+        # else config.get("rnn_name") defaults to "Recurrent" and the
+        # Transformer init/rollout branches in PuffeRL never fire.
+        rnn_name=args.get("rnn_name", args.get("policy_architecture", "Recurrent")),
+        load_model_path=args.get("load_model_path"),
+        load_id=args.get("load_id"),
+    )
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
@@ -1149,15 +1556,24 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
     wosac_enabled = args["eval"]["wosac_realism_eval"]
     human_replay_enabled = args["eval"]["human_replay_eval"]
+    # Honor eval.map_dir only when explicitly set; otherwise inherit the
+    # training env.map_dir so eval doesn't silently switch datasets.
+    eval_map_dir = args["eval"].get("map_dir")
+    if eval_map_dir in (None, "", "None"):
+        eval_map_dir = args["env"].get("map_dir")
+    args["env"]["map_dir"] = eval_map_dir
+    args["eval"]["map_dir"] = eval_map_dir
+    args["env"]["num_maps"] = args["eval"]["num_maps"]
+    args["env"]["use_all_maps"] = True
+    dataset_name = args["env"]["map_dir"].split("/")[-1]
 
     if wosac_enabled:
-        print(f"Running WOSAC realism evaluation. \n")
+        print(f"Running WOSAC realism evaluation with {dataset_name} dataset. \n")
         from pufferlib.ocean.benchmark.evaluator import WOSACEvaluator
 
         backend = args["eval"]["backend"]
         assert backend == "PufferEnv" or not wosac_enabled, "WOSAC evaluation only supports PufferEnv backend."
         args["vec"] = dict(backend=backend, num_envs=1)
-        args["env"]["num_agents"] = args["eval"]["wosac_num_agents"]
         args["env"]["init_mode"] = args["eval"]["wosac_init_mode"]
         args["env"]["control_mode"] = args["eval"]["wosac_control_mode"]
         args["env"]["init_steps"] = args["eval"]["wosac_init_steps"]
@@ -1172,6 +1588,10 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         # Collect ground truth trajectories from the dataset
         gt_trajectories = evaluator.collect_ground_truth_trajectories(vecenv)
 
+        print(f"Number of scenarios: {len(np.unique(gt_trajectories['scenario_id']))}")
+        print(f"Number of controlled agents: {gt_trajectories['x'].shape[0]}")
+        print(f"Number of evaluated agents: {np.sum(gt_trajectories['id'] >= 0)}")
+
         # Roll out trained policy in the simulator
         simulated_trajectories = evaluator.collect_simulated_trajectories(args, vecenv, policy)
 
@@ -1179,31 +1599,51 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             evaluator._quick_sanity_check(gt_trajectories, simulated_trajectories)
 
         # Analyze and compute metrics
+        agent_state = vecenv.driver_env.get_global_agent_state()
+        road_edge_polylines = vecenv.driver_env.get_road_edge_polylines()
         results = evaluator.compute_metrics(
-            gt_trajectories, simulated_trajectories, args["eval"]["wosac_aggregate_results"]
+            gt_trajectories,
+            simulated_trajectories,
+            agent_state,
+            road_edge_polylines,
+            args["eval"]["wosac_aggregate_results"],
         )
 
         if args["eval"]["wosac_aggregate_results"]:
             import json
 
-            print("WOSAC_METRICS_START")
+            print("\nWOSAC_METRICS_START")
             print(json.dumps(results))
             print("WOSAC_METRICS_END")
 
         return results
 
     elif human_replay_enabled:
-        print("Running human replay evaluation.\n")
+        print(f"Running human replay evaluation with {dataset_name} dataset.\n")
         from pufferlib.ocean.benchmark.evaluator import HumanReplayEvaluator
 
         backend = args["eval"].get("backend", "PufferEnv")
         args["vec"] = dict(backend=backend, num_envs=1)
-        args["env"]["num_agents"] = args["eval"]["human_replay_num_agents"]
         args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
-        args["env"]["scenario_length"] = 91  # Standard scenario length
+        # episode_length is NOT hardcoded here — inherits scenario_length
+        # from training config (WOMD=91, nuPlan=201).
+        # Human replay: only 1 ego is policy-controlled, others follow logged trajectories
+        args["env"]["co_player_enabled"] = False
+        args["env"]["max_controlled_agents"] = 1
+        # `human_replay_mode` is only accepted by AdaptiveDrivingAgent
+        if "adaptive" in env_name:
+            args["env"]["human_replay_mode"] = True
+        if args["eval"].get("human_replay_num_agents") is not None:
+            args["env"]["num_agents"] = args["eval"]["human_replay_num_agents"]
+        if args["eval"].get("human_replay_num_maps") is not None:
+            args["env"]["num_maps"] = args["eval"]["human_replay_num_maps"]
+        if args["eval"].get("map_dir") not in (None, "", "None"):
+            args["env"]["map_dir"] = args["eval"]["map_dir"]
 
         vecenv = vecenv or load_env(env_name, args)
         policy = policy or load_policy(args, vecenv, env_name)
+
+        print(f"Effective number of scenarios used: {len(vecenv.driver_env.agent_offsets) - 1}")
 
         evaluator = HumanReplayEvaluator(args)
 
@@ -1230,10 +1670,6 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         driver = vecenv.driver_env
         num_agents = vecenv.observation_space.shape[0]
         device = args["train"]["device"]
-
-        # Rebuild visualize binary if saving frames (for C-based rendering)
-        if args["save_frames"] > 0:
-            ensure_drive_binary()
 
         state = {}
         if args["train"]["use_rnn"]:
@@ -1312,6 +1748,118 @@ def sweep(args=None, env_name=None):
         args["train"]["total_timesteps"] = total_timesteps
 
 
+def controlled_exp(env_name, args=None):
+    """Run experiments with all combinations of specified parameter values."""
+    import itertools
+    from copy import deepcopy
+
+    args = args or load_config(env_name)
+    if not args["wandb"] and not args["neptune"]:
+        raise pufferlib.APIUsageError("Targeted experiments require either wandb or neptune")
+
+    # Check if controlled_exp config exists
+    if "controlled_exp" not in args:
+        raise pufferlib.APIUsageError("No [controlled_exp.*] sections found in config")
+
+    # Extract parameters from controlled_exp namespace
+    params = {}
+    for section, section_config in args["controlled_exp"].items():
+        if isinstance(section_config, dict):
+            for param, param_config in section_config.items():
+                if isinstance(param_config, dict) and "values" in param_config:
+                    params[f"{section}.{param}"] = param_config["values"]
+
+    if not params:
+        raise pufferlib.APIUsageError("No parameters with 'values' lists found in [controlled_exp.*] sections")
+
+    # Generate all combinations
+    keys = list(params.keys())
+    combinations = list(itertools.product(*[params[k] for k in keys]))
+
+    print(f"Running a total of {len(combinations)} experiments with parameters: {keys}")
+
+    # Run each combination
+    for i, combo in enumerate(combinations, 1):
+        exp_args = deepcopy(args)
+
+        # Set parameters
+        for key, value in zip(keys, combo):
+            section, param = key.split(".")
+            exp_args[section][param] = value
+
+        print(f"\nExperiment {i}/{len(combinations)}: {dict(zip(keys, combo))}")
+
+        # Train
+        train(env_name, args=exp_args)
+
+    print(f"\n✓ Completed all {len(combinations)} experiments")
+
+
+def sanity(env_name, args=None):
+    args = args or load_config(env_name)
+    base_dir = Path(__file__).resolve().parent / "resources" / "drive" / "sanity"
+    json_dir = base_dir / "sanity_jsons"
+    binary_dir = base_dir / "sanity_binaries"
+
+    available_maps = {p.stem: p for p in json_dir.glob("*.json")}
+    selected = args.get("sanity_maps")
+    if isinstance(selected, str):
+        selected = [selected]
+
+    if selected:
+        missing = [name for name in selected if name not in available_maps]
+        if missing:
+            raise pufferlib.APIUsageError(f"Unknown sanity maps: {', '.join(sorted(missing))}")
+        chosen = [(name, available_maps[name]) for name in selected]
+    else:
+        chosen = sorted(available_maps.items())
+
+    if not chosen:
+        raise pufferlib.APIUsageError(f"No sanity maps found in {json_dir}")
+
+    from pufferlib.ocean.drive.drive import load_map
+
+    binary_dir.mkdir(parents=True, exist_ok=True)
+    binaries = []
+    for idx, (name, json_path) in enumerate(chosen):
+        output_path = binary_dir / f"{name}.bin"
+        load_map(str(json_path), idx, str(output_path))
+        binaries.append((name, output_path))
+
+    runs = []
+    for name, binary in binaries:
+        map_zero = binary_dir / "map_000.bin"
+        shutil.copy2(binary, map_zero)
+
+        run_args = {
+            **args,
+            "env": {**args["env"], "num_maps": 1, "map_dir": str(binary_dir)},
+            "train": {**args["train"], "render_map": str(map_zero)},
+        }
+        if run_args.get("wandb"):
+            run_args["wandb_name"] = name
+
+        print(f"Running sanity map '{name}' from {binary.name}")
+        run_logs = train(env_name=env_name, args=run_args)
+        runs.append({"map": name, "logs": run_logs})
+
+    print("Sanity checklist:")
+    for entry in runs:
+        name = entry["map"]
+        logs = entry.get("logs") or []
+        final = logs[-1] if logs else {}
+        score = final.get("environment/score")
+        if score is None:
+            status = "unknown (no score)"
+        elif score >= 0.95:
+            status = "✅ Solved"
+        else:
+            status = "❌ unsolved"
+        print(f" - {name}: {status} (score={score})")
+
+    return runs
+
+
 def profile(args=None, env_name=None, vecenv=None, policy=None):
     args = load_config()
     vecenv = vecenv or load_env(env_name, args)
@@ -1352,31 +1900,63 @@ def export(args=None, env_name=None, vecenv=None, policy=None, path=None, silent
         print(f"Saved {len(weights)} weights to {path}")
 
 
-def ensure_drive_binary():
-    """Delete existing visualize binary and rebuild it. This ensures the
-    binary is always up-to-date with the latest code changes.
-    """
-    if os.path.exists("./visualize"):
-        print("Removing existing visualize binary...")
-        try:
-            os.remove("./visualize")
-        except FileNotFoundError:
-            print("Binary not found")
-    print("Building visualize binary...")
-    try:
-        result = subprocess.run(
-            ["bash", "scripts/build_ocean.sh", "visualize", "local"], capture_output=True, text=True, timeout=300
-        )
+def write_run_info(run_dir, config, run_id):
+    """Persist the bits of training config that render/eval need to replay.
 
-        if result.returncode == 0:
-            print("Successfully built visualize binary")
-        else:
-            print(f"Build failed: {result.stderr}")
-            raise RuntimeError("Failed to build visualize binary for rendering")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Build timed out")
+    We only record fields that change observation/architecture shape or
+    dataset identity — the things you can't recover from the .pt alone.
+    Existing checkpoints don't have this file; readers must treat it as
+    optional.
+    """
+    import json
+
+    env_cfg = config.get("env_config", {})
+    info = {
+        "run_id": run_id,
+        "env_name": config.get("env"),
+        "policy_architecture": config.get("policy_architecture"),
+        "rnn_name": config.get("rnn_name"),
+        "env": {
+            "map_dir": env_cfg.get("map_dir"),
+            "num_maps": env_cfg.get("num_maps"),
+            "num_agents": env_cfg.get("num_agents"),
+            "num_ego_agents": env_cfg.get("num_ego_agents"),
+            "k_scenarios": env_cfg.get("k_scenarios", 1),
+            "scenario_length": env_cfg.get("scenario_length", 91),
+            "dynamics_model": env_cfg.get("dynamics_model", "classic"),
+            "co_player_enabled": bool(env_cfg.get("co_player_enabled")),
+            "conditioning": env_cfg.get("conditioning", {}),
+            "co_player_policy": env_cfg.get("co_player_policy", {}),
+        },
+    }
+    info_path = os.path.join(run_dir, "info.json")
+    try:
+        with open(info_path + ".tmp", "w") as f:
+            json.dump(info, f, indent=2, default=str)
+        os.rename(info_path + ".tmp", info_path)
     except Exception as e:
-        raise RuntimeError(f"Build error: {e}")
+        print(f"[info.json] failed to write: {e}")
+
+
+def load_run_info(model_path):
+    """Look up the run_dir/info.json for a given checkpoint path. Returns {} if missing."""
+    import json
+
+    candidates = []
+    parent = os.path.dirname(model_path) or "."
+    candidates.append(os.path.join(parent, "info.json"))
+    # Allow `experiments/puffer_drive_<id>.pt` (flat copy) → look in sibling run dir.
+    base, ext = os.path.splitext(model_path)
+    if ext == ".pt" and os.path.basename(base).startswith("puffer_"):
+        candidates.append(os.path.join(base, "info.json"))
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[info.json] failed to read {path}: {e}")
+    return {}
 
 
 def autotune(args=None, env_name=None, vecenv=None, policy=None):
@@ -1402,40 +1982,57 @@ def load_policy(args, vecenv, env_name=""):
     env_module = importlib.import_module(module_name)
 
     device = args["train"]["device"]
-    policy_cls = getattr(env_module.torch, args["policy_name"])
-    policy = policy_cls(vecenv.driver_env, **args["policy"])
-
-    rnn_name = args["rnn_name"]
-    if rnn_name is not None:
-        rnn_cls = getattr(env_module.torch, args["rnn_name"])
-        policy = rnn_cls(vecenv.driver_env, policy, **args["rnn"])
-
-    policy = policy.to(device)
 
     load_id = args["load_id"]
-    if load_id is not None:
+    load_path = args.get("load_model_path")
+    state_dict = None
+    rnn_name = args.get("policy_architecture", "Recurrent")
+
+    if load_path is not None:
+        state_dict = torch.load(load_path, map_location=device)
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    elif load_id is not None:
         if args["neptune"]:
             path = NeptuneLogger(args, load_id, mode="read-only").download()
         elif args["wandb"]:
             path = WandbLogger(args, load_id).download()
         else:
             raise pufferlib.APIUsageError("No run id provided for eval")
-
         state_dict = torch.load(path, map_location=device)
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        policy.load_state_dict(state_dict)
 
-    load_path = args["load_model_path"]
-    if load_path == "latest":
-        load_path = max(glob.glob(f"experiments/{env_name}*.pt"), key=os.path.getctime)
+    # Auto-detect architecture from state_dict keys
+    if state_dict is not None:
+        if "positional_embedding" in state_dict:
+            rnn_name = "Transformer"
+        elif "lstm.weight_ih_l0" in state_dict:
+            rnn_name = "Recurrent"
 
-    if load_path is not None:
-        state_dict = torch.load(load_path, map_location=device)
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    policy_cls = getattr(env_module.torch, args["policy_name"])
+    policy = policy_cls(vecenv.driver_env, **args["policy"])
+
+    # Handle both RNN and Transformer wrappers via rnn_name
+    if rnn_name == "Transformer":
+        # Load transformer wrapper
+        transformer_cls = getattr(env_module.torch, rnn_name)
+        # For adaptive_driving_agent, use episode_length as horizon (k_scenarios * scenario_length)
+        # Otherwise, use config horizon with fallback to episode_length
+        is_adaptive = getattr(vecenv.driver_env, "env_name", None) == "adaptive_drive"
+        if is_adaptive:
+            args["transformer"]["horizon"] = vecenv.driver_env.episode_length
+        else:
+            args["transformer"]["horizon"] = args["train"].get("horizon", vecenv.driver_env.episode_length)
+        policy = transformer_cls(vecenv.driver_env, policy, **args["transformer"])
+    elif rnn_name is not None:
+        # Load RNN wrapper (Recurrent)
+        rnn_cls = getattr(env_module.torch, rnn_name)
+        policy = rnn_cls(vecenv.driver_env, policy, **args["rnn"])
+
+    policy = policy.to(device)
+
+    # Load the state dict if we have one
+    if state_dict is not None:
         policy.load_state_dict(state_dict)
-        # state_path = os.path.join(*load_path.split('/')[:-1], 'state.pt')
-        # optim_state = torch.load(state_path)['optimizer_state_dict']
-        # pufferl.optimizer.load_state_dict(optim_state)
 
     return policy
 
@@ -1466,7 +2063,7 @@ def load_config(env_name):
     parser.add_argument("--neptune-project", type=str, default="ablations")
     parser.add_argument("--local-rank", type=int, default=0, help="Used by torchrun for DDP")
     parser.add_argument("--tag", type=str, default=None, help="Tag for experiment")
-
+    parser.add_argument("--sanity-maps", nargs="*", default=None, help="Optional list of sanity map base names to run")
     args = parser.parse_known_args()[0]
 
     # Load defaults and config
@@ -1517,9 +2114,7 @@ def load_config(env_name):
 
 
 def main():
-    err = (
-        "Usage: puffer [train, eval, sweep, autotune, profile, export] [env_name] [optional args]. --help for more info"
-    )
+    err = "Usage: puffer [train, eval, sweep, controlled_exp, autotune, profile, export, sanity] [env_name] [optional args]. --help for more info"
     if len(sys.argv) < 3:
         raise pufferlib.APIUsageError(err)
 
@@ -1531,12 +2126,16 @@ def main():
         eval(env_name=env_name)
     elif mode == "sweep":
         sweep(env_name=env_name)
+    elif mode == "controlled_exp":
+        controlled_exp(env_name=env_name)
     elif mode == "autotune":
         autotune(env_name=env_name)
     elif mode == "profile":
         profile(env_name=env_name)
     elif mode == "export":
         export(env_name=env_name)
+    elif mode == "sanity":
+        sanity(env_name=env_name)
     else:
         raise pufferlib.APIUsageError(err)
 

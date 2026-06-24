@@ -12,7 +12,12 @@ class AdaptiveDrivingAgent(Drive):
         kwargs["ini_file"] = "pufferlib/config/ocean/adaptive.ini"
         kwargs["adaptive_driving_agent"] = True
 
+        # Human replay mode: disable co-players, use human trajectories for other agents
+        human_replay_mode = kwargs.pop("human_replay_mode", False)
+        if human_replay_mode:
+            kwargs["co_player_enabled"] = False
+
         kwargs["resample_frequency"] = self.k_scenarios * self.scenario_length
         self.episode_length = kwargs["resample_frequency"]
-        # print(f"resample frequency is ", kwargs["resample_frequency"], flush=True)
+
         super().__init__(**kwargs)
