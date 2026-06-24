@@ -20,6 +20,10 @@
 - [Evaluation overview](evaluation.md)
 - [WOSAC](wosac.md)
 
+# Design
+
+- [Trial mode (`goal_behavior=3`)](trial_mode.md)
+
 # Blog
 
 - [PufferDrive 2.0 release](pufferdrive-2.0.md)
