@@ -210,15 +210,14 @@ mid_x, mid_y, length, width, dir_cos, dir_sin, type
 ## Source files
 
 ### C core
-- `drive.h`: Main simulator (stepping, observations, collisions)
-- `drive.c`: Demo and testing
-- `binding.c`: Python interface
-- `visualize.c`: Raylib renderer
-- `drivenet.h`: C inference network
+- `drive.h`: Main simulator (stepping, observations, collisions, raylib renderer)
+- `binding.c` / `binding.h`: Python interface
 
 ### Python
-- `drive.py`: Gymnasium wrapper
+- `drive.py`: Gymnasium wrapper, `Drive.render()`, `set_video_suffix()`
+- `rollout.py`: Policy-agnostic rollout loop used by both training renders and `render.py`
 - `torch.py`: Neural network (ego/partner/road encoders → actor/critic)
+- `../../../render.py`: Unified rendering CLI (replaces the old `./visualize` binary)
 
 ## Neural network
 

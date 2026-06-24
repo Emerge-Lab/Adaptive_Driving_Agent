@@ -625,53 +625,156 @@ class HumanReplayEvaluator:
 
     def __init__(self, config: Dict):
         self.config = config
-        self.sim_steps = 91 - self.config["env"]["init_steps"]
+        k_scenarios = self.config["env"].get("k_scenarios", 1)
+        scenario_length = self.config["env"].get("scenario_length", 91)
+        init_steps = self.config["env"].get("init_steps", 0)
+        self.sim_steps = scenario_length - init_steps
 
     def rollout(self, args, puffer_env, policy):
         """Roll out policy in env with human replays. Store statistics.
 
-        In human replay mode, only the SDC (self-driving car) is controlled by the policy
-        while all other agents replay their human trajectories. This tests how compatible
-        the policy is with (static) human partners.
+        In human replay mode, only the SDC is controlled by the policy while
+        all other agents replay their human trajectories. This tests how
+        compatible the policy is with static human partners.
 
-        Args:
-            args: Config dict with train settings (device, use_rnn, etc.)
-            puffer_env: PufferLib environment wrapper
-            policy: Trained policy to evaluate
-
-        Returns:
-            dict: Aggregated metrics including:
-                - avg_collisions_per_agent: Average collisions per agent
-                - avg_offroad_per_agent: Average offroad events per agent
+        Runs `num_rollouts` independent rollouts (env is reset between each,
+        which resamples the map/agent slice). Reports per-key mean across
+        rollouts, plus `<key>_std` so you can see variance once the per-batch
+        score saturates.
         """
         import numpy as np
         import torch
         import pufferlib
 
+        num_rollouts = int(args.get("eval", {}).get("human_replay_num_rollouts", 1) or 1)
         num_agents = puffer_env.observation_space.shape[0]
         device = args["train"]["device"]
+        k_scenarios = args["env"].get("k_scenarios", 1)
 
-        obs, info = puffer_env.reset()
-        state = {}
-        if args["train"]["use_rnn"]:
-            state = dict(
-                lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
-                lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
-            )
+        is_transformer = hasattr(policy, "horizon") and hasattr(policy, "transformer")
+        is_recurrent = hasattr(policy, "lstm")
 
-        for time_idx in range(self.sim_steps):
-            # Step policy
-            with torch.no_grad():
-                ob_tensor = torch.as_tensor(obs).to(device)
-                logits, value = policy.forward_eval(ob_tensor, state)
-                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-                action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
+        def _fresh_state():
+            if is_recurrent:
+                return dict(
+                    lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
+                    lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
+                )
+            if is_transformer:
+                return dict(
+                    transformer_context=torch.zeros(num_agents, policy.horizon, policy.hidden_size, device=device),
+                    transformer_position=torch.zeros(1, dtype=torch.long, device=device),
+                )
+            return {}
 
-            if isinstance(logits, torch.distributions.Normal):
-                action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
+        per_rollout_aggregates = []
+        per_rollout_scenario = []
+        per_rollout_delta = []
 
-            obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
+        # Per-(rollout, scenario, agent) success tracking. An agent is marked
+        # "successful in scenario s" when it terminates with a positive reward
+        # at any step of s — this is the goal-reach signal in stop-on-goal eval
+        # (goal_behavior=2). Agents that collide / go offroad terminate with
+        # negative reward; agents that time out stay non-terminal. The 0.5
+        # threshold is conservative: reward_goal default is 1.0 and the only
+        # other positive per-step reward is reward_lane_align (0.01-ish), so
+        # a single tick can't accumulate to 0.5 from lane reward alone.
+        goal_reward_threshold = float(args.get("eval", {}).get("recovery_goal_reward_threshold", 0.5))
+        # CONTROL: when env var RECOVERY_CACHE_RESET_PER_SCENARIO=1, reset
+        # the policy's K/V cache (= "_fresh_state") at every scenario
+        # boundary. This kills any cross-scenario context the Transformer
+        # would have used, isolating "is the cache helping?" from "is the
+        # per-scenario obs alone enough?". Env var because pufferl's
+        # argparser doesn't auto-create new --eval.* flags.
+        cache_reset_per_scenario = os.environ.get("RECOVERY_CACHE_RESET_PER_SCENARIO", "0") == "1"
+        if cache_reset_per_scenario:
+            print("[recovery] CONTROL mode: resetting K/V cache at every scenario boundary", flush=True)
+        success_arr = np.zeros((num_rollouts, k_scenarios, num_agents), dtype=bool)
 
-            if len(info_list) > 0:  # Happens at the end of episode
-                results = info_list[0]
-                return results
+        for rollout_idx in range(num_rollouts):
+            obs, _ = puffer_env.reset()
+            state = _fresh_state()
+            collected_infos = []
+            scenario_metrics = {}
+            delta_metrics = {}
+
+            for scenario in range(k_scenarios):
+                if scenario > 0 and cache_reset_per_scenario:
+                    state = _fresh_state()
+                for time_idx in range(self.sim_steps):
+                    with torch.no_grad():
+                        ob_tensor = torch.as_tensor(obs).to(device)
+                        logits, value = policy.forward_eval(ob_tensor, state)
+                        action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                        action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
+
+                    if isinstance(logits, torch.distributions.Normal):
+                        action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
+
+                    obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
+
+                    # Mark per-agent success this scenario: a +reward_goal spike
+                    # at any tick == goal reached. In stop-on-goal mode the env
+                    # does NOT set `dones` per agent (the agent just stops moving),
+                    # so we can't gate on dones. The only step-level reward that
+                    # crosses `goal_reward_threshold` is the goal reward itself
+                    # (lane_align is ~0.01/step, so even integrated it can't
+                    # reach 0.5 in one tick). We OR across the scenario so the
+                    # success flag sticks even if subsequent ticks are 0.
+                    rewards_arr = np.asarray(rewards).reshape(-1)
+                    success_arr[rollout_idx, scenario] |= rewards_arr > goal_reward_threshold
+
+                    for info_dict in info_list:
+                        if not isinstance(info_dict, dict):
+                            continue
+                        if "ada_delta_score" in info_dict:
+                            delta_metrics = info_dict
+                        elif any(k.startswith("scenario_") for k in info_dict.keys()):
+                            scenario_metrics.update(info_dict)
+                        elif "score" in info_dict:
+                            collected_infos.append(info_dict)
+
+            if collected_infos:
+                rollout_agg = {
+                    k: float(np.mean([d.get(k, 0) for d in collected_infos])) for k in collected_infos[0].keys()
+                }
+            else:
+                rollout_agg = {}
+            per_rollout_aggregates.append(rollout_agg)
+            per_rollout_scenario.append(scenario_metrics)
+            per_rollout_delta.append(delta_metrics)
+
+        # Mean + std across rollouts (std only meaningful for >1 rollout)
+        final = {}
+        for dicts in (per_rollout_aggregates, per_rollout_scenario, per_rollout_delta):
+            keys = {k for d in dicts for k in d.keys()}
+            for k in keys:
+                vals = [float(d[k]) for d in dicts if k in d]
+                if not vals:
+                    continue
+                final[k] = float(np.mean(vals))
+                if len(vals) > 1:
+                    final[f"{k}_std"] = float(np.std(vals, ddof=0))
+
+        final["n_rollouts"] = num_rollouts
+        final["n_agents_per_rollout"] = num_agents
+        final["n_total_evals"] = num_rollouts * num_agents
+
+        # ----- Raw per-(rollout, agent, scenario) success log -----
+        # No fancy aggregation here. We dump the full success grid as a flat
+        # list of records, one per (rollout, agent), with success bools per
+        # scenario. Any conditional rate (e.g., P(succeed s_k | fail s_0)) is
+        # a one-liner over this data downstream.
+        #
+        # Schema: list of {"rollout": int, "agent": int, "s0": int, ...,
+        # "s_{k-1}": int} — one record per (rollout, agent) pair.
+        records = []
+        for r in range(num_rollouts):
+            for a in range(num_agents):
+                rec = {"rollout": int(r), "agent": int(a)}
+                for s_idx in range(k_scenarios):
+                    rec[f"s{s_idx}"] = int(success_arr[r, s_idx, a])
+                records.append(rec)
+        final["per_agent_success_log"] = records
+
+        return final

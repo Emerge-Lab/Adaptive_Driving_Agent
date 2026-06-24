@@ -1,35 +1,42 @@
 # Visualizer
 
-PufferDrive ships a Raylib-based visualizer for replaying scenes, exporting videos, and debugging policies.
+PufferDrive renders headless mp4s from Python. Policy inference runs in PyTorch
+and graphics are produced via the C/raylib bindings (`vec_render`), so the same
+pipeline works for both LSTM and Transformer policies.
 
 ## Dependencies
-Install the minimal system packages for headless render/export:
 
 ```bash
 sudo apt update
 sudo apt install ffmpeg xvfb
 ```
 
-On environments without sudo, install them into your conda/venv:
+Without sudo:
 
 ```bash
 conda install -c conda-forge xorg-x11-server-xvfb-cos6-x86_64 ffmpeg
 ```
 
-## Build
-Compile the visualizer binary from the repo root:
+## Run
+
+The unified entrypoint is `render.py` at the repo root:
 
 ```bash
-bash scripts/build_ocean.sh visualize local
+# Baseline: ego drives, others follow logged trajectories
+xvfb-run -s "-screen 0 1280x720x24" python render.py \
+    --model-path experiments/<run>.pt --map-dir resources/drive/binaries/training
+
+# Adaptive ego + frozen co-player population
+python render.py --model-path adaptive.pt --co-player-path coplayer.pt \
+    --co-player-conditioning-type all --k-scenarios 2
+
+# Human replay: only the SDC is policy-controlled, others = logged
+python render.py --model-path X.pt --human-replay --num-renders 5
+
+# Multiple views in one go
+python render.py --model-path X.pt --view-mode all
 ```
 
-If you need to force a rebuild, remove the cached binary first (`rm ./visualize`).
-
-## Run headless
-Launch the visualizer with a virtual display and export an `.mp4`:
-
-```bash
-xvfb-run -s "-screen 0 1280x720x24" ./visualize
-```
-
-Adjust the screen size and color depth as needed. The `xvfb-run` wrapper allows Raylib to render without an attached display, which is convenient for servers and CI jobs.
+Architecture is auto-detected from the checkpoint state-dict; override with
+`--policy-architecture {Recurrent,Transformer}`. See `python render.py --help`
+for the full set of conditioning, co-player, and rendering flags.
