@@ -439,6 +439,15 @@ class Drive(pufferlib.PufferEnv):
         # Per-trial-boundary flag. C writes 1 at env trial-end under gb=3;
         # Python reads. See docs/src/trial_mode.md.
         self.trial_ended_this_step = np.zeros(self.num_agents, dtype=bool)
+        # Per-trial reward decomposition: each holds the per-trial sum of one
+        # component (goal, vehicle collision, offroad, lane shaping). C
+        # accumulates per-step at every rewards[i] write site and zeros at
+        # the top of the next c_step for agents flagged trial_ended. Python
+        # reads when trial_ended_this_step[i] == 1.
+        self.trial_R_goal      = np.zeros(self.num_agents, dtype=np.float32)
+        self.trial_R_collision = np.zeros(self.num_agents, dtype=np.float32)
+        self.trial_R_offroad   = np.zeros(self.num_agents, dtype=np.float32)
+        self.trial_R_lane      = np.zeros(self.num_agents, dtype=np.float32)
         if _removed_external is not None:
             assert _removed_external.shape == (self.num_agents,), (
                 f"buf['removed'] shape {_removed_external.shape} != ({self.num_agents},)"
@@ -533,6 +542,10 @@ class Drive(pufferlib.PufferEnv):
                 render_mode=self._render_mode_int,
                 trial_ended_this_step=self.trial_ended_this_step[cur:nxt],
                 removed=self.removed[cur:nxt],
+                trial_R_goal=self.trial_R_goal[cur:nxt],
+                trial_R_collision=self.trial_R_collision[cur:nxt],
+                trial_R_offroad=self.trial_R_offroad[cur:nxt],
+                trial_R_lane=self.trial_R_lane[cur:nxt],
             )
             env_ids.append(env_id)
 
@@ -983,6 +996,10 @@ class Drive(pufferlib.PufferEnv):
                 render_mode=self._render_mode_int,
                 trial_ended_this_step=self.trial_ended_this_step[cur:nxt],
                 removed=self.removed[cur:nxt],
+                trial_R_goal=self.trial_R_goal[cur:nxt],
+                trial_R_collision=self.trial_R_collision[cur:nxt],
+                trial_R_offroad=self.trial_R_offroad[cur:nxt],
+                trial_R_lane=self.trial_R_lane[cur:nxt],
             )
             env_ids.append(env_id)
         self.c_envs = binding.vectorize(*env_ids)

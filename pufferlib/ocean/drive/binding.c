@@ -98,6 +98,7 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
         }
         env->removed = PyArray_DATA(removed_arr);
     }
+
     return 0;
 }
 
@@ -271,6 +272,40 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
             return -1;
         }
         env->removed = PyArray_DATA(removed_arr);
+    }
+
+    // Per-trial reward decomposition buffers (optional, float32 1D). C
+    // accumulates per-step in drive.h at every rewards[i] write and zeros
+    // per-agent at the top of the next c_step after trial_ended_this_step.
+    // Python reads when trial_ended_this_step[i] == 1.
+    env->trial_R_goal      = NULL;
+    env->trial_R_collision = NULL;
+    env->trial_R_offroad   = NULL;
+    env->trial_R_lane      = NULL;
+    const char *trial_R_keys[4] = {
+        "trial_R_goal", "trial_R_collision", "trial_R_offroad", "trial_R_lane",
+    };
+    float **trial_R_slots[4] = {
+        &env->trial_R_goal, &env->trial_R_collision,
+        &env->trial_R_offroad, &env->trial_R_lane,
+    };
+    for (int j = 0; j < 4; j++) {
+        PyObject *obj = PyDict_GetItemString(kwargs, trial_R_keys[j]);
+        if (obj == NULL) continue;
+        if (!PyObject_TypeCheck(obj, &PyArray_Type)) {
+            PyErr_Format(PyExc_TypeError, "%s must be a NumPy array", trial_R_keys[j]);
+            return -1;
+        }
+        PyArrayObject *arr = (PyArrayObject *)obj;
+        if (!PyArray_ISCONTIGUOUS(arr) || PyArray_NDIM(arr) != 1) {
+            PyErr_Format(PyExc_ValueError, "%s must be 1D contiguous", trial_R_keys[j]);
+            return -1;
+        }
+        if (PyArray_TYPE(arr) != NPY_FLOAT32) {
+            PyErr_Format(PyExc_TypeError, "%s must be float32", trial_R_keys[j]);
+            return -1;
+        }
+        *trial_R_slots[j] = PyArray_DATA(arr);
     }
 
     init(env);

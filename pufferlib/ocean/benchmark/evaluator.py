@@ -704,6 +704,20 @@ class HumanReplayEvaluator:
         # success_arr indexed by (rollout, scenario_or_trial, agent)
         n_outer = max_trials if is_trial_mode else k_scenarios
         success_arr = np.zeros((num_rollouts, n_outer, num_agents), dtype=bool)
+        # Per-trial summed reward (return), parallel to success_arr. The
+        # continuous adaptation metric: ΔR = R_{last} - R_0 captures partial
+        # progress / failure severity that the binary success bit discards.
+        return_arr = np.zeros((num_rollouts, n_outer, num_agents), dtype=np.float32)
+        # Per-trial reward DECOMPOSITION (trial mode only). Each component
+        # is summed inside the env (drive.h) at every rewards[i] write and
+        # surfaced through buffers (puffer_env.trial_R_{goal,collision,offroad,lane}).
+        # We snapshot at trial-end (the same moment trial_ended_this_step fires).
+        # Collision and offroad are kept SEPARATE; goal includes any post-respawn
+        # ghost reward (GOAL_RESPAWN only, not relevant under GOAL_TRIAL).
+        goal_arr      = np.zeros((num_rollouts, n_outer, num_agents), dtype=np.float32)
+        collision_arr = np.zeros((num_rollouts, n_outer, num_agents), dtype=np.float32)
+        offroad_arr   = np.zeros((num_rollouts, n_outer, num_agents), dtype=np.float32)
+        lane_arr      = np.zeros((num_rollouts, n_outer, num_agents), dtype=np.float32)
 
         for rollout_idx in range(num_rollouts):
             obs, _ = puffer_env.reset()
@@ -731,12 +745,31 @@ class HumanReplayEvaluator:
                     rewards_arr = np.asarray(rewards).reshape(-1)
                     reached = rewards_arr > goal_reward_threshold
 
+                    # Accumulate this step's reward into each agent's CURRENT
+                    # trial slot (the step's reward belongs to the trial it
+                    # was earned in, which may also be the trial that ends here).
+                    active = np.where(~rollout_complete & (trial_idx < max_trials))[0]
+                    if active.size:
+                        return_arr[rollout_idx, trial_idx[active], active] += rewards_arr[active]
+
+
                     te = np.asarray(puffer_env.trial_ended_this_step).reshape(-1).astype(bool)
                     end_idxs = np.where(te & ~rollout_complete)[0]
+                    # Snapshot per-trial component sums NOW (the env will zero
+                    # these buffers at the top of the next c_step).
+                    if end_idxs.size:
+                        tr_goal      = np.asarray(puffer_env.trial_R_goal).reshape(-1)
+                        tr_collision = np.asarray(puffer_env.trial_R_collision).reshape(-1)
+                        tr_offroad   = np.asarray(puffer_env.trial_R_offroad).reshape(-1)
+                        tr_lane      = np.asarray(puffer_env.trial_R_lane).reshape(-1)
                     for a in end_idxs:
                         ti = int(trial_idx[a])
                         if ti < max_trials:
                             success_arr[rollout_idx, ti, a] = bool(reached[a])
+                            goal_arr[rollout_idx, ti, a]      = float(tr_goal[a])
+                            collision_arr[rollout_idx, ti, a] = float(tr_collision[a])
+                            offroad_arr[rollout_idx, ti, a]   = float(tr_offroad[a])
+                            lane_arr[rollout_idx, ti, a]      = float(tr_lane[a])
                             trial_idx[a] = ti + 1
                             if trial_idx[a] >= max_trials:
                                 rollout_complete[a] = True
@@ -765,6 +798,7 @@ class HumanReplayEvaluator:
 
                         rewards_arr = np.asarray(rewards).reshape(-1)
                         success_arr[rollout_idx, scenario] |= rewards_arr > goal_reward_threshold
+                        return_arr[rollout_idx, scenario] += rewards_arr
 
                         for info_dict in info_list:
                             if not isinstance(info_dict, dict):
@@ -811,24 +845,47 @@ class HumanReplayEvaluator:
         # Schema: list of {"rollout": int, "agent": int, "s0": int, ...,
         # "s_{k-1}": int} — one record per (rollout, agent) pair.
         records = []
+        return_records = []
+        # Per-trial reward decomposition records (trial mode only).
+        component_arrs = {
+            "goal":      goal_arr,
+            "collision": collision_arr,
+            "offroad":   offroad_arr,
+            "lane":      lane_arr,
+        }
+        component_records = {name: [] for name in component_arrs}
         prefix = "t" if is_trial_mode else "s"
         for r in range(num_rollouts):
             for a in range(num_agents):
                 rec = {"rollout": int(r), "agent": int(a)}
+                rec_ret = {"rollout": int(r), "agent": int(a)}
+                comp_recs = {name: {"rollout": int(r), "agent": int(a)} for name in component_arrs}
                 for s_idx in range(n_outer):
                     rec[f"{prefix}{s_idx}"] = int(success_arr[r, s_idx, a])
+                    rec_ret[f"{prefix}{s_idx}"] = float(return_arr[r, s_idx, a])
+                    for name, arr in component_arrs.items():
+                        comp_recs[name][f"{prefix}{s_idx}"] = float(arr[r, s_idx, a])
                 records.append(rec)
+                return_records.append(rec_ret)
+                for name in component_arrs:
+                    component_records[name].append(comp_recs[name])
         final["per_agent_success_log"] = records
+        final["per_agent_return_log"] = return_records
+        if is_trial_mode:
+            for name, recs in component_records.items():
+                final[f"per_agent_{name}_log"] = recs
 
         # Per-trial aggregate metrics + ada_delta deltas (trial mode only).
         # Computed from success_arr to give clean per-trial signal even when
         # the env's vec_log path doesn't aggregate per-trial rates.
         if is_trial_mode:
             for k in range(n_outer):
-                trial_k_score = float(success_arr[:, k, :].mean())
-                final[f"trial_{k}_score"] = trial_k_score
+                final[f"trial_{k}_score"] = float(success_arr[:, k, :].mean())
+                final[f"trial_{k}_return"] = float(return_arr[:, k, :].mean())
             t0 = float(success_arr[:, 0, :].mean())
+            t0_R = float(return_arr[:, 0, :].mean())
             for k in range(1, n_outer):
                 final[f"ada_delta_trial_{k}_minus_0"] = float(success_arr[:, k, :].mean()) - t0
+                final[f"ada_delta_R_trial_{k}_minus_0"] = float(return_arr[:, k, :].mean()) - t0_R
 
         return final

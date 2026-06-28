@@ -349,6 +349,19 @@ struct Drive {
     unsigned char *trial_ended_this_step;  // GOAL_TRIAL: per-agent trial-boundary flag
     unsigned char *truncations;            // GOAL_TRIAL: trial-end bootstrap-stop signal
     unsigned char *removed;                // GOAL_TRIAL B'': per-agent off-map flag
+    // Per-trial reward DECOMPOSITION buffers (Python-allocated, C-written).
+    // Each buffer holds the sum of that component's per-step reward
+    // contributions for the CURRENT trial. Pattern matches trial_ended_this_step:
+    //   - C accumulates per-step at each rewards[i] write/add site.
+    //   - Python reads when trial_ended_this_step[i] == 1 (the per-trial sum).
+    //   - At the top of the next c_step, C zeroes per-agent for any agent
+    //     that had trial_ended_this_step[i] == 1, then clears the flag.
+    // Collision and offroad are kept SEPARATE (unlike the post-hoc threshold
+    // decomp, which merged them because both pay -0.5 at eval).
+    float *trial_R_goal;
+    float *trial_R_collision;
+    float *trial_R_offroad;
+    float *trial_R_lane;
     // Env-level trial state (GOAL_TRIAL B''). All egos in this env share one
     // trial clock; trial-end fires when all egos have removed=1 or timeout.
     int env_trial_count;
@@ -2623,6 +2636,25 @@ void c_reset(Drive *env) {
     env->env_episode_ended = 0;
     set_start_position(env);
 
+    // Zero per-trial reward-decomposition accumulators -- but ONLY for agents
+    // whose trial DIDN'T just end. When trial_ended_this_step[i] == 1, Python
+    // still needs to read trial_R_*[i] (the just-finished trial's sum); if we
+    // zero here, that snapshot gets clobbered. This matters because c_reset is
+    // also called from drive.py:_reinit_envs_with_new_maps() at episode resample
+    // boundaries — which fire AT the end of step() but BEFORE Python reads, so
+    // a blanket memset would wipe the trial-4 snapshot for any agent whose final
+    // trial ended exactly at the resample tick (= horizon for adaptive eval).
+    // Per-agent values flagged te[i]==1 are zeroed by the top-of-c_step reset
+    // on the NEXT step (after Python has read), so leaving them untouched here
+    // is safe and correct.
+    for (int i = 0; i < env->active_agent_count; i++) {
+        if (env->trial_ended_this_step != NULL && env->trial_ended_this_step[i]) continue;
+        if (env->trial_R_goal      != NULL) env->trial_R_goal[i]      = 0.0f;
+        if (env->trial_R_collision != NULL) env->trial_R_collision[i] = 0.0f;
+        if (env->trial_R_offroad   != NULL) env->trial_R_offroad[i]   = 0.0f;
+        if (env->trial_R_lane      != NULL) env->trial_R_lane[i]      = 0.0f;
+    }
+
     for (int i = 0; i < env->active_agent_count; i++) {
         env->collision_weights[i] = ((float)rand() / RAND_MAX) * (env->collision_weight_ub - env->collision_weight_lb) +
                                     env->collision_weight_lb;
@@ -2717,6 +2749,16 @@ void c_step(Drive *env) {
     memset(env->rewards, 0, env->active_agent_count * sizeof(float));
     memset(env->terminals, 0, env->active_agent_count * sizeof(unsigned char));
     if (env->trial_ended_this_step != NULL) {
+        // Reset per-trial component accumulators for any agent whose trial
+        // ended on the PREVIOUS step (Python has already read those values).
+        // Must precede the memset of trial_ended_this_step itself.
+        for (int i = 0; i < env->active_agent_count; i++) {
+            if (!env->trial_ended_this_step[i]) continue;
+            if (env->trial_R_goal      != NULL) env->trial_R_goal[i]      = 0.0f;
+            if (env->trial_R_collision != NULL) env->trial_R_collision[i] = 0.0f;
+            if (env->trial_R_offroad   != NULL) env->trial_R_offroad[i]   = 0.0f;
+            if (env->trial_R_lane      != NULL) env->trial_R_lane[i]      = 0.0f;
+        }
         memset(env->trial_ended_this_step, 0, env->active_agent_count * sizeof(unsigned char));
     }
     // C owns truncations under GOAL_TRIAL. Zero at top of step; write 1 at
@@ -2790,6 +2832,8 @@ void c_step(Drive *env) {
         if (collision_state > 0 && !env->entities[agent_idx].stopped) {
             if (collision_state == VEHICLE_COLLISION) {
                 env->rewards[i] = env->collision_weights[i];
+                if (env->trial_R_collision != NULL)
+                    env->trial_R_collision[i] += env->collision_weights[i];
 
                 if (is_ego) {
                     env->logs[i].episode_return += env->collision_weights[i];
@@ -2802,6 +2846,8 @@ void c_step(Drive *env) {
                 }
             } else if (collision_state == OFFROAD) {
                 env->rewards[i] = env->offroad_weights[i];
+                if (env->trial_R_offroad != NULL)
+                    env->trial_R_offroad[i] += env->offroad_weights[i];
 
                 if (is_ego) {
                     env->logs[i].episode_return += env->offroad_weights[i];
@@ -2845,6 +2891,8 @@ void c_step(Drive *env) {
             if (env->goal_behavior == GOAL_RESPAWN && env->entities[agent_idx].respawn_timestep != -1) {
                 float scaled_post_respawn_reward = env->reward_goal_post_respawn * env->goal_weights[i];
                 env->rewards[i] += scaled_post_respawn_reward;
+                if (env->trial_R_goal != NULL)
+                    env->trial_R_goal[i] += scaled_post_respawn_reward;
 
                 if (is_ego) {
                     env->logs[i].episode_return += scaled_post_respawn_reward;
@@ -2854,6 +2902,8 @@ void c_step(Drive *env) {
                 env->entities[agent_idx].current_goal_reached = 1;
             } else if (env->goal_behavior == GOAL_GENERATE_NEW && (!env->entities[agent_idx].current_goal_reached)) {
                 env->rewards[i] += env->goal_weights[i];
+                if (env->trial_R_goal != NULL)
+                    env->trial_R_goal[i] += env->goal_weights[i];
 
                 if (is_ego) {
                     env->logs[i].episode_return += env->goal_weights[i];
@@ -2865,6 +2915,17 @@ void c_step(Drive *env) {
                 env->entities[agent_idx].current_goal_reached = 0;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
             } else { // GOAL_STOP or GOAL_TRIAL
+                // Goal-reach OVERWRITES rewards[i] (assignment, not add), so any
+                // crash penalty written earlier this step is discarded from the
+                // scalar reward. Undo the matching component accumulator so the
+                // sum of components stays exactly equal to rewards[i].
+                if (collision_state == VEHICLE_COLLISION && !env->entities[agent_idx].stopped) {
+                    if (env->trial_R_collision != NULL)
+                        env->trial_R_collision[i] -= env->collision_weights[i];
+                } else if (collision_state == OFFROAD && !env->entities[agent_idx].stopped) {
+                    if (env->trial_R_offroad != NULL)
+                        env->trial_R_offroad[i] -= env->offroad_weights[i];
+                }
                 float goal_reward = env->goal_weights[i];
                 // GOAL_TRIAL cross-trial reward shaping: trial K success is worth
                 // (1 + α * K) * base, where α = reward_trial_index_multiplier.
@@ -2873,6 +2934,8 @@ void c_step(Drive *env) {
                     goal_reward *= (1.0f + env->reward_trial_index_multiplier * (float)env->env_trial_count);
                 }
                 env->rewards[i] = goal_reward;
+                if (env->trial_R_goal != NULL)
+                    env->trial_R_goal[i] += goal_reward;
 
                 if (is_ego) {
                     env->logs[i].episode_return = goal_reward;
@@ -2923,6 +2986,8 @@ void c_step(Drive *env) {
                 env->reward_lane_align * env->dt * (against_lane_penalty + vel_aligned_penalty + alignment_bonus);
 
             env->rewards[i] += lane_align_reward;
+            if (env->trial_R_lane != NULL)
+                env->trial_R_lane[i] += lane_align_reward;
 
             if (is_ego) {
                 env->logs[i].episode_return += lane_align_reward;

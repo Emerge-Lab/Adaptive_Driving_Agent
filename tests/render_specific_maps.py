@@ -109,10 +109,13 @@ def main():
         if tid < len(map_ids):
             print(f"  env {tid} -> map {map_ids[tid]}")
 
-    # set per-env video suffix only for the targets
+    # Write each target's mp4 straight into args.out via a full-path basename
+    # (the recorder does snprintf("%s.mp4", basename)). This avoids the
+    # CWD-glob harvest and the cross-task filename race when many cells render
+    # the same map_id concurrently from a shared working directory.
     if not args.no_render:
         for tid in target_ids:
-            driver.set_video_suffix(f"_map{tid:03d}", env_id=tid)
+            driver.set_video_suffix(str(args.out / f"map{tid:03d}"), env_id=tid)
 
     policy = load_policy(info, args.checkpoint, vec, args.device)
     obs, _ = vec.reset()
@@ -127,11 +130,38 @@ def main():
     attn_per_step = [] if args.capture_attention else None     # each: (n_tgt, H, horizon)
     active = np.zeros((args.n_steps, n_tgt), dtype=bool) if args.capture_attention else None
 
+    # The legacy full-context forward runs every env through the transformer in
+    # one batch; for long horizons num_agents*horizon overflows the cublasLt
+    # matmul (k5: 539*1005=541695 -> CUBLAS_STATUS_EXECUTION_FAILED -> CUDA
+    # illegal memory access). Cap each forward at a token budget known to run
+    # (k4: 539*804) by chunking the batch. Per-agent context rows are independent
+    # so chunked forwards are numerically equivalent; each chunk keeps its own
+    # context state. k<=4 collapse to one chunk. Disabled under attention capture
+    # (the probe indexes the full-batch state).
+    if not args.capture_attention:
+        token_budget = 433_356  # 539*804, largest forward observed to succeed
+        horizon = int(getattr(policy, "horizon", args.n_steps))
+        chunk_sz = max(1, token_budget // max(1, horizon))
+        n_ag = obs.shape[0]
+        legacy_chunks = [(i, min(i + chunk_sz, n_ag)) for i in range(0, n_ag, chunk_sz)]
+        chunk_states = [{} for _ in legacy_chunks]
+        if len(legacy_chunks) > 1:
+            print(f"[chunked forward] num_agents={n_ag} horizon={horizon} -> "
+                  f"{len(legacy_chunks)} chunks of <= {chunk_sz}", flush=True)
+
     for t in range(args.n_steps):
         with torch.no_grad():
             ob = torch.as_tensor(obs).to(args.device)
-            logits, _ = policy.forward_eval(ob, state)
-            action, _, _ = pufferlib.pytorch.sample_logits(logits)
+            if args.capture_attention:
+                logits, _ = policy.forward_eval(ob, state)
+                action, _, _ = pufferlib.pytorch.sample_logits(logits)
+            else:
+                acts = []
+                for (a, b), cst in zip(legacy_chunks, chunk_states):
+                    lg, _ = policy.forward_eval(ob[a:b], cst)
+                    ac, _, _ = pufferlib.pytorch.sample_logits(lg)
+                    acts.append(ac)
+                action = torch.cat(acts, dim=0)
             action_np = action.cpu().numpy().reshape(vec.action_space.shape)
 
         if args.capture_attention:
@@ -170,12 +200,12 @@ def main():
     print("rollout done, closing env (flushing mp4s)...", flush=True)
     vec.close()
 
-    moved = 0
+    # mp4s are written directly into args.out via the per-env basename above.
+    # Sweep up any stray CWD files from older-style basenames, then report.
     for c in list(Path(".").glob("*_map*.mp4")):
         shutil.move(str(c), str(args.out / c.name))
-        moved += 1
-        print(f"  saved: {args.out / c.name}")
-    print(f"moved {moved} mp4 files")
+    n = len(list(args.out.glob("*.mp4")))
+    print(f"{n} mp4 files in {args.out}")
 
 
 if __name__ == "__main__":

@@ -89,6 +89,56 @@ def _build_per_map_wandb_payload(per_agent_log):
     return payload
 
 
+def _build_per_map_return_payload(per_agent_return_log):
+    """Per-map MEAN RETURN table from the per-trial return log.
+
+    Mirrors _build_per_map_wandb_payload but for continuous per-trial summed
+    reward instead of the binary success bit. Each record is
+    {"rollout": r, "agent": a, "t0|s0": float, ...}. Returns a wandb table
+    with cols [map_id, t0..t_{K-1}, ada_delta_R_last_minus_0].
+    """
+    import wandb
+
+    if not per_agent_return_log:
+        return {}
+
+    trial_keys = sorted(
+        [
+            k
+            for k in per_agent_return_log[0].keys()
+            if k and k[0] in ("t", "s") and k[1:].isdigit()
+        ],
+        key=lambda k: int(k[1:]),
+    )
+    if not trial_keys:
+        return {}
+
+    n_agents = max(r["agent"] for r in per_agent_return_log) + 1
+    n_rollouts = max(r["rollout"] for r in per_agent_return_log) + 1
+    K = len(trial_keys)
+
+    grid = np.zeros((n_rollouts, n_agents, K), dtype=np.float32)
+    for rec in per_agent_return_log:
+        for ti, tk in enumerate(trial_keys):
+            grid[rec["rollout"], rec["agent"], ti] = float(rec.get(tk, 0.0))
+
+    per_map_R = grid.mean(axis=0)  # (n_agents, K)
+    ada_delta_R = per_map_R[:, -1] - per_map_R[:, 0]
+
+    payload = {}
+    cols = ["map_id"] + trial_keys + ["ada_delta_R_last_minus_0"]
+    table = wandb.Table(columns=cols)
+    for m in range(n_agents):
+        row = (
+            [int(m)]
+            + [float(per_map_R[m, ti]) for ti in range(K)]
+            + [float(ada_delta_R[m])]
+        )
+        table.add_data(*row)
+    payload["eval_maps/per_map_return_summary"] = table
+    return payload
+
+
 def run_human_replay_eval_in_subprocess(config, logger, global_step):
     """Run human replay evaluation in a subprocess and log metrics to wandb.
 

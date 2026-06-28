@@ -46,6 +46,13 @@ def build_cmd(ckpt_path, k, sl, num_rollouts, num_maps, num_agents):
         "--train.horizon", str(horizon),
         "--env.goal-behavior", "3",
         "--env.conditioning.type", "none",
+        # Match the TRAINING reward weights so the per-trial return we log is
+        # comparable to what the agent optimized (see final_runs_manifest.md +
+        # cluster_coplayer_grid_k234.sh:44-55). Eval default would inherit
+        # adaptive.ini sparse values (lane 0, collision/offroad −0.1).
+        "--env.reward-vehicle-collision", "-0.5",
+        "--env.reward-offroad-collision", "-0.5",
+        "--env.reward-lane-align", "0.05",
     ]
 
 
@@ -73,6 +80,9 @@ def main():
     ap.add_argument("--num-maps", type=int, default=540)
     ap.add_argument("--num-agents", type=int, default=540)
     ap.add_argument("--out-dir", type=Path, default=REPO_ROOT / "outputs" / "eval540")
+    ap.add_argument("--return-dir", type=Path,
+                    default=REPO_ROOT / "outputs" / "eval540_return",
+                    help="Where to write per-map RETURN CSV (continuous adaptation metric).")
     ap.add_argument("--table-prefix", default="eval540_20r")
     ap.add_argument("--wandb-project", default="adaptive_aligned_v2")
     ap.add_argument("--wandb-entity", default="emerge_")
@@ -111,6 +121,64 @@ def main():
         w.writerow(table.columns)
         w.writerows(table.data)
     print(f"[eval540]   wrote {csv_path} ({len(table.data)} maps, cols={table.columns})", flush=True)
+
+    # ----- per-map RETURN CSV (continuous adaptation metric) -----
+    per_agent_return_log = metrics.get("per_agent_return_log")
+    if per_agent_return_log:
+        from pufferlib.utils import _build_per_map_return_payload
+        return_payload = _build_per_map_return_payload(per_agent_return_log)
+        return_table = return_payload.get("eval_maps/per_map_return_summary")
+        if return_table is not None:
+            args.return_dir.mkdir(parents=True, exist_ok=True)
+            ret_csv = args.return_dir / f"per_map_R_k{args.k}_seed{args.seed}_{args.wid}.csv"
+            with open(ret_csv, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(return_table.columns)
+                w.writerows(return_table.data)
+            print(f"[eval540]   wrote {ret_csv} "
+                  f"({len(return_table.data)} maps, cols={return_table.columns})", flush=True)
+    else:
+        print("[eval540]   WARNING: no per_agent_return_log in metrics — return CSV skipped",
+              flush=True)
+
+    # ----- per-component CSVs (goal / collision / offroad / lane) -----
+    # Sourced from the env-side per-trial accumulators (drive.h trial_R_*),
+    # snapshotted in the evaluator at each trial_ended_this_step. Same per-map
+    # reducer shape as the return CSV: cols = [map_id, t0..t{K-1}, ada_delta].
+    def _write_component_csv(log, suffix):
+        if not log:
+            print(f"[eval540]   WARNING: no per_agent_{suffix}_log — skipped (non-trial eval?)",
+                  flush=True)
+            return
+        import numpy as np
+        trial_keys = sorted(
+            [k for k in log[0].keys() if k and k[0] in ("t", "s") and k[1:].isdigit()],
+            key=lambda c: int(c[1:]),
+        )
+        if not trial_keys:
+            return
+        n_agents = max(r["agent"] for r in log) + 1
+        n_rollouts = max(r["rollout"] for r in log) + 1
+        K = len(trial_keys)
+        grid = np.zeros((n_rollouts, n_agents, K), dtype=np.float32)
+        for rec in log:
+            for ti, tk in enumerate(trial_keys):
+                grid[rec["rollout"], rec["agent"], ti] = float(rec.get(tk, 0.0))
+        per_map = grid.mean(axis=0)                       # (n_agents, K)
+        ada_delta = per_map[:, -1] - per_map[:, 0]
+        out_csv = args.return_dir / f"per_map_{suffix}_k{args.k}_seed{args.seed}_{args.wid}.csv"
+        with open(out_csv, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["map_id", *trial_keys, f"ada_delta_{suffix}_last_minus_0"])
+            for m in range(n_agents):
+                row = [int(m)] + [float(per_map[m, ti]) for ti in range(K)] + [float(ada_delta[m])]
+                w.writerow(row)
+        print(f"[eval540]   wrote {out_csv} ({n_agents} maps)", flush=True)
+
+    _write_component_csv(metrics.get("per_agent_goal_log"),      "goal")
+    _write_component_csv(metrics.get("per_agent_collision_log"), "collision")
+    _write_component_csv(metrics.get("per_agent_offroad_log"),   "offroad")
+    _write_component_csv(metrics.get("per_agent_lane_log"),      "lane")
 
     if not args.no_wandb:
         import wandb
