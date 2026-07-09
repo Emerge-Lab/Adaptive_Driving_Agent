@@ -1,9 +1,38 @@
-# Handoff: Adaptive Driving Agent — satellite agent on vast.ai (4× RTX 5090)
+# Handoff: Adaptive Driving Agent — PRIMARY agent on vast.ai (4× RTX 5090)
 
-Written 2026-07-09 by the primary (cluster-side) agent. You are a second agent on
-a vast.ai box with 4 local RTX 5090s (32 GB VRAM each, direct access, no slurm).
-Your job: run the training experiments listed under "Your task menu" without
-colliding with the cluster-side work. **Read this whole doc before running anything.**
+Written 2026-07-09 by the outgoing cluster-side agent. **You are now the PRIMARY
+and only agent** on a vast.ai box with 4 local RTX 5090s (32 GB VRAM each,
+direct access, no slurm; user runs you in tmux). You own everything: training,
+evals, analysis, figures, `notes/paper_analysis.md`, and the paper itself.
+Section 7's old "division of labor" is void — kept only for its do-not-rerun
+list. **Read this whole doc before running anything.**
+
+## 0. Remaining work queue (beyond the training task menu in §5)
+
+1. **Memory-ablation control analysis** — the causal-mechanism figure (Fig 5).
+   Array 13142075 was launched on the cluster 2026-07-09 with the FIXED
+   trial-mode reset (per-agent transformer_position; see
+   `scripts/adaptive/verify_per_agent_reset.py` for the unit tests). If its
+   results were pushed/rsync'd (`outputs/eval540_cachereset2/`), compare
+   per-trial return curves vs `outputs/eval540_return/` for wids
+   qxw6c0jh/ufmegw4l/jsckmpha (0.10/k4) and ftxa55g3/citbzhdc/c0k9uqhc
+   (0.20/k4) on adaptable maps (p0<0.8 selector from
+   `outputs/eval540_combined/all_cells.csv`). Prediction (from the e0001 anchor
+   result): reset curve flattens. If the results never made it off the cluster,
+   rerun the 6 evals locally (`cluster_eval540_cachereset.sh` inner command,
+   env var RECOVERY_CACHE_RESET_PER_SCENARIO=1).
+2. **Split-half selector re-analysis** (reviewer risk #2 in paper_analysis.md):
+   requires per-rollout records; check whether the evaluator writes them — if
+   not, add a flag and rerun the two headline-cell evals with per-rollout dump,
+   then select adaptable maps on rollouts 1-10 and measure ΔR on 11-20.
+3. **Hard-unseen confirmation** (appendix): eval headline cells on the
+   interaction-hard subset of `nuplan_heldout_403` (original ids ≥ 4999 were
+   never trained; build the hard subset from scripts/nuplan_201_hardness_scores.csv).
+4. **Human-normalized scores**: per-map human return = t0 column of any
+   demo-mode eval (`outputs/eval540_demo/per_map_R_*` — policy-independent).
+   Re-express headline curves as return ÷ human return; AdA-style median +
+   20th-percentile plots.
+5. Paper writing per the figure plan in `notes/paper_analysis.md`.
 
 ## 1. Project in one paragraph
 
@@ -42,15 +71,18 @@ Full state: `notes/paper_analysis.md` — THE living doc, update it when results
    (NO_TRAIN=1 skips the CUDA extension, which is only needed for training
    speedups; if you want it, plain `python setup.py build_ext --inplace` with
    `TORCH_CUDA_ARCH_LIST="12.0"`).
-4. **Data (not in git — you must transfer):**
+4. **Data (not in git — you must transfer). Rsync from the cluster
+   (`/scratch/mmk9418/projects/Adaptive_Driving_Agent/`, ask user for host):**
    - `resources/drive/binaries/nuplan_201/` (5402 map .bin files, ~a few GB)
-   - `resources/drive/binaries/nuplan_hard/` — NOTE: symlink dir on the cluster;
-     rsync with `-L` to materialize, or rebuild via
-     `scripts/build_nuplan_hard.py --scores scripts/nuplan_201_hardness_scores.csv`
-     (scores CSV IS in git).
+   - `resources/drive/binaries/nuplan_hard/` — symlink dir; rsync with `-L`,
+     or rebuild via `scripts/build_nuplan_hard.py` (scores CSV is in git)
    - Partner checkpoints: `experiments/puffer_drive_{2e029h15,miku2puk,m2ygolog,6rauydj2}.pt`
-   - Rsync from cluster: `mmk9418@<cluster>:/scratch/mmk9418/projects/Adaptive_Driving_Agent/...`
-     (ask the user for the host / credentials).
+   - **`outputs/`** — ALL result CSVs + figures (eval540_return, eval540_combined,
+     eval540_hsize, eval540_demo, eval540_curriculum, eval540_e0001,
+     eval540_cachereset{,2}, map_scoring). Needed for every analysis in §0.
+   - Model checkpoints you may want to eval or continue:
+     `experiments/puffer_adaptive_drive_{qxw6c0jh,ufmegw4l,jsckmpha,ftxa55g3,citbzhdc,c0k9uqhc,...}/`
+     (headline cells; see paper_analysis.md result log for the full wid map).
 5. Env vars for ALL runs: `PUFFER_TRANSFORMER_LEGACY_EVAL=1` (NEVER flip — see
    pitfalls), `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, `WANDB_MODE=online`.
 6. Rendering needs a virtual display: prefix training with `xvfb-run -a`
