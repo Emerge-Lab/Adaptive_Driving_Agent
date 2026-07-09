@@ -122,6 +122,16 @@ AdA: no-op filter and PLR both strongly beat uniform; PLR wins at high trial cou
 
 ## Result log (newest first)
 
+- 2026-07-09: **MEMORY-ABLATION CONTROL LANDED — MECHANISM PROVEN CAUSALLY**
+  (array 13142075, fixed per-agent trial-boundary reset; fig
+  `outputs/eval540_cachereset2/g_memory_ablation.jpg` = Fig 5).
+  Adaptable maps: 0.10/k4 intact ΔR +0.93 vs reset **+0.08**; 0.20/k4 intact
+  +1.32 vs reset **−0.08**. Reset curves flat (trials iid), trial-0 levels match
+  intact within noise (correct sanity). Reviewer risk #3 CLOSED. Combined with
+  e0001 anchor + demo results: adaptation = cross-trial transformer memory of
+  the agent's own failures — causal, triangulated from three directions.
+  Implementation: models.py per-agent transformer_position + evaluator.py
+  trial-mode reset (unit tests in scripts/adaptive/verify_per_agent_reset.py).
 - 2026-07-08: **CURRICULUM RESULT = NULL-NEGATIVE** (eval 12952198, figs
   g_curriculum_doseresponse.jpg). ΔR adaptable maps (n=106, 0.10-selector):
   parent +0.93±0.23 > uniform+1B +0.73±0.51 > interaction+1B +0.63±0.41 >
