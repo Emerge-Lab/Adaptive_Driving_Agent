@@ -230,6 +230,10 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
         env->render_mode = (int)unpack(kwargs, "render_mode");
     }
     env->goal_behavior = (int)unpack(kwargs, "goal_behavior");
+    env->demo_trial_0 = false;
+    if (kwargs && PyDict_GetItemString(kwargs, "demo_trial_0")) {
+        env->demo_trial_0 = (bool)unpack(kwargs, "demo_trial_0");
+    }
     env->goal_target_distance = (float)unpack(kwargs, "goal_target_distance");
     env->goal_radius = (float)unpack(kwargs, "goal_radius");
     env->goal_speed = (float)unpack(kwargs, "goal_speed");

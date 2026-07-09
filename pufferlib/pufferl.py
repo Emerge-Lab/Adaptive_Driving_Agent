@@ -26,6 +26,10 @@ import numpy as np
 import psutil
 
 import torch
+# Disable the PyTorch MHA fastpath: it crashes with a CUDA illegal memory access
+# at the co-player encoder's batch shape (B≈16384, T=201, d=256, h=4). Forces
+# nn.MultiheadAttention to route through standard SDPA at the same shape.
+torch.backends.mha.set_fastpath_enabled(False)
 import torch.distributed
 from torch.distributed.elastic.multiprocessing.errors import record
 import torch.utils.cpp_extension

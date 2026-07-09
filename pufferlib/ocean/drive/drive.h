@@ -367,6 +367,7 @@ struct Drive {
     int env_trial_count;
     int env_trial_start_timestep;
     int env_episode_ended;  // 1 after episode end (Option D); cleared by c_reset
+    bool demo_trial_0;
     Log log;
     Log *logs;
     int num_agents;
@@ -2801,7 +2802,12 @@ void c_step(Drive *env) {
         int agent_idx = env->active_agent_indices[i];
         env->entities[agent_idx].collision_state = 0;
 
-        move_dynamics(env, i, agent_idx);
+        if (env->demo_trial_0 && env->env_trial_count == 0 &&
+            env->entities[agent_idx].is_ego) {
+            move_expert(env, env->actions, agent_idx);
+        } else {
+            move_dynamics(env, i, agent_idx);
+        }
 
         // Update logs based on agent type - use i directly as log index
         if (env->entities[agent_idx].is_ego) {

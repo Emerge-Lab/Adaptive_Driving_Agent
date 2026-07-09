@@ -28,9 +28,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def build_cmd(ckpt_path, k, sl, num_rollouts, num_maps, num_agents):
+def build_cmd(ckpt_path, k, sl, num_rollouts, num_maps, num_agents,
+              hidden_size=None, partner_id=None, entropy_ub=None,
+              demo_trial_0=False, map_dir="resources/drive/binaries/nuplan_hard"):
     horizon = k * sl
-    return [
+    cmd = [
         sys.executable, "-m", "pufferlib.pufferl", "eval", "puffer_adaptive_drive",
         "--load-model-path", str(ckpt_path),
         "--eval.wosac-realism-eval", "False",
@@ -39,7 +41,7 @@ def build_cmd(ckpt_path, k, sl, num_rollouts, num_maps, num_agents):
         "--eval.human-replay-num-maps", str(num_maps),
         "--eval.human-replay-num-rollouts", str(num_rollouts),
         "--eval.human-replay-control-mode", "control_vehicles",
-        "--eval.map-dir", "resources/drive/binaries/nuplan_hard",
+        "--eval.map-dir", str(map_dir),
         "--eval.num-maps", str(num_maps),
         "--env.k-scenarios", str(k),
         "--env.scenario-length", str(sl),
@@ -54,6 +56,36 @@ def build_cmd(ckpt_path, k, sl, num_rollouts, num_maps, num_agents):
         "--env.reward-offroad-collision", "-0.5",
         "--env.reward-lane-align", "0.05",
     ]
+    if hidden_size is not None:
+        cmd += [
+            "--policy.hidden-size", str(hidden_size),
+            "--transformer.input-size", str(hidden_size),
+            "--transformer.hidden-size", str(hidden_size),
+        ]
+    if demo_trial_0:
+        cmd += ["--env.demo-trial-0", "True"]
+    if partner_id is not None:
+        # Match training's co-player env exactly (cluster_hiddensize_ablation.sh:
+        # partner=2e029h15, e_ub=0.10, collision/offroad_lb=-2, discount=[0.4,1]).
+        cmd += [
+            "--env.co-player-enabled", "1",
+            "--env.co-player-policy.policy-path", f"experiments/puffer_drive_{partner_id}.pt",
+            "--env.co-player-policy.architecture", "Transformer",
+            "--env.co-player-policy.transformer.horizon", str(sl),
+            "--env.co-player-policy.conditioning.type", "all",
+            "--env.co-player-policy.conditioning.collision-weight-lb", "-2",
+            "--env.co-player-policy.conditioning.collision-weight-ub", "0",
+            "--env.co-player-policy.conditioning.offroad-weight-lb", "-2",
+            "--env.co-player-policy.conditioning.offroad-weight-ub", "0",
+            "--env.co-player-policy.conditioning.entropy-weight-lb", "0",
+            "--env.co-player-policy.conditioning.entropy-weight-ub", str(entropy_ub if entropy_ub is not None else 0.10),
+            "--env.co-player-policy.conditioning.discount-weight-lb", "0.4",
+            "--env.co-player-policy.conditioning.discount-weight-ub", "1",
+            "--env.external-co-player-actions", "True",
+            "--env.map-rand-per-scenario", "False",
+            "--env.entropy-curriculum-enabled", "False",
+        ]
+    return cmd
 
 
 def run_eval(cmd, timeout):
@@ -79,6 +111,16 @@ def main():
     ap.add_argument("--num-rollouts", type=int, default=20)
     ap.add_argument("--num-maps", type=int, default=540)
     ap.add_argument("--num-agents", type=int, default=540)
+    ap.add_argument("--hidden-size", type=int, default=None,
+                    help="Override policy/transformer hidden_size for non-default checkpoints.")
+    ap.add_argument("--partner-id", default=None,
+                    help="Co-player wid (e.g. 2e029h15). When set, eval env mirrors training's co-player setup.")
+    ap.add_argument("--entropy-ub", type=float, default=None,
+                    help="Co-player entropy-weight upper bound (matches training's ENTROPY_UB, e.g. 0.10).")
+    ap.add_argument("--demo-trial-0", action="store_true",
+                    help="Replay recorded human trajectory for the ego during trial 0. Trials 1..K-1 policy-driven.")
+    ap.add_argument("--map-dir", default="resources/drive/binaries/nuplan_hard",
+                    help="Eval map directory (default: nuplan_hard).")
     ap.add_argument("--out-dir", type=Path, default=REPO_ROOT / "outputs" / "eval540")
     ap.add_argument("--return-dir", type=Path,
                     default=REPO_ROOT / "outputs" / "eval540_return",
@@ -100,7 +142,10 @@ def main():
           f"maps={args.num_maps} rollouts={args.num_rollouts} horizon={args.k*args.scenario_length}",
           flush=True)
     cmd = build_cmd(ckpt, args.k, args.scenario_length, args.num_rollouts,
-                    args.num_maps, args.num_agents)
+                    args.num_maps, args.num_agents,
+                    hidden_size=args.hidden_size,
+                    partner_id=args.partner_id, entropy_ub=args.entropy_ub,
+                    demo_trial_0=args.demo_trial_0, map_dir=args.map_dir)
     metrics = run_eval(cmd, timeout=args.timeout_sec)
     print(f"[eval540]   {len(metrics)} metric keys", flush=True)
 

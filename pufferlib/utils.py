@@ -159,8 +159,11 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
 
         env_config = config.get("env_config", {})
         eval_config = config.get("eval", {})
+        policy_config = config.get("policy", {})
+        transformer_config = config.get("transformer", {})
         conditioning = env_config.get("conditioning", {})
         conditioning_type = conditioning.get("type", "none")
+        demo_trial_0 = bool(env_config.get("demo_trial_0", False))
         # Resolve map_dir on the parent so the child can't silently fall back to the ini default
         map_dir = eval_config.get("map_dir") or env_config.get("map_dir")
         # Adaptive runs override k_scenarios and the resulting episode length;
@@ -230,6 +233,19 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             "--env.conditioning.discount-weight-ub",
             str(conditioning.get("discount_weight_ub", 0.98)),
         ]
+
+        policy_hidden = policy_config.get("hidden_size")
+        if policy_hidden is not None:
+            cmd += ["--policy.hidden-size", str(policy_hidden)]
+        transformer_input = transformer_config.get("input_size")
+        transformer_hidden = transformer_config.get("hidden_size")
+        if transformer_input is not None:
+            cmd += ["--transformer.input-size", str(transformer_input)]
+        if transformer_hidden is not None:
+            cmd += ["--transformer.hidden-size", str(transformer_hidden)]
+
+        if demo_trial_0:
+            cmd += ["--env.demo-trial-0", "True"]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=os.getcwd())
 

@@ -79,6 +79,7 @@ class Drive(pufferlib.PufferEnv):
         k_eff_curriculum_episodes_per_stage=30,
         ego_is_oracle=False,
         reward_only_last_scenario=False,
+        demo_trial_0=False,
     ):
         # env
         self.dt = dt
@@ -206,6 +207,7 @@ class Drive(pufferlib.PufferEnv):
         # by the *main* process (centralized GPU inference). Worker's step()
         # then skips the local CPU forward in get_co_player_actions().
         self.external_co_player_actions = bool(external_co_player_actions)
+        self.demo_trial_0 = bool(demo_trial_0)
         # When True (and adaptive_drive with k>1), at every scenario boundary
         # we re-init the C envs with FRESH map_ids (and freshly sampled co-
         # player conditioning). The agents are spawned on a brand-new map
@@ -546,6 +548,7 @@ class Drive(pufferlib.PufferEnv):
                 trial_R_collision=self.trial_R_collision[cur:nxt],
                 trial_R_offroad=self.trial_R_offroad[cur:nxt],
                 trial_R_lane=self.trial_R_lane[cur:nxt],
+                demo_trial_0=int(self.demo_trial_0),
             )
             env_ids.append(env_id)
 
@@ -1000,6 +1003,7 @@ class Drive(pufferlib.PufferEnv):
                 trial_R_collision=self.trial_R_collision[cur:nxt],
                 trial_R_offroad=self.trial_R_offroad[cur:nxt],
                 trial_R_lane=self.trial_R_lane[cur:nxt],
+                demo_trial_0=int(self.demo_trial_0),
             )
             env_ids.append(env_id)
         self.c_envs = binding.vectorize(*env_ids)
