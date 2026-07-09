@@ -700,7 +700,8 @@ class HumanReplayEvaluator:
         # argparser doesn't auto-create new --eval.* flags.
         cache_reset_per_scenario = os.environ.get("RECOVERY_CACHE_RESET_PER_SCENARIO", "0") == "1"
         if cache_reset_per_scenario:
-            print("[recovery] CONTROL mode: resetting K/V cache at every scenario boundary", flush=True)
+            print("[recovery] CONTROL mode: resetting policy memory at every "
+                  f"{'trial' if is_trial_mode else 'scenario'} boundary", flush=True)
         # success_arr indexed by (rollout, scenario_or_trial, agent)
         n_outer = max_trials if is_trial_mode else k_scenarios
         success_arr = np.zeros((num_rollouts, n_outer, num_agents), dtype=bool)
@@ -733,6 +734,13 @@ class HumanReplayEvaluator:
                 trial_idx = np.zeros(num_agents, dtype=np.int32)
                 rollout_complete = np.zeros(num_agents, dtype=bool)
                 max_steps = max_trials * per_trial_timeout
+                if cache_reset_per_scenario and is_transformer:
+                    # Memory-ablation control: promote the shared scalar write
+                    # pointer to per-agent so each agent's memory can be reset
+                    # independently at ITS trial boundary (boundaries are
+                    # asynchronous under GOAL_TRIAL). models.py's legacy
+                    # forward handles (B,)-shaped positions.
+                    state["transformer_position"] = torch.zeros(num_agents, dtype=torch.long, device=device)
                 for time_idx in range(max_steps):
                     with torch.no_grad():
                         ob_tensor = torch.as_tensor(obs).to(device)
@@ -773,6 +781,22 @@ class HumanReplayEvaluator:
                             trial_idx[a] = ti + 1
                             if trial_idx[a] >= max_trials:
                                 rollout_complete[a] = True
+                    if cache_reset_per_scenario and end_idxs.size:
+                        # Memory-ablation control: wipe each just-ended agent's
+                        # memory. Rewinding its write pointer to 0 makes it
+                        # overwrite its own history — identical to a fresh
+                        # episode from the model's view (stale rows sit above
+                        # the pointer, hidden by the causal mask). Context rows
+                        # zeroed too for hygiene.
+                        ridx = torch.as_tensor(end_idxs, dtype=torch.long, device=device)
+                        if is_transformer:
+                            state["transformer_position"][ridx] = 0
+                            ctx = state.get("transformer_context")
+                            if ctx is not None:
+                                ctx[ridx] = 0
+                        if is_recurrent:
+                            state["lstm_h"][ridx] = 0
+                            state["lstm_c"][ridx] = 0
                     for info_dict in info_list:
                         if not isinstance(info_dict, dict):
                             continue

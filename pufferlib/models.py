@@ -643,21 +643,41 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         hidden = self.policy.encode_observations(observations, state=state)
         hidden = self.input_projection(hidden)
 
+        def _seeded_pos():
+            # Respect a caller-seeded position tensor (scalar (1,) or
+            # per-agent (B,) — the latter used by the memory-ablation
+            # control); fall back to a fresh scalar otherwise.
+            p = state.get("transformer_position")
+            if p is not None and p.numel() in (1, B):
+                return p
+            return torch.zeros(1, dtype=torch.long, device=device)
+
         if "transformer_context" not in state or state["transformer_context"] is None:
             context = torch.zeros(B, self.horizon, self.hidden_size, device=device, dtype=hidden.dtype)
-            pos = torch.zeros(1, dtype=torch.long, device=device)
+            pos = _seeded_pos()
         else:
             context = state["transformer_context"]
-            pos = state.get("transformer_position", torch.zeros(1, dtype=torch.long, device=device))
+            pos = _seeded_pos()
 
             if context.shape[-1] != self.hidden_size or context.shape[0] != B or context.shape[1] != self.horizon:
                 context = torch.zeros(B, self.horizon, self.hidden_size, device=device, dtype=hidden.dtype)
-                pos = torch.zeros(1, dtype=torch.long, device=device)
+                pos = torch.zeros_like(pos)
             if context.dtype != hidden.dtype:
                 context = context.to(hidden.dtype)
 
+        # Per-agent positions (shape (B,)) are used by the memory-ablation
+        # control (evaluator resets one agent's pointer at its trial boundary,
+        # so the agent overwrites its own history — identical to a fresh
+        # episode from the model's perspective). The scalar path (shape (1,))
+        # is the production default and is unchanged.
+        per_agent_pos = pos.numel() == B and B > 1
+
         write_idx = (pos % self.horizon).long()
-        context[:, write_idx, :] = hidden.unsqueeze(1)
+        if per_agent_pos:
+            bidx = torch.arange(B, device=device)
+            context[bidx, write_idx, :] = hidden
+        else:
+            context[:, write_idx, :] = hidden.unsqueeze(1)
         pos = pos + 1
 
         pos_embed = self.get_positional_embedding(self.horizon, device)
@@ -707,7 +727,10 @@ class TransformerWrapper(nn.Module):  # TransformerWrapper
         output = self.output_norm(output)
 
         read_idx = ((pos - 1) % self.horizon).long()
-        hidden_out = output[:, read_idx, :].squeeze(1)
+        if per_agent_pos:
+            hidden_out = output[bidx, read_idx, :]
+        else:
+            hidden_out = output[:, read_idx, :].squeeze(1)
 
         state["transformer_context"] = context
         state["transformer_position"] = pos

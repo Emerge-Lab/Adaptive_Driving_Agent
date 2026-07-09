@@ -45,8 +45,8 @@ singularity exec --nv \
    xvfb-run -a python scripts/adaptive/eval_final_540.py \
      --wid $WID --k $K --seed $SEED --iter $ITER \
      --num-maps 540 --num-agents 540 --num-rollouts 20 \
-     --out-dir outputs/eval540_cachereset \
-     --return-dir outputs/eval540_cachereset \
+     --out-dir outputs/eval540_cachereset2 \
+     --return-dir outputs/eval540_cachereset2 \
      --table-prefix eval540_creset_20r \
      --no-wandb \
      --timeout-sec 18000
