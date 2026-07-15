@@ -31,10 +31,10 @@ agent never trained with demos; we also train with demos).
 | AdA element | Ours | Status |
 |---|---|---|
 | k-trial episodes, memory across trials, task reset at boundary | identical | ✓ |
-| Score = per-trial reward normalized per task | raw return; **should human-normalize** | TODO |
+| Score = per-trial reward normalized per task | human-normalized (return ÷ human-log return; `outputs/eval540_norm/`) | ✓ 2026-07-10 |
 | Zero-shot = trial-1, few-shot = improvement w/ trials | same framing available | ✓ |
 | 1000 held-out procedural + 30 probe tasks | 539 eval maps but **NOT held out** (see issue 1) | ⚠ |
-| Median + 20th-pct aggregation | mean ± std currently | TODO |
+| Median + 20th-pct aggregation | done for headline cells (`g_human_norm_curves.jpg`) | ✓ 2026-07-10 |
 | Memory-architecture ablation | none (fixed 2-layer TF) | won't do |
 | Curriculum ablation (no-op filter, PLR) | none yet — **in progress** (see curriculum plan) | TODO |
 | Scale ablation 6M→265M | h 64/128/256 (~0.2M–1.2M) | partial |
@@ -57,19 +57,27 @@ agent never trained with demos; we also train with demos).
    unseen; (c) curriculum continuation excludes nuplan_hard originals from the
    frontier training dir for comparison integrity (frontier filter would otherwise
    concentrate training on the eval set).
-2. **[CRITICAL] Adaptable-map filter may have selection bias.** If the p₀<0.8 selector
-   uses the same rollouts as the ΔR = t_last − t₀ measurement, regression-to-the-mean
-   inflates ΔR. Memory claims "independent selector" (binary-success eval vs return
-   re-eval — different SLURM runs, so plausibly independent rollouts) — **verify**, and
-   if not independent do split-half (select on rollouts 1–10, measure on 11–20).
-3. **[CRITICAL] No memory-ablation causal control.** Run headline-cell evals with
-   `RECOVERY_CACHE_RESET_PER_SCENARIO=1` (evaluator.py ~L701). Flat curve under reset =
-   causal proof that cross-trial memory drives the improvement. Cheap, decisive.
+2. **[SETTLED 2026-07-10] Adaptable-map selector bias is negligible.** Split-half
+   analysis on fresh 20-rollout evals with raw per-(map,rollout) dumps
+   (`outputs/eval540_splithalf/splithalf_summary.csv`): selecting on rollouts 0–9
+   and measuring ΔR on 10–19 (and the reverse) gives ΔR +0.94/+0.89 (0.10/k4) and
+   +1.24/+1.30 (0.20/k4) vs full-sample +1.00/+1.37 — bias ≤ ~0.1, ≈10 % of the
+   effect. Cite the disjoint-half numbers in the robustness appendix. Fresh evals
+   also independently replicate the original headline ΔR (rollout-noise replicate #2).
+3. **[SETTLED 2026-07-10] Memory-ablation causal control LANDED — adaptation is
+   causally memory-driven.** Fixed per-agent trial-mode reset (array 13142075,
+   `outputs/eval540_cachereset2/`): reset curves FLAT (ΔR +0.07 / −0.08 on
+   0.10/k4 and 0.20/k4 adaptable maps) vs intact (+0.92 / +1.32), with matching
+   trial-0 anchors. Verified independently from raw CSVs on the vast box +
+   `verify_per_agent_reset.py` unit tests pass. Fig 5 done (`g_memory_ablation.jpg`).
 4. **Normalization + aggregation.** Adopt human-normalized score (return ÷ human-log
    return per map) and AdA-style median/20th-pct plots. Human log return obtainable
    from a demo-mode eval (trial 0 = human replay ⇒ t₀ = human performance per map).
 5. **Anomalies.** k=2 degradation (opposite of explore-exploit signature — discuss);
-   k=5 flat (resolve undertraining or drop k=5 with justification).
+   **k=5 flat: RESOLVED 2026-07-12 — pure memsafe-recipe artifact.** Standard-recipe
+   rerun (3 seeds, 3B) gives adaptable-map ΔR +0.86 (all seeds positive) vs the
+   memsafe cells' +0.09 — k=5 adapts on par with k=4 (+0.92). Scope k-claims to the
+   standard-recipe cells; the sweet-spot narrative softens to "robust for k≥3".
 6. **No curriculum** — AdA core ingredient. In progress; see curriculum plan below.
 7. **Budget asymmetries.** h256/s42 iter=80; demo seeds 43/44 short of 3B (walltime).
    Rerun or footnote consistently.
@@ -95,22 +103,61 @@ AdA: no-op filter and PLR both strongly beat uniform; PLR wins at high trial cou
   existing h=128 ablation cells. Eval on the standard 540-map suite.
 - Consider 80/20 frontier/uniform mixture if pure-frontier destabilizes basic driving.
 
-**Phase 2 — online PLR-lite (if Phase 1 moves the needle):**
-- Worker-local priority sampling at map re-init (`_reinit_envs_with_new_maps` in
-  drive.py currently samples uniformly): per-worker EMA of per-map success, sample
-  ∝ (1 − success_EMA). No cross-worker sync (32 workers build independent tables —
-  accepted approximation). ~40–60 lines in drive.py only.
-- This is the AdA-parallel ablation (uniform vs static filter vs online prioritized).
+**Phase 2 — online PLR-lite: IMPLEMENTED 2026-07-10 (from-scratch redesign
+after the fine-tuning null-negative).** Worker-local priority sampling, env-side:
+- C: `binding.shared(map_sample_weights=[...])` — optional per-map weights,
+  silent uniform fallback (unit-tested: concentration, fallbacks, skew matches
+  theory 0.92/0.92).
+- Python (drive.py): per-map EMAs updated at episode boundaries from
+  trial_ended/trial_R_goal; two scorers behind `--env.map-curriculum-mode`:
+  `success` = ∝(1−trial-0-success EMA) (vanilla PLR-ish) and `gap` = ∝EMA of
+  within-episode success gap t_last−t0 (**adaptation-frontier prioritization —
+  novel vs AdA**). `uniform_floor` mixes uniform mass (no starvation),
+  `optimism` scores unvisited maps (exploration). Logs under map_curriculum/*.
+  No cross-worker sync (accepted approximation).
+- Plan: 2 arms × 1 seed from scratch (success, gap) on the k5 GPUs when they
+  free (~2026-07-12), uniform control = existing headline cells (free);
+  scale winner to 3 seeds. This is the AdA-parallel uniform→filter→PLR ladder
+  with from-scratch training (the July fine-tuning attempt was the weakest
+  dose — see 07-08 null result).
+- **Related-work positioning for the gap scorer (verified against AdA App.
+  D.5, 2026-07-13):** AdA's PLR = modified Robust PLR with regret-approximating
+  fitness via TD-error (ablated vs value-model / dynamics-model error); their
+  no-op filter compares vs a do-nothing policy. NOTHING in AdA uses
+  within-episode trial improvement. Our gap scorer = an in-context-regret
+  estimate: the agent's own memory-adapted self is the regret "antagonist"
+  (trial-k performance ≈ achievable, trial-0 = current). Frame as an
+  instantiation of regret-based UED fitness (PAIRED 2012.02096, Robust PLR
+  2110.02439, ACCEL 2203.01302) crossed with learning-progress curricula
+  (TSCL 1707.00183, ALP-GMM 1910.07224, Oudeyer LP) transposed from
+  parametric to in-context progress — NOT as a new paradigm. Motivation
+  quote from AdA §3.3: regret-based PLR "especially helpful for learning
+  longer-term adaptation".
 
-## Figure plan
+## Figure plan — ALL BUILT 2026-07-13 (`scripts/adaptive/make_paper_figures.py`
+→ `outputs/paper_figs/fig{1..5}_*.{pdf,jpg}`; rerun any subset by name)
 
-- Fig 1: per-trial human-normalized score curves (entropy×k grid or best-cells row),
-  median + 20th pct, adaptable maps + all maps inset.
-- Fig 2: ΔR decomposition (crash/goal/lane bar per cell — have `g_dR_breakdown_*`).
-- Fig 3: modulators — k sweet spot, entropy, capacity (hsize), curriculum (pending).
-- Fig 4: demonstration prompting 3-way (no-demo / demo-at-eval / demo-trained) vs
-  human line — the AdA-§3.8-extension money figure.
-- Fig 5 (control): memory-reset counterfactual — flat curve.
+- Fig 1 ✓ human-normalized per-trial score, both headline cells, median +
+  20th pct, adaptable + all maps, human=1 line.
+- Fig 2 ✓ ΔR decomposition. IMPORTANT measurement note discovered while
+  building: env-side component accumulators are only snapshotted at trial-end
+  flags, so maps whose final trial is horizon-truncated (~13–18/539 per seed,
+  crash-heavy) have undefined t3 components — per_map_R and component-sum
+  disagree ONLY on those maps/trial. Fig 2 therefore uses adaptable maps with
+  complete final trials (n=76/41), where components reproduce R exactly;
+  totals there are +1.05/+1.66 (higher than all-adaptable +0.92/+1.32 since
+  truncated maps drag t3). Crash-avoidance share ≈ 70–77 % of ΔR.
+- Fig 3 ✓ modulators: (a) k sweep at e_ub=0.10, single standard-minibatch
+  series k2→k5 (k5 = rerun; USER DECISION 2026-07-13: memsafe k5/k6 cells
+  removed from the figure entirely — superseded/confounded; caption notes
+  the k5 recipe). Recipe taxonomy for the text: standard = vec32 +
+  minibatch 50×H; memsafe (old k5/k6) = vec8 + HALVED minibatch 25×H
+  (same LR) — flat at k5 (+0.09) but partially adapting at k6 (≈+0.67,
+  noisy), so frame as "superseded", not "half minibatch kills adaptation";
+  rerun = vec8 + full 50×H via grad accumulation. (b) entropy trade-off,
+  (c) capacity. PLR panel to be added when arms finish (~07-14).
+- Fig 4 ✓ demo 3-way vs human star/line, all-maps + adaptable panels.
+- Fig 5 ✓ memory-reset control, restyled consistently from raw CSVs.
 
 ## Pending experiments / jobs
 
@@ -121,6 +168,182 @@ AdA: no-op filter and PLR both strongly beat uniform; PLR wins at high trial cou
   curriculum Phase 1.
 
 ## Result log (newest first)
+
+- 2026-07-14: 0.20-cell seed 45 (b7itnfmg, vec8) done + evaled: own-selector
+  ΔR **+0.89** (n=62, −3.68→−2.79), zs all-540 +0.11 — the 0.20 cell keeps a
+  strong adaptation signal at vec8 (unlike the 0.10-cell vec8 pair's
+  {+0.56,+0.12}). Fixed-vec32-selector view −0.23 (selector mismatch again —
+  own-selector is the valid view). vec32 trio ref +1.32. Also: PLR-success
+  s44 launched (gia12pd5, GPU3) — both arms now 3 seeds in flight/done.
+- 2026-07-14: **PLR 3-WAY FIRST RESULT (1 seed/arm) — both arms ≥ uniform,
+  distinct signatures.** Own-selector, vec8-matched control
+  (outputs/eval540_plr/): PLR-success zs +0.15 / ΔR +0.68 / succ 0.46→0.43
+  (declining!); PLR-gap zs +0.02 / ΔR +0.58 / succ 0.34→0.47 (best success
+  climb); uniform vec8 pair zs ≈0 / ΔR {+0.56,+0.12} / succ +0.13/+0.06.
+  Signatures: success-scorer buys ZERO-SHOT (difficulty oversampling →
+  stronger base policy, smallest adaptable set n=56); gap-scorer buys
+  ADAPTATION (biggest within-episode success climb). Curriculum mechanics
+  verified on wandb: gap concentrates sampling (weight entropy 8.51→7.55)
+  ~2.5× more than success (→8.28); both visit ~all 4999 maps. Seed-43 arms
+  launched for both (GPUs 0/1) to firm this up; k6 vec8 smoke on GPU2.
+- 2026-07-14: Task C seed 46 (ey3ia9c5, 0.10/k4 vec8) done + evaled. Own-
+  selector ΔR **+0.12** (weak); s45 +0.56 → the vec8 k4 pair is
+  {+0.56, +0.12}, well below the vec32 trio {+1.26, +0.71, +0.78}. Combined
+  with k5-vec8 adapting strongly (+0.86 mean), the picture is: small rollout
+  batch has a k4-specific cost to ΔR (or seed luck — n=2). CONSEQUENCE:
+  vec8 extra seeds must NOT be pooled with vec32 headline cells (confirmed);
+  and the PLR arms (also vec8) must be compared against the vec8 uniform
+  pair, which is the geometry-matched control.
+- 2026-07-14: **METHODOLOGICAL: cross-arm ΔR comparisons need own-cell
+  selectors.** Under the vec32 headline selector, vec8 runs show spurious
+  negative ΔR (s46 −0.79(!), gap −0.09) because each policy's failure set
+  differs; with own per-rollout selectors: s45 +0.56, s46 +0.12, gap +0.58.
+  Report cross-arm tables with own selectors (+ fixed-selector appendix).
+
+- 2026-07-12: **k5 convergence curve, 3 seeds × 4 checkpoints (kills
+  "undertrained" definitively).** All k5 wids evaled at iters 90/180/270/365
+  (~0.7/1.5/2.2/3.0B), fixed final-eval selector n=93,
+  `outputs/eval540_k5progress/`. Seed-mean adaptable ΔR: +0.01 → +0.74 →
+  +0.59 → +0.86. Reads: (1) adaptation emerges between 0.7B and 1.5B and
+  PLATEAUS — not rising enough at 3B to rescue an "undertrained" story for
+  the old flat cells (recipe artifact confirmed); (2) per-seed checkpoint
+  trajectories are individually volatile (s42 dips to −0.02 at 2.2B while
+  s43/s44 sit at +0.9; s43 is −1.10 at 0.7B then +1.46 at 3B) but the dips
+  are idiosyncratic, NOT a systematic late erosion — do not over-read the
+  single-seed zero-shot↔ΔR anticorrelation beyond what the entropy trade-off
+  already establishes. Candidate appendix figure: mean ΔR vs training steps.
+- 2026-07-12: **Task C seed 45 (kukzhob9, 0.10/k4) done + evaled** (iter 456,
+  CSVs in eval540_return). Adaptable-map ΔR +0.37 — positive (cell now 4/4
+  seeds positive) but below the original trio (+1.26/+0.71/+0.78): 4-seed
+  +0.78 ± 0.36 vs 3-seed +0.92 ± 0.30. CAVEAT: s45 trained at vec 8/8/8 vs the
+  originals' vec32, so it adds geometry variance, not pure seed variance —
+  report the cell as 3-seed headline + s45/s46 as a same-recipe-smaller-batch
+  robustness pair, don't silently pool. Seed 46 (ey3ia9c5, same cell) lands
+  ~07-13. NOTE: I put both extra seeds on the 0.10 cell (handoff Task C
+  wording was ambiguous between that and one per cell); 0.20-cell extra seeds
+  remain optional follow-up.
+- 2026-07-12: **k=5 ANOMALY RESOLVED — memsafe artifact, k5 adapts like k4
+  (Task A complete).** Standard-recipe k5 (wids q924lklb/qyjag2qw/15lpuj3s,
+  3B, iter 365, evals in `outputs/eval540_k5std/`): adaptable maps (own p0<0.8
+  selector, n=93) t0..t4 = −2.18 → −1.32, **ΔR +0.86** (per-seed +0.55/+1.46/
+  +0.56, all positive) vs old memsafe k5 cells ΔR +0.09 (n=118, dead flat) and
+  k4 headline +0.92. Paper: k-sweep claims scope to standard-recipe cells;
+  "k=4 sweet spot" softens to "adaptation robust for k≥3; k=2 degrades".
+  Caveat: new k5 ran vec 8/8/8 (32 GB constraint) vs cluster vec32 — zero-shot
+  all-540 t0 is lower (−0.03 vs k4's +0.24), so absolute cross-k levels stay
+  geometry-tainted; the within-episode ΔR (locked metric) is the comparison.
+- 2026-07-12: Wave 2 launched as wave-1 lanes finished: PLR **gap** arm
+  qof5vici (GPU1), PLR **success** arm cnoj5ric (GPU0), both tag
+  plr_map_curriculum_k4_e010, seed 42, 3B; Task C **seed 46** ey3ia9c5 (GPU2,
+  grid tag). k4 s45 (kukzhob9) still training on GPU3 (~done midday).
+
+- 2026-07-10: k5 lanes: epoch-10 in-training evals OOM non-fatally on 32 GB
+  (training process's reserved allocator pool starves the separate-context
+  eval subprocess). Runs CONTINUE fine; in-training eval curves will be
+  missing for q924lklb/qyjag2qw/15lpuj3s — reconstruct offline from the
+  every-10-epoch checkpoints if needed (offline eval is the locked metric
+  anyway). Fixed for future runs: `torch.cuda.empty_cache()` before the eval
+  subprocess spawn in pufferl.py.
+- 2026-07-10: **h512 (k1w6dtm4) CRASHED at epoch-10 in-training eval and is
+  DROPPED** — eval subprocess loaded the h512 checkpoint into an h256 model
+  (size mismatch on positional_embedding), i.e. pitfall-#3 hidden-size
+  propagation failed again on this box. Decision (user-endorsed): don't
+  retry — the point was already geometry-confounded (vec4 vs the ablation's
+  vec32, same confound class that invalidated the memsafe k5 cells) and the
+  capacity curve 64→128→256 already reads "saturating"; paper footnotes
+  "h512 exceeded the memory budget at comparable geometry". GPU3 reassigned
+  to **Task C seed 45, 0.10/k4 standard recipe: wid kukzhob9** (tag
+  ada_k4_gb3_legacy_eval_fix = original grid tag, vec 8/8/8, mb 8040).
+- 2026-07-10: **TASK A + B TRAINING LAUNCHED on the vast box** (all 4 GPUs).
+  k=5 standard recipe (tag `k5_standard_recipe_e010`, partner 2e029h15,
+  e_ub=0.10, h=256, 3B steps): wids **q924lklb** (s42/GPU0), **qyjag2qw**
+  (s43/GPU1), **15lpuj3s** (s44/GPU2). h=512 capacity point (tag
+  `hidden_size_ablation_k4_e010`): wid **k1w6dtm4** (s42/GPU3).
+  RTX-5090-fitted geometry after 4 smoke rounds: k5 = vec 8/8/8 +
+  max_minibatch 10050 (~25.1 GB, ~18-22K SPS → 3B ≈ 40 h); h512 = vec 4/4/4 +
+  max_minibatch 8040 (~21-30 GB, ~8K SPS → 3B ≈ 4.5 d). Constraints learned:
+  max_minibatch must divide 50×horizon AND be a multiple of horizon; the h512
+  OOM is resident-memory in rollout forward_eval (scales with vec, not
+  minibatch) — vec16 and vec8 both OOM at h512, vec4 fits. NOTE for eval
+  comparisons: vec geometry differs from cluster cells (batch ≈ 4.1M vs 26M
+  tokens per epoch at k5) → epoch counts differ; per-trial return evals are
+  unaffected.
+- 2026-07-10: **HARD-UNSEEN (§0.3) WIDER PASS (hard25, 106 maps × 40
+  rollouts) — TRANSFER IS WEAK AND SEED-INCONSISTENT.** Adaptable-unseen maps
+  (p0<0.8): 0.10/k4 (n=18) ΔR +0.77 (split-half robust: +0.69/+0.81, 14/18
+  maps improve, median +0.41) BUT per-seed +2.41/−0.05/−0.05 — one seed
+  carries it; 0.20/k4 (n=15) ΔR −0.31 (per-seed +0.84/−0.81/−0.96), t1 dips
+  below t0. All-106 zero-shot fine (+0.26/+0.30). Compare nuplan_hard where
+  ALL seeds improve (+0.7…+1.7). Honest paper framing (appendix): in-context
+  adaptation is robust on interaction-dense maps from the training
+  distribution; on never-trained hard maps it is attenuated and
+  seed-inconsistent at our scale — consistent with AdA needing large-scale
+  task diversity for generalizable adaptation; our 5K-map pool is ~1/1000th.
+  Main-text claims unaffected (phrased as adaptation, not held-out
+  generalization, per settled risk #1). Data: outputs/eval540_heldout_hard25/.
+- 2026-07-10: **HARD-UNSEEN (§0.3) FIRST PASS — NO CLEAR ADAPTATION TRANSFER,
+  BUT UNDERPOWERED (n=7–8).** Built `nuplan_heldout_hard` (46 maps: ids ≥ 4999
+  never trained AND sdc_interaction_steps ≥ 52 = exact nuplan_hard top-10 %
+  cutoff; manifest in outputs/eval540_heldout_hard/). Headline cells, 20
+  rollouts: 91 % of rollouts already succeed (subset saturated for the agent);
+  p0<0.8 keeps only 8 (0.10/k4) / 7 (0.20/k4) maps. On those: ΔR +0.24 / −0.89
+  (mean), 4/8 and 3/7 maps improve, per-seed spread −2.5…+1.8 — nothing
+  interpretable at this n given known per-map cross-seed irreproducibility
+  (risk #8). DO NOT cite as confirmation OR refutation yet. Follow-up in
+  flight: `nuplan_heldout_hard25` (106 maps, threshold ≥ 21 = hardtrain top-25 %
+  cutoff) × 40 rollouts × 6 wids for real power. If the null persists there,
+  the honest appendix framing is: "in-context adaptation is robust on
+  interaction-dense maps seen in training; transfer of the adaptation
+  behavior to never-trained hard maps is not statistically detectable at our
+  sample sizes" — and the main-text claims (already phrased as adaptation,
+  not held-out generalization, per settled risk #1) need no change.
+- 2026-07-10: **SPLIT-HALF SELECTOR ANALYSIS — SELECTION BIAS NEGLIGIBLE (§0.2,
+  reviewer risk #2 SETTLED).** Six fresh headline-cell evals (540×20, local
+  vast GPUs, ~22 min each) with new `--dump-per-rollout` raw records →
+  `outputs/eval540_splithalf/`. Disjoint-half (select p0<0.8 on rollouts 0–9,
+  measure ΔR on 10–19, and reverse): 0.10/k4 +0.94/+0.89 vs full-sample +1.00;
+  0.20/k4 +1.24/+1.30 vs +1.37. Same-half biased references barely higher →
+  regression-to-the-mean ≤ ~0.1 return units (~10 % of effect). Bonus: fresh
+  evals replicate original headline ΔR within rollout noise (+1.00 vs +0.92;
+  +1.37 vs +1.32) — second independent replication. Analysis:
+  `scripts/adaptive/analyze_splithalf.py`.
+- 2026-07-10: **HUMAN-NORMALIZED SCORES LANDED (§0.4)** — `scripts/adaptive/
+  analyze_human_norm.py` → `outputs/eval540_norm/{human_norm_scores.csv,
+  g_human_norm_curves.jpg}`. Denominator: per-map human-log return = t0 of
+  demo-mode evals, byte-identical across all 6 demo wids (std=0 — policy-
+  independent as claimed); saved to `outputs/eval540_demo/human_return_per_map.csv`.
+  Maps with human_R < 0.5 excluded (31/539; 6 have human_R ≤ 0 — human log
+  itself crashes). AdA-style median/20th-pct, seeds-averaged, headline cells:
+  (a) ALL maps median ≈ 1.0 at every trial — the agent matches the human on the
+  typical (saturated) map; adaptation is a TAIL phenomenon. (b) Adaptable maps
+  median: 0.10/k4 −0.97→+0.13, 0.20/k4 −0.76→+0.04 — from "far below human" to
+  "human-level median" within 4 trials. (c) 20th-pct climbs but stays well below
+  human (−2.9→−1.4 / −4.6→−1.9): hardest tail not solved. (d) All-maps 20th-pct
+  (0.10/k4): −0.10→+0.35 — AdA-Fig-4-shaped tail improvement without any selector.
+  Candidate Fig 1 panels; (d) is selector-free and immune to reviewer risk #2.
+- 2026-07-10: §0.2 split-half infrastructure: `--dump-per-rollout` flag added to
+  `eval_final_540.py` (raw per-(map,rollout) success/return records; evaluator
+  already had them in-memory). Verified rollout-mean reproduces per-map CSVs to
+  6e-8. Six headline-cell re-evals with dumps launched locally
+  (outputs/eval540_splithalf/, logs/splithalf_gpu*.log).
+- 2026-07-10: **MEMORY-ABLATION CONTROL CONFIRMED — Fig 5 settled** (array
+  13142075 w/ fixed per-agent trial-boundary reset, `outputs/eval540_cachereset2/`,
+  fig g_memory_ablation.jpg). Per-trial return t0→t3, adaptable maps, mean±std
+  over 3 seeds:
+  0.10/k4 (n=108): intact −1.73→−0.81 (ΔR +0.92) vs reset −1.83→−1.76 (ΔR **+0.07**);
+  0.20/k4 (n=62): intact −2.55→−1.23 (ΔR +1.32) vs reset −2.60→−2.68 (ΔR **−0.08**).
+  Reset t0 ≈ intact t0 (same policy zero-shot — clean control), curve dead flat
+  across trials → **cross-trial K/V memory is causally necessary for the entire
+  adaptation effect.** Unlike the Jul-5 no-op, curves clearly diverge from intact.
+  Recomputed independently from per-map CSVs on the vast box (matches the
+  cluster-generated figure: +0.93/+0.08 & +1.32/−0.08; my selector n=108 vs
+  figure's 106 — trivial selector-implementation difference, numbers unchanged).
+  `verify_per_agent_reset.py` unit tests pass locally (scalar-vs-vector, reset-vs-
+  fresh, other-agents-unaffected). Do not cite eval540_cachereset (v1, no-op);
+  cite cachereset2 only.
+- 2026-07-10: vast box (4×5090) is now the primary and only compute. Full data
+  rsync from cluster landed: nuplan_201 (5402), nuplan_hard (540), heldout_403,
+  outputs/ (9 GB), 6 headline checkpoint dirs (final iters 114/114/114/80/110/114).
 
 - 2026-07-09: **MEMORY-ABLATION CONTROL LANDED — MECHANISM PROVEN CAUSALLY**
   (array 13142075, fixed per-agent trial-boundary reset; fig

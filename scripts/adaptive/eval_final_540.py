@@ -129,6 +129,10 @@ def main():
     ap.add_argument("--wandb-project", default="adaptive_aligned_v2")
     ap.add_argument("--wandb-entity", default="emerge_")
     ap.add_argument("--no-wandb", action="store_true")
+    ap.add_argument("--dump-per-rollout", action="store_true",
+                    help="Also write raw per-(rollout, map) success/return records "
+                         "(per_rollout_{success,R}_*.csv in --return-dir) for "
+                         "split-half selector analyses.")
     ap.add_argument("--timeout-sec", type=int, default=14400)
     args = ap.parse_args()
 
@@ -185,6 +189,34 @@ def main():
     else:
         print("[eval540]   WARNING: no per_agent_return_log in metrics — return CSV skipped",
               flush=True)
+
+    # ----- raw per-(rollout, map) dumps (split-half selector analysis) -----
+    # One row per (map, rollout) with the untouched per-trial values, so the
+    # adaptable-map selector (success p0) and the ΔR measurement can be
+    # computed on disjoint rollout halves downstream.
+    if args.dump_per_rollout:
+        def _dump_raw(log, suffix):
+            if not log:
+                print(f"[eval540]   WARNING: no log for per-rollout {suffix} dump — skipped",
+                      flush=True)
+                return
+            trial_keys = sorted(
+                [k for k in log[0].keys() if k and k[0] in ("t", "s") and k[1:].isdigit()],
+                key=lambda c: int(c[1:]),
+            )
+            args.return_dir.mkdir(parents=True, exist_ok=True)
+            out_csv = args.return_dir / \
+                f"per_rollout_{suffix}_k{args.k}_seed{args.seed}_{args.wid}.csv"
+            with open(out_csv, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["map_id", "rollout", *trial_keys])
+                for rec in sorted(log, key=lambda r: (r["agent"], r["rollout"])):
+                    w.writerow([rec["agent"], rec["rollout"],
+                                *[rec.get(tk, 0.0) for tk in trial_keys]])
+            print(f"[eval540]   wrote {out_csv} ({len(log)} map-rollout rows)", flush=True)
+
+        _dump_raw(per_agent_log, "success")
+        _dump_raw(per_agent_return_log, "R")
 
     # ----- per-component CSVs (goal / collision / offroad / lane) -----
     # Sourced from the env-side per-trial accumulators (drive.h trial_R_*),

@@ -1271,6 +1271,10 @@ class PuffeRL:
         if self.config["eval"]["human_replay_eval"] and (
             self.epoch % self.config["eval"]["eval_interval"] == 0 or done_training
         ):
+            # Release the training allocator's cached segments to the driver
+            # first: the eval subprocess is a separate CUDA context and OOMs
+            # against our reserved-but-unused pool on 32 GB cards otherwise.
+            torch.cuda.empty_cache()
             pufferlib.utils.run_human_replay_eval_in_subprocess(self.config, self.logger, self.global_step)
             torch.cuda.empty_cache()
             pufferlib.utils.render_videos(

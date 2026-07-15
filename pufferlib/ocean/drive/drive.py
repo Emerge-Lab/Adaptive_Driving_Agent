@@ -80,6 +80,10 @@ class Drive(pufferlib.PufferEnv):
         ego_is_oracle=False,
         reward_only_last_scenario=False,
         demo_trial_0=False,
+        map_curriculum_mode="none",
+        map_curriculum_ema=0.05,
+        map_curriculum_uniform_floor=0.2,
+        map_curriculum_optimism=0.5,
     ):
         # env
         self.dt = dt
@@ -450,6 +454,28 @@ class Drive(pufferlib.PufferEnv):
         self.trial_R_collision = np.zeros(self.num_agents, dtype=np.float32)
         self.trial_R_offroad   = np.zeros(self.num_agents, dtype=np.float32)
         self.trial_R_lane      = np.zeros(self.num_agents, dtype=np.float32)
+
+        # PLR-lite map curriculum (worker-local, gb=3 only). Per-map EMAs of
+        # ego trial-0 success and within-episode success gap (t_last - t0),
+        # updated at episode boundaries from the trial_ended/trial_R_goal
+        # signals, consumed by _compute_map_weights() at map resample.
+        self.map_curriculum_mode = str(map_curriculum_mode)
+        if self.map_curriculum_mode not in ("none", "success", "gap"):
+            raise ValueError(f"map_curriculum_mode must be none|success|gap, got {map_curriculum_mode}")
+        if self.map_curriculum_mode != "none" and self.goal_behavior != 3:
+            raise ValueError("map curriculum requires trial mode (goal_behavior=3)")
+        self.map_curriculum_ema = float(map_curriculum_ema)
+        self.map_curriculum_uniform_floor = float(map_curriculum_uniform_floor)
+        self.map_curriculum_optimism = float(map_curriculum_optimism)
+        if self.map_curriculum_mode != "none":
+            self._cur_succ_ema = np.full(self.num_maps, 0.5, dtype=np.float64)
+            self._cur_gap_ema = np.zeros(self.num_maps, dtype=np.float64)
+            self._cur_visits = np.zeros(self.num_maps, dtype=np.int64)
+            # per-agent episode-local trial tracking
+            self._ep_trial_count = np.zeros(self.num_agents, dtype=np.int32)
+            self._ep_first_succ = np.zeros(self.num_agents, dtype=np.float32)
+            self._ep_last_succ = np.zeros(self.num_agents, dtype=np.float32)
+            self._pending_curriculum_log = None
         if _removed_external is not None:
             assert _removed_external.shape == (self.num_agents,), (
                 f"buf['removed'] shape {_removed_external.shape} != ({self.num_agents},)"
@@ -592,6 +618,7 @@ class Drive(pufferlib.PufferEnv):
             goal_target_distance=self.goal_target_distance,
             use_all_maps=self.use_all_maps,
             map_seed=self.map_seed if self.map_seed is not None else -1,
+            map_sample_weights=self._compute_map_weights(),
         )
 
         if self.population_play:
@@ -663,6 +690,11 @@ class Drive(pufferlib.PufferEnv):
                 self.num_agents = len(self.ego_ids)
             self.local_co_player_ids = [[] for i in range(self.num_envs)]
             self.local_ego_ids = [[0] for i in range(self.num_envs)]
+
+        # Ego mask over global agent slots is role-dependent; invalidate on
+        # every reshuffle and rebuild lazily against the trial-buffer size
+        # (see _curriculum_ego_mask).
+        self._ego_mask = None
 
     def get_co_player_actions(self):
         with torch.no_grad():
@@ -922,6 +954,99 @@ class Drive(pufferlib.PufferEnv):
             n = min(self.total_co_players, shm.shape[0])
             shm[:n, :] = self.cached_conditioning_array[:n, :]
 
+    def _compute_map_weights(self):
+        """Per-map sampling weights for binding.shared(), or None for uniform.
+
+        PLR-lite: weights = floor·uniform + (1-floor)·score/Σscore, where
+        score is (1 - success_ema) for mode="success" or the within-episode
+        success gap EMA (t_last - t0) for mode="gap". Unvisited maps get
+        `map_curriculum_optimism` as their score so they keep being explored.
+        Returns a plain list (what the C side expects); None disables.
+        """
+        if getattr(self, "map_curriculum_mode", "none") == "none":
+            return None
+        if not hasattr(self, "_cur_succ_ema"):
+            return None  # first shared() call in __init__, before buffers exist
+        unvisited = self._cur_visits == 0
+        if self.map_curriculum_mode == "success":
+            score = 1.0 - self._cur_succ_ema
+        else:  # gap
+            score = np.maximum(self._cur_gap_ema, 0.0)
+        score = np.where(unvisited, self.map_curriculum_optimism, score)
+        total = score.sum()
+        if total <= 0:
+            return None
+        floor = self.map_curriculum_uniform_floor
+        w = floor / self.num_maps + (1.0 - floor) * score / total
+        return w.tolist()
+
+    def _curriculum_ego_mask(self):
+        if self._ego_mask is None or self._ego_mask.size != self.trial_ended_this_step.size:
+            m = np.zeros(self.trial_ended_this_step.size, dtype=bool)
+            m[[i for i in self.ego_ids if i < m.size]] = True
+            self._ego_mask = m
+        return self._ego_mask
+
+    def _curriculum_track_trial_ends(self):
+        """Record per-agent trial-0 / last-trial success as trials end (gb=3)."""
+        ended = self.trial_ended_this_step
+        if not ended.any():
+            return
+        idx = np.nonzero(ended & self._curriculum_ego_mask())[0]
+        if idx.size == 0:
+            return
+        succ = (self.trial_R_goal[idx] > 0.5).astype(np.float32)
+        first_time = self._ep_trial_count[idx] == 0
+        self._ep_first_succ[idx[first_time]] = succ[first_time]
+        self._ep_last_succ[idx] = succ
+        self._ep_trial_count[idx] += 1
+
+    def _curriculum_fold_episode(self):
+        """Fold episode-local per-agent stats into per-map EMAs, then reset.
+
+        Called at the map-resample boundary while self.map_ids /
+        self.agent_offsets still describe the finished episode.
+        """
+        a = self.map_curriculum_ema
+        counts = np.asarray(self._ep_trial_count)
+        mean_w = []
+        ego_mask = self._curriculum_ego_mask()
+        for j in range(self.num_envs):
+            lo, hi = self.agent_offsets[j], self.agent_offsets[j + 1]
+            agents = np.arange(lo, min(hi, ego_mask.size))
+            agents = agents[ego_mask[agents]]
+            agents = agents[counts[agents] > 0]
+            if agents.size == 0:
+                continue
+            m = self.map_ids[j]
+            succ0 = float(self._ep_first_succ[agents].mean())
+            gap = float((self._ep_last_succ[agents] - self._ep_first_succ[agents]).mean())
+            if self._cur_visits[m] == 0:
+                self._cur_succ_ema[m] = succ0
+                self._cur_gap_ema[m] = gap
+            else:
+                self._cur_succ_ema[m] += a * (succ0 - self._cur_succ_ema[m])
+                self._cur_gap_ema[m] += a * (gap - self._cur_gap_ema[m])
+            self._cur_visits[m] += 1
+        self._ep_trial_count[:] = 0
+        self._ep_first_succ[:] = 0.0
+        self._ep_last_succ[:] = 0.0
+        visited = self._cur_visits > 0
+        w = self._compute_map_weights()
+        if w is not None:
+            w = np.asarray(w)
+            p = w / w.sum()
+            ent = float(-(p * np.log(np.maximum(p, 1e-12))).sum())
+        else:
+            ent = float(np.log(self.num_maps))
+        self._pending_curriculum_log = {
+            "map_curriculum/maps_visited": int(visited.sum()),
+            "map_curriculum/mean_succ_ema_visited": float(self._cur_succ_ema[visited].mean()) if visited.any() else 0.5,
+            "map_curriculum/mean_gap_ema_visited": float(self._cur_gap_ema[visited].mean()) if visited.any() else 0.0,
+            "map_curriculum/weight_entropy": ent,
+            "map_curriculum/uniform_entropy": float(np.log(self.num_maps)),
+        }
+
     def _reinit_envs_with_new_maps(self):
         """Close + recreate C envs with fresh map_ids.
 
@@ -1098,6 +1223,8 @@ class Drive(pufferlib.PufferEnv):
             self.actions[self.co_player_ids] = co_player_actions
 
         binding.vec_step(self.c_envs)
+        if self.map_curriculum_mode != "none":
+            self._curriculum_track_trial_ends()
         if self.reward_only_last_scenario and self.current_scenario != self.k_scenarios - 1:
             self.rewards[:] = 0
         # Oracle: copy C obs into pufferl buffer + write oracle slots.
@@ -1134,6 +1261,9 @@ class Drive(pufferlib.PufferEnv):
             if self._pending_k_eff_log is not None:
                 info.append(self._pending_k_eff_log)
                 self._pending_k_eff_log = None
+            if self.map_curriculum_mode != "none" and self._pending_curriculum_log is not None:
+                info.append(self._pending_curriculum_log)
+                self._pending_curriculum_log = None
 
         # Per-scenario block (gb != 3 only): every scenario_length ticks,
         # aggregate per-scenario metrics, rotate partner / maps. Under gb=3
@@ -1248,6 +1378,12 @@ class Drive(pufferlib.PufferEnv):
                         "ego_curriculum/k_eff": int(self._current_k_eff()),
                         "ego_curriculum/episodes_seen": int(self._k_eff_curriculum_episodes_seen),
                     }
+
+                # Fold the finished episode's trial stats into the per-map
+                # curriculum EMAs while map_ids still describe THIS episode;
+                # the reinit below then samples from the updated weights.
+                if self.map_curriculum_mode != "none":
+                    self._curriculum_fold_episode()
 
                 self._reinit_envs_with_new_maps()
 

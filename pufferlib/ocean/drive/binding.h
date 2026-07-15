@@ -1,6 +1,45 @@
 #include "drive.h"
 #include "../env_binding.h"
 
+// Optional per-map sampling weights for shared() (curriculum / PLR-lite).
+// Returns a malloc'd array of length num_maps (caller frees) with the sum
+// written to *out_sum, or NULL for uniform sampling (kwarg absent, None,
+// wrong length, or non-positive sum — all silently fall back to uniform).
+static double *unpack_map_weights(PyObject *kwargs, int num_maps, double *out_sum) {
+    PyObject *w_obj = kwargs ? PyDict_GetItemString(kwargs, "map_sample_weights") : NULL;
+    if (!w_obj || w_obj == Py_None || !PyList_Check(w_obj) || PyList_Size(w_obj) != num_maps) {
+        return NULL;
+    }
+    double *w = malloc(num_maps * sizeof(double));
+    double sum = 0.0;
+    for (int i = 0; i < num_maps; i++) {
+        double v = PyFloat_AsDouble(PyList_GetItem(w_obj, i));
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+            v = 0.0;
+        }
+        w[i] = v > 0.0 ? v : 0.0;
+        sum += w[i];
+    }
+    if (sum <= 0.0) {
+        free(w);
+        return NULL;
+    }
+    *out_sum = sum;
+    return w;
+}
+
+static int sample_map_id_weighted(const double *w, double wsum, int num_maps) {
+    if (!w) return rand() % num_maps;
+    double r = ((double)rand() / ((double)RAND_MAX + 1.0)) * wsum;
+    double c = 0.0;
+    for (int i = 0; i < num_maps; i++) {
+        c += w[i];
+        if (r < c) return i;
+    }
+    return num_maps - 1;
+}
+
 static PyObject *my_shared_self_play(PyObject *self, PyObject *args, PyObject *kwargs) {
     char *map_dir = unpack_str(kwargs, "map_dir");
     int num_agents = unpack(kwargs, "num_agents");
@@ -28,12 +67,14 @@ static PyObject *my_shared_self_play(PyObject *self, PyObject *args, PyObject *k
     int max_envs = use_all_maps ? num_maps : num_agents;
     int map_idx = 0;
     int maps_checked = 0;
+    double map_w_sum = 0.0;
+    double *map_w = unpack_map_weights(kwargs, num_maps, &map_w_sum);
     PyObject *agent_offsets = PyList_New(max_envs + 1);
     PyObject *map_ids = PyList_New(max_envs);
     // getting env count
     while (use_all_maps ? map_idx < max_envs : total_agent_count < num_agents && env_count < max_envs) {
         char map_file[512];
-        int map_id = use_all_maps ? map_idx++ : rand() % num_maps;
+        int map_id = use_all_maps ? map_idx++ : sample_map_id_weighted(map_w, map_w_sum, num_maps);
         Drive *env = calloc(1, sizeof(Drive));
         env->init_mode = init_mode;
         env->max_controlled_agents = max_controlled_agents;
@@ -62,6 +103,7 @@ static PyObject *my_shared_self_play(PyObject *self, PyObject *args, PyObject *k
                     free(env);
                     Py_DECREF(agent_offsets);
                     Py_DECREF(map_ids);
+                    free(map_w);
                     char error_msg[256];
                     sprintf(error_msg, "No controllable agents found in any of the %d available maps", num_maps);
                     PyErr_SetString(PyExc_ValueError, error_msg);
@@ -108,6 +150,7 @@ static PyObject *my_shared_self_play(PyObject *self, PyObject *args, PyObject *k
     // resize lists
     PyObject *resized_agent_offsets = PyList_GetSlice(agent_offsets, 0, env_count + 1);
     PyObject *resized_map_ids = PyList_GetSlice(map_ids, 0, env_count);
+    free(map_w);
     PyObject *tuple = PyTuple_New(3);
     PyTuple_SetItem(tuple, 0, resized_agent_offsets);
     PyTuple_SetItem(tuple, 1, resized_map_ids);
@@ -253,6 +296,9 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
     PyObject *ego_agent_ids = PyList_New(max_envs);
     PyObject *coplayer_ids = PyList_New(max_envs);
 
+    double map_w_sum = 0.0;
+    double *map_w = unpack_map_weights(kwargs, num_maps, &map_w_sum);
+
     int consecutive_skips = 0;                // Safety counter for infinite loop detection
     int max_consecutive_skips = num_maps * 3; // Allow trying each map multiple times
 
@@ -270,6 +316,7 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
             Py_DECREF(ego_agent_ids);
             Py_DECREF(coplayer_ids);
             free(agent_roles);
+            free(map_w);
             PyErr_Format(PyExc_RuntimeError,
                          "shared_population_play: unable to find maps with active agents after %d attempts",
                          consecutive_skips);
@@ -277,7 +324,7 @@ static PyObject *my_shared_population_play(PyObject *self, PyObject *args, PyObj
         }
 
         char map_file[100];
-        int map_id = rand() % num_maps;
+        int map_id = sample_map_id_weighted(map_w, map_w_sum, num_maps);
         Drive *env = calloc(1, sizeof(Drive));
         snprintf(map_file, sizeof(map_file), "%s/map_%03d.bin", map_dir, map_id);
         env->entities = load_map_binary(map_file, env);
